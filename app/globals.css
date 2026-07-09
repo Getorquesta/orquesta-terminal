@@ -1,0 +1,194 @@
+@import "tailwindcss";
+@import "react-grid-layout/css/styles.css";
+@import "react-resizable/css/styles.css";
+
+/* ─────────────────────────────────────────────────────────────────────────
+   Orquesta OSS — design tokens
+   A professional "developer console" identity: cool terminal-glass neutrals,
+   a dialed-back emerald signal accent, a deliberate radius + elevation scale.
+   Remapping the zinc/green ramps here recolors every surface at once.
+   ───────────────────────────────────────────────────────────────────────── */
+@theme {
+  /* Neutrals — cool slate, biased toward a lit screen rather than dead grey */
+  --color-zinc-50:  #f5f7fa;
+  --color-zinc-100: #e8ebf1;
+  --color-zinc-200: #cfd4de;
+  --color-zinc-300: #c3c9d4;
+  --color-zinc-400: #969eae;
+  --color-zinc-500: #6f7784;
+  --color-zinc-600: #545c69;
+  --color-zinc-700: #333a45;
+  --color-zinc-800: #232831;
+  --color-zinc-900: #14171d;
+  --color-zinc-950: #0a0c10;
+
+  /* Accent — refined emerald signal (on-brand green, minus the neon) */
+  --color-green-300: #6ee7b7;
+  --color-green-400: #34d399;
+  --color-green-500: #14c48a;
+  --color-green-600: #0ba372;
+  --color-green-700: #0a875f;
+  --color-green-800: #0b5a44;
+  --color-green-900: #0c2b22;
+  --color-emerald-400: #34d399;
+  --color-emerald-500: #14c48a;
+  --color-emerald-600: #0ba372;
+
+  --font-sans: var(--font-geist-sans), ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --font-mono: var(--font-geist-mono), "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --font-display: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
+
+  --radius-lg: 0.625rem;
+  --radius-xl: 0.875rem;
+}
+
+:root {
+  --background: #0a0c10;
+  --foreground: #f5f7fa;
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* Headings feel drawn, not defaulted */
+h1, h2, h3 {
+  font-family: var(--font-display);
+  letter-spacing: -0.028em;
+  text-wrap: balance;
+}
+
+::selection {
+  background: rgba(20, 196, 138, 0.32);
+  color: #ecfdf5;
+}
+
+/* ── Reusable surface treatments ──────────────────────────────────────────── */
+
+/* Ambient console backdrop for full-page roots (landing, auth, dashboard). */
+.bg-console {
+  background:
+    radial-gradient(48rem 34rem at 82% -8%, rgba(20, 196, 138, 0.16), transparent 62%),
+    radial-gradient(42rem 34rem at -6% 104%, rgba(74, 118, 190, 0.13), transparent 60%),
+    var(--background);
+}
+
+/* Faint engineering grid — pairs with .bg-console on heroes. */
+.bg-grid {
+  background-image:
+    linear-gradient(to right, rgba(255, 255, 255, 0.05) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(255, 255, 255, 0.05) 1px, transparent 1px);
+  background-size: 40px 40px;
+  -webkit-mask-image: radial-gradient(ellipse 75% 65% at 50% 35%, #000 35%, transparent 100%);
+  mask-image: radial-gradient(ellipse 75% 65% at 50% 35%, #000 35%, transparent 100%);
+}
+
+/* Elevation: hairline top highlight + soft cast shadow (the "screen" look). */
+.elevated {
+  box-shadow:
+    inset 0 1px 0 0 rgba(255, 255, 255, 0.05),
+    0 1px 2px 0 rgba(0, 0, 0, 0.4),
+    0 12px 32px -14px rgba(0, 0, 0, 0.6);
+}
+
+/* Frosted glass panel — translucent surface + blur + luminous hairline. */
+.glass {
+  background: rgba(19, 22, 29, 0.72);
+  backdrop-filter: blur(14px) saturate(1.3);
+  -webkit-backdrop-filter: blur(14px) saturate(1.3);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow:
+    inset 0 1px 0 0 rgba(255, 255, 255, 0.06),
+    0 20px 48px -20px rgba(0, 0, 0, 0.7);
+}
+
+/* Emerald glow — for the primary accent (CTAs, live dots, focus moments). */
+.glow-accent {
+  box-shadow:
+    0 0 0 1px rgba(20, 196, 138, 0.35),
+    0 8px 28px -6px rgba(11, 163, 114, 0.5);
+}
+
+/* Brand gradient fill — CTAs and statement surfaces. */
+.btn-gradient {
+  background-image: linear-gradient(135deg, #17d29a 0%, #0ba372 55%, #0a875f 100%);
+  box-shadow:
+    inset 0 1px 0 0 rgba(255, 255, 255, 0.25),
+    0 6px 20px -6px rgba(11, 163, 114, 0.6);
+}
+.btn-gradient:hover {
+  background-image: linear-gradient(135deg, #22e3a9 0%, #12b981 55%, #0b9a6c 100%);
+  box-shadow:
+    inset 0 1px 0 0 rgba(255, 255, 255, 0.3),
+    0 10px 28px -6px rgba(11, 163, 114, 0.75);
+}
+
+/* Gradient text — for hero words that carry the accent. */
+.text-gradient {
+  background-image: linear-gradient(120deg, #d6fbef 0%, #34d399 45%, #14c48a 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+/* Interactive card: lifts and lights its border on hover. */
+.card-glow {
+  transition: transform 180ms cubic-bezier(0.16, 1, 0.3, 1),
+              border-color 180ms ease, box-shadow 180ms ease;
+}
+.card-glow:hover {
+  transform: translateY(-3px);
+  border-color: rgba(20, 196, 138, 0.4);
+  box-shadow:
+    inset 0 1px 0 0 rgba(255, 255, 255, 0.06),
+    0 0 0 1px rgba(20, 196, 138, 0.15),
+    0 22px 44px -20px rgba(11, 163, 114, 0.4);
+}
+
+/* Blinking terminal caret. */
+.caret {
+  display: inline-block;
+  width: 0.6ch;
+  background: #14c48a;
+  box-shadow: 0 0 10px rgba(20, 196, 138, 0.8);
+  animation: caret-blink 1.05s step-end infinite;
+}
+@keyframes caret-blink { 0%, 100% { opacity: 1 } 50% { opacity: 0 } }
+
+/* ── Chrome ───────────────────────────────────────────────────────────────── */
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #2b313b; border-radius: 4px; border: 2px solid transparent; background-clip: padding-box; }
+::-webkit-scrollbar-thumb:hover { background: #3a414d; background-clip: padding-box; }
+
+.react-grid-item.react-grid-placeholder {
+  background: rgba(11, 163, 114, 0.15);
+  border: 1px dashed rgba(20, 196, 138, 0.5);
+  border-radius: 10px;
+}
+
+/* ── Motion ───────────────────────────────────────────────────────────────── */
+@keyframes slide-in-from-bottom-2 {
+  from { opacity: 0; transform: translateY(0.5rem); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.animate-in.slide-in-from-bottom-2 {
+  animation: slide-in-from-bottom-2 200ms ease-out;
+}
+
+@keyframes rise-in {
+  from { opacity: 0; transform: translateY(0.75rem); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.animate-rise {
+  animation: rise-in 480ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-in, .animate-rise, .caret { animation: none; }
+  .card-glow:hover { transform: none; }
+}
