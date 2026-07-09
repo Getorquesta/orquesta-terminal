@@ -74,22 +74,13 @@ export default function TerminalWorkspacePage() {
   const { socket } = useSocket({ projectId, sessionToken })
   const hosted = useHostedAuth()
 
-  // Load projects + session token + persisted wallpaper
+  // Load projects from backend (optional — only if self-hosted OSS is running)
   useEffect(() => {
-    fetch(BACKEND_URL + '/api/projects')
-      .then(r => r.ok ? r.json() : null)
-      .then(data => {
-        if (!data) return
-        const list: Project[] = data.projects || []
-        setProjects(list)
-        const firstOnline = list.find(p => p.agentOnline) || list[0]
-        if (firstOnline) setProjectId(firstOnline.id)
-      })
-      .catch(() => {})
-    fetch(BACKEND_URL + '/api/auth/get-session')
-      .then(r => r.json())
-      .then(d => setSessionToken(d.session?.token || ''))
-      .catch(() => {})
+    // Try to connect to self-hosted backend, but don't block if unavailable
+    fetch(BACKEND_URL + '/api/projects', { mode: 'no-cors' })
+      .catch(() => {}) // silently fail — terminal works without backend
+    fetch(BACKEND_URL + '/api/auth/get-session', { mode: 'no-cors' })
+      .catch(() => {}) // silently fail
     try {
       const saved = localStorage.getItem(BG_KEY)
       if (saved) setBg({ ...DEFAULT_BG, ...JSON.parse(saved) })
