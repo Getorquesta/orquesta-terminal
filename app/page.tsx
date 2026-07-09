@@ -76,7 +76,7 @@ export default function TerminalWorkspacePage() {
   // Load projects + session token + persisted wallpaper
   useEffect(() => {
     fetch('/api/projects')
-      .then(r => (r.status === 401 ? (
+      .then(r => r.ok ? r.json() : null)
       .then(data => {
         if (!data) return
         const list: Project[] = data.projects || []
