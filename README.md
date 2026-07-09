@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="public/icon.png" width="80" height="80" alt="Orquesta Terminal" />
+  <img src="https://raw.githubusercontent.com/Getorquesta/orquesta-terminal/main/public/icon.png" width="80" height="80" alt="Orquesta Terminal" />
 </p>
 
 <h1 align="center">Orquesta Terminal</h1>
