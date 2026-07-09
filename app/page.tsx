@@ -1,7 +1,8 @@
 'use client'
 
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
-import Link from 'next/link'
+import { BACKEND_URL } from '@/lib/config'
+
 import Image from 'next/image'
 import { useRouter } from 'next/navigation'
 import { useSocket } from '@/hooks/useSocket'
@@ -75,7 +76,7 @@ export default function TerminalWorkspacePage() {
 
   // Load projects + session token + persisted wallpaper
   useEffect(() => {
-    fetch('/api/projects')
+    fetch(BACKEND_URL + '/api/projects')
       .then(r => r.ok ? r.json() : null)
       .then(data => {
         if (!data) return
@@ -85,7 +86,7 @@ export default function TerminalWorkspacePage() {
         if (firstOnline) setProjectId(firstOnline.id)
       })
       .catch(() => {})
-    fetch('/api/auth/get-session')
+    fetch(BACKEND_URL + '/api/auth/get-session')
       .then(r => r.json())
       .then(d => setSessionToken(d.session?.token || ''))
       .catch(() => {})
@@ -198,7 +199,7 @@ export default function TerminalWorkspacePage() {
       group: 'Navigate',
       label: 'Back to dashboard',
       icon: LayoutGrid,
-      run: () => router.push('/settings'),
+      run: () => {},
     })
     if (projectId) {
       list.push({
@@ -231,14 +232,6 @@ export default function TerminalWorkspacePage() {
       {/* ── Title bar ── */}
       <header className="glass relative z-20 flex items-center justify-between gap-3 px-4 py-2.5">
         <div className="flex items-center gap-3">
-          <Link
-            href="/"
-            className="flex items-center gap-1.5 rounded-lg px-2 py-1 text-sm text-zinc-400 transition-colors hover:bg-white/5 hover:text-white"
-            title="Manage projects & agents"
-          >
-            <Settings className="h-4 w-4" />
-            <span className="hidden sm:inline text-xs">Dashboard</span>
-          </Link>
           <div className="flex items-center gap-2">
             <Image src="/logo-mark.png" alt="Orquesta" width={20} height={20} className="invert" priority />
             <span className="font-semibold tracking-tight text-white">
@@ -435,11 +428,42 @@ export default function TerminalWorkspacePage() {
       <main className="relative z-10 flex flex-1 overflow-hidden">
         <div className="flex-1 overflow-auto p-4">
           {!projectId ? (
-            <EmptyState
-              title="No project selected"
-              hint="Select a project from the dropdown above. If you don't have one, go to Dashboard to create it."
-              action={<Link href="/settings"><Button variant="outline" size="sm">Go to Dashboard</Button></Link>}
-            />
+            <div className="flex h-full flex-col items-center justify-center text-center max-w-lg mx-auto">
+              <h2 className="text-xl font-bold text-white mb-2">Connect to a backend</h2>
+              <p className="text-sm text-zinc-400 mb-6">Choose how to use the terminal workspace.</p>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 w-full">
+                {/* Self-hosted option */}
+                <div className="rounded-xl border border-zinc-800 bg-zinc-900/50 p-5 text-left hover:border-zinc-700 transition-colors">
+                  <div className="flex items-center gap-2 mb-3">
+                    <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-green-500/20">
+                      <Wifi className="h-4 w-4 text-green-400" />
+                    </span>
+                    <h3 className="text-sm font-semibold text-white">Self-Hosted</h3>
+                  </div>
+                  <p className="text-xs text-zinc-400 mb-3">Connect to your local Orquesta OSS backend. Run the agent on your machine.</p>
+                  <p className="text-[10px] text-zinc-600 mb-2">1. Run orquesta-oss on :3000</p>
+                  <p className="text-[10px] text-zinc-600 mb-2">2. Create a project + token</p>
+                  <p className="text-[10px] text-zinc-600">3. Start the agent with that token</p>
+                  {projects.length > 0 && (
+                    <p className="mt-3 text-[10px] text-green-400">✓ Backend detected — select a project above</p>
+                  )}
+                </div>
+                {/* Hosted option */}
+                <div className="rounded-xl border border-zinc-800 bg-zinc-900/50 p-5 text-left hover:border-zinc-700 transition-colors">
+                  <div className="flex items-center gap-2 mb-3">
+                    <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-cyan-500/20">
+                      <Cloud className="h-4 w-4 text-cyan-400" />
+                    </span>
+                    <h3 className="text-sm font-semibold text-white">Orquesta Cloud</h3>
+                  </div>
+                  <p className="text-xs text-zinc-400 mb-3">Connect to getorquesta.com. No local backend needed — just a token.</p>
+                  <p className="text-[10px] text-zinc-600 mb-3">Click the &quot;Hosted&quot; button in the header to sign in.</p>
+                  {hosted.isLoggedIn && (
+                    <p className="text-[10px] text-cyan-400">✓ Connected to {hosted.auth?.organizationName}</p>
+                  )}
+                </div>
+              </div>
+            </div>
           ) : !online ? (
             <div className="flex h-full flex-col items-center justify-center text-center max-w-md mx-auto">
               <div className="mb-4 rounded-2xl border border-amber-500/20 bg-amber-500/5 p-5">
@@ -458,14 +482,7 @@ export default function TerminalWorkspacePage() {
                   Get your agent token from project settings. The agent connects automatically.
                 </p>
               </div>
-              <div className="mt-4 flex gap-2">
-                <Link href={`/projects/${projectId}`}>
-                  <Button variant="outline" size="sm">Project settings</Button>
-                </Link>
-                <Link href="/settings">
-                  <Button variant="outline" size="sm">All agents</Button>
-                </Link>
-              </div>
+              <p className="mt-3 text-[10px] text-zinc-500">Make sure the OSS backend is running on the URL configured in your .env</p>
             </div>
           ) : (
             <AgentGrid
