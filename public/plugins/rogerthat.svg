@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" fill="none" role="img" aria-label="RogerRat">
+  <path d="M 60 22 Q 100 4 140 22" stroke="#d6541f" stroke-width="4" stroke-linecap="round"/>
+  <path d="M 44 36 Q 100 8 156 36" stroke="#d6541f" stroke-width="4" stroke-linecap="round" opacity="0.55"/>
+  <path d="M 28 50 Q 100 12 172 50" stroke="#d6541f" stroke-width="4" stroke-linecap="round" opacity="0.25"/>
+  <line x1="150" y1="74" x2="170" y2="34" stroke="#1a1a1a" stroke-width="4" stroke-linecap="round"/>
+  <circle cx="170" cy="34" r="5" fill="#d6541f" stroke="#1a1a1a" stroke-width="2"/>
+  <path d="M 36 96 Q 100 38 164 96" stroke="#1a1a1a" stroke-width="6" fill="none" stroke-linecap="round"/>
+  <rect x="22" y="92" width="28" height="36" rx="7" fill="#1a1a1a"/>
+  <rect x="28" y="98" width="16" height="24" rx="4" fill="#d6541f"/>
+  <circle cx="36" cy="110" r="3" fill="#1a1a1a"/>
+  <rect x="150" y="92" width="28" height="36" rx="7" fill="#1a1a1a"/>
+  <rect x="156" y="98" width="16" height="24" rx="4" fill="#d6541f"/>
+  <circle cx="164" cy="110" r="3" fill="#1a1a1a"/>
+  <ellipse cx="76" cy="64" rx="8" ry="12" fill="#fffaef" stroke="#1a1a1a" stroke-width="3" transform="rotate(-15 76 64)"/>
+  <ellipse cx="76" cy="66" rx="3" ry="6" fill="#d6541f" opacity="0.45" transform="rotate(-15 76 66)"/>
+  <ellipse cx="124" cy="64" rx="8" ry="12" fill="#fffaef" stroke="#1a1a1a" stroke-width="3" transform="rotate(15 124 64)"/>
+  <ellipse cx="124" cy="66" rx="3" ry="6" fill="#d6541f" opacity="0.45" transform="rotate(15 124 66)"/>
+  <ellipse cx="100" cy="120" rx="44" ry="38" fill="#fffaef" stroke="#1a1a1a" stroke-width="3.5"/>
+  <circle cx="84" cy="114" r="5" fill="#1a1a1a"/>
+  <circle cx="116" cy="114" r="5" fill="#1a1a1a"/>
+  <circle cx="86" cy="112" r="1.6" fill="#fffaef"/>
+  <circle cx="118" cy="112" r="1.6" fill="#fffaef"/>
+  <ellipse cx="100" cy="140" rx="10" ry="7" fill="#fffaef" stroke="#1a1a1a" stroke-width="2.5"/>
+  <ellipse cx="100" cy="138" rx="4" ry="3" fill="#d6541f"/>
+  <path d="M 92 146 Q 100 152 108 146" stroke="#1a1a1a" stroke-width="2" fill="none" stroke-linecap="round"/>
+  <path d="M 60 134 L 36 130" stroke="#1a1a1a" stroke-width="2" stroke-linecap="round"/>
+  <path d="M 60 140 L 36 142" stroke="#1a1a1a" stroke-width="2" stroke-linecap="round"/>
+  <path d="M 140 134 L 164 130" stroke="#1a1a1a" stroke-width="2" stroke-linecap="round"/>
+  <path d="M 140 140 L 164 142" stroke="#1a1a1a" stroke-width="2" stroke-linecap="round"/>
+</svg>

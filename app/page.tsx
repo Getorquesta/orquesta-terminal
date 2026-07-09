@@ -243,7 +243,8 @@ export default function TerminalWorkspacePage() {
           </div>
         </div>
 
-        {/* Project selector — shows local projects (self-hosted mode) or hosted projects depending on connection */}
+        {/* Project selector — only shown when self-hosted backend has projects */}
+        {projects.length > 0 && (
         <div className="relative">
           <button
             onClick={() => setPickerOpen(o => !o)}
@@ -280,6 +281,7 @@ export default function TerminalWorkspacePage() {
             </>
           )}
         </div>
+        )}
 
         <div className="flex items-center gap-2">
           {/* Command palette trigger */}
@@ -427,74 +429,15 @@ export default function TerminalWorkspacePage() {
       {/* ── Workspace ── */}
       <main className="relative z-10 flex flex-1 overflow-hidden">
         <div className="flex-1 overflow-auto p-4">
-          {!projectId ? (
-            <div className="flex h-full flex-col items-center justify-center text-center max-w-lg mx-auto">
-              <h2 className="text-xl font-bold text-white mb-2">Connect to a backend</h2>
-              <p className="text-sm text-zinc-400 mb-6">Choose how to use the terminal workspace.</p>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 w-full">
-                {/* Self-hosted option */}
-                <div className="rounded-xl border border-zinc-800 bg-zinc-900/50 p-5 text-left hover:border-zinc-700 transition-colors">
-                  <div className="flex items-center gap-2 mb-3">
-                    <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-green-500/20">
-                      <Wifi className="h-4 w-4 text-green-400" />
-                    </span>
-                    <h3 className="text-sm font-semibold text-white">Self-Hosted</h3>
-                  </div>
-                  <p className="text-xs text-zinc-400 mb-3">Connect to your local Orquesta OSS backend. Run the agent on your machine.</p>
-                  <p className="text-[10px] text-zinc-600 mb-2">1. Run orquesta-oss on :3000</p>
-                  <p className="text-[10px] text-zinc-600 mb-2">2. Create a project + token</p>
-                  <p className="text-[10px] text-zinc-600">3. Start the agent with that token</p>
-                  {projects.length > 0 && (
-                    <p className="mt-3 text-[10px] text-green-400">✓ Backend detected — select a project above</p>
-                  )}
-                </div>
-                {/* Hosted option */}
-                <div className="rounded-xl border border-zinc-800 bg-zinc-900/50 p-5 text-left hover:border-zinc-700 transition-colors">
-                  <div className="flex items-center gap-2 mb-3">
-                    <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-cyan-500/20">
-                      <Cloud className="h-4 w-4 text-cyan-400" />
-                    </span>
-                    <h3 className="text-sm font-semibold text-white">Orquesta Cloud</h3>
-                  </div>
-                  <p className="text-xs text-zinc-400 mb-3">Connect to getorquesta.com. No local backend needed — just a token.</p>
-                  <p className="text-[10px] text-zinc-600 mb-3">Click the &quot;Hosted&quot; button in the header to sign in.</p>
-                  {hosted.isLoggedIn && (
-                    <p className="text-[10px] text-cyan-400">✓ Connected to {hosted.auth?.organizationName}</p>
-                  )}
-                </div>
-              </div>
-            </div>
-          ) : !online ? (
-            <div className="flex h-full flex-col items-center justify-center text-center max-w-md mx-auto">
-              <div className="mb-4 rounded-2xl border border-amber-500/20 bg-amber-500/5 p-5">
-                <WifiOff className="h-8 w-8 text-amber-400" />
-              </div>
-              <p className="text-lg font-semibold text-white">Agent offline</p>
-              <p className="mt-2 text-sm text-zinc-400">
-                The agent for <span className="text-white font-medium">{activeProject?.name}</span> isn&apos;t connected.
-              </p>
-              <div className="mt-4 w-full rounded-lg border border-zinc-800 bg-zinc-900/80 p-4 text-left">
-                <p className="text-xs font-medium text-zinc-300 mb-2">To connect, run in your terminal:</p>
-                <code className="block rounded bg-zinc-950 border border-zinc-800 px-3 py-2 text-xs font-mono text-green-400">
-                  cd /path/to/project && node agent/index.js --token oat_YOUR_TOKEN
-                </code>
-                <p className="mt-2 text-[10px] text-zinc-600">
-                  Get your agent token from project settings. The agent connects automatically.
-                </p>
-              </div>
-              <p className="mt-3 text-[10px] text-zinc-500">Make sure the OSS backend is running on the URL configured in your .env</p>
-            </div>
-          ) : (
-            <AgentGrid
-              ref={gridRef}
-              socket={socket}
-              storageKey={`orquesta-grid-${projectId}`}
-              terminalOpacity={bg.termOpacity}
-              hostedApiUrl={hosted.auth?.apiUrl}
-              hostedToken={hosted.auth?.token}
-              hostedProjects={hosted.auth?.projects}
-            />
-          )}
+          <AgentGrid
+            ref={gridRef}
+            socket={socket}
+            storageKey={`orquesta-grid-${projectId || 'standalone'}`}
+            terminalOpacity={bg.termOpacity}
+            hostedApiUrl={hosted.auth?.apiUrl}
+            hostedToken={hosted.auth?.token}
+            hostedProjects={hosted.auth?.projects}
+          />
         </div>
 
         {/* Timeline sidebar (hosted prompts) */}
@@ -1165,7 +1108,7 @@ const PLUGINS = [
     id: 'sudosudo',
     name: 'SudoSudo',
     url: 'https://sudosudo.dev',
-    icon: '🛡️',
+    logo: 'https://sudosudo.dev/favicon.ico',
     color: 'amber',
     tagline: 'Autonomous monitoring & remediation',
     description: 'Deploy AI-powered monitoring agents on your servers. Get alerts, automatic triage reports, and autonomous SSH-based remediation when things break.',
@@ -1181,7 +1124,7 @@ const PLUGINS = [
     id: 'rogerthat',
     name: 'RogerThat',
     url: 'https://rogerthat.chat',
-    icon: '📡',
+    logo: '/plugins/rogerthat.svg',
     color: 'cyan',
     tagline: 'Voice, Meet & Coordination for AI agents',
     description: 'Walkie-talkie for your AI agents. Real-time coordination channels, video/voice calls with a 3D avatar, and inter-agent messaging.',
@@ -1197,7 +1140,7 @@ const PLUGINS = [
     id: 'apumail',
     name: 'Apumail',
     url: 'https://apumail.com',
-    icon: '📬',
+    logo: 'https://apumail.com/favicon.ico',
     color: 'green',
     tagline: 'Agent-native temp mail',
     description: 'Two-way email inbox for AI agents. Each agent gets an @apumail.com address with automatic OTP extraction, webhook push on new mail, and REST/MCP access.',
@@ -1213,7 +1156,7 @@ const PLUGINS = [
     id: 'trustops',
     name: 'TrustOps',
     url: 'https://trustops.eu',
-    icon: '🔐',
+    logo: '/plugins/trustops.svg',
     color: 'blue',
     tagline: 'Policy-enforced AI with verifiable audit',
     description: 'Continuously building trustworthy software. Policy-enforced AI agents with cryptographically verifiable audit logs. Prove what your agent did, and that it was authorized.',
@@ -1273,7 +1216,7 @@ function PluginsPanel() {
                 className="w-full px-3 py-2.5 text-left"
               >
                 <div className="flex items-center gap-2">
-                  <span className="text-lg">{plugin.icon}</span>
+                  <img src={plugin.logo} alt={plugin.name} className="h-6 w-6 rounded" />
                   <div className="flex-1 min-w-0">
                     <p className="text-xs font-medium text-white">{plugin.name}</p>
                     <p className="text-[10px] text-zinc-500">{plugin.tagline}</p>
