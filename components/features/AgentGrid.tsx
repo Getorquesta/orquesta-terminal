@@ -231,8 +231,8 @@ function TerminalCell({
         return true
       })
 
-      term.writeln('\x1b[32mOrquesta OSS — Interactive Terminal\x1b[0m')
-      term.writeln('\x1b[90mWaiting for agent connection…\x1b[0m')
+      term.writeln('\x1b[32mOrquesta Terminal\x1b[0m')
+      term.writeln('\x1b[90mConnecting…\x1b[0m')
       term.writeln('')
 
       const startSession = (reconnect = false) => {

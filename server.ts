@@ -102,9 +102,115 @@ app.prepare().then(() => {
       if (term) { term.kill(); sessions.delete(sessionId) }
     })
 
+    // ── External Session Detection (import running CLIs) ──────────────
+    const fs = require('fs')
+    const fsp = require('fs/promises')
+    const path = require('path')
+    const os = require('os')
+    const activeTailers = new Map<string, { stop: () => void }>()
+
+    function claudeProjectsRoot() {
+      return path.join(os.homedir(), '.claude', 'projects')
+    }
+
+    function decodeDirName(encoded: string) {
+      return '/' + encoded.replace(/^-/, '').replace(/-/g, '/')
+    }
+
+    socket.on('sessions:external-list', async () => {
+      try {
+        const root = claudeProjectsRoot()
+        let projectDirs: string[]
+        try { projectDirs = await fsp.readdir(root) } catch { projectDirs = [] }
+
+        const found: any[] = []
+        const now = Date.now()
+        const RECENT_MS = 30 * 60 * 1000
+
+        for (const dir of projectDirs) {
+          const dirPath = path.join(root, dir)
+          let files: string[]
+          try { files = await fsp.readdir(dirPath) } catch { continue }
+
+          for (const file of files) {
+            if (!file.endsWith('.jsonl')) continue
+            const filePath = path.join(dirPath, file)
+            try {
+              const stat = await fsp.stat(filePath)
+              if (now - stat.mtimeMs > RECENT_MS) continue
+              found.push({
+                id: file.replace('.jsonl', ''),
+                cwd: decodeDirName(dir),
+                file: filePath,
+                lastActivity: stat.mtimeMs,
+                size: stat.size,
+                isActive: now - stat.mtimeMs < 60_000,
+              })
+            } catch { continue }
+          }
+        }
+
+        found.sort((a, b) => b.lastActivity - a.lastActivity)
+        socket.emit('sessions:external-list-result', { sessions: found.slice(0, 20) })
+      } catch (err: any) {
+        socket.emit('sessions:external-list-result', { sessions: [], error: err.message })
+      }
+    })
+
+    socket.on('sessions:external-attach', async ({ sessionId, file }: { sessionId: string; file: string }) => {
+      if (!sessionId || !file) return
+      if (activeTailers.has(sessionId)) return
+
+      let offset = 0
+      let stopped = false
+
+      // Read last 50 lines
+      try {
+        const content = await fsp.readFile(file, 'utf8')
+        const lines = content.trim().split('\n')
+        offset = Buffer.byteLength(content)
+        for (const line of lines.slice(-50)) {
+          try {
+            socket.emit('sessions:external-data', { sessionId, entry: JSON.parse(line) })
+          } catch {}
+        }
+      } catch {}
+
+      // Poll for new content
+      const poll = async () => {
+        while (!stopped) {
+          try {
+            const stat = await fsp.stat(file)
+            if (stat.size > offset) {
+              const fd = await fsp.open(file, 'r')
+              const buf = Buffer.alloc(stat.size - offset)
+              await fd.read(buf, 0, buf.length, offset)
+              await fd.close()
+              offset = stat.size
+              for (const line of buf.toString('utf8').trim().split('\n')) {
+                if (!line.trim()) continue
+                try {
+                  socket.emit('sessions:external-data', { sessionId, entry: JSON.parse(line) })
+                } catch {}
+              }
+            }
+          } catch {}
+          await new Promise(r => setTimeout(r, 500))
+        }
+      }
+      poll()
+      activeTailers.set(sessionId, { stop: () => { stopped = true } })
+    })
+
+    socket.on('sessions:external-detach', ({ sessionId }: { sessionId: string }) => {
+      const tailer = activeTailers.get(sessionId)
+      if (tailer) { tailer.stop(); activeTailers.delete(sessionId) }
+    })
+
     socket.on('disconnect', () => {
-      // Kill all sessions for this client
-      // (In a real app you'd track which sessions belong to which socket)
+      // Stop all tailers for this client
+      activeTailers.forEach(t => t.stop())
+      activeTailers.clear()
     })
   })
 

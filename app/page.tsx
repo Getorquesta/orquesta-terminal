@@ -1491,6 +1491,7 @@ function HostedHookPanel({
   hosted: ReturnType<typeof useHostedAuth>
 }) {
   const [open, setOpen] = useState(false)
+  const [tab, setTab] = useState<'cloud' | 'selfhosted'>('cloud')
   const [token, setToken] = useState('')
   const [apiUrl, setApiUrl] = useState('https://getorquesta.com')
   const [showUrl, setShowUrl] = useState(false)
@@ -1501,9 +1502,7 @@ function HostedHookPanel({
     try {
       await hosted.login(t, apiUrl)
       setToken('')
-    } catch {
-      // error handled in hook
-    }
+    } catch {}
   }
 
   return (
@@ -1511,10 +1510,10 @@ function HostedHookPanel({
       <button
         onClick={() => setOpen(o => !o)}
         className="flex items-center gap-1.5 rounded-lg border border-white/10 bg-white/5 px-2.5 py-1.5 text-xs text-zinc-300 transition-colors hover:bg-white/10 hover:text-white"
-        title="Connect to Orquesta Cloud"
+        title="Connect to backend"
       >
         <Cloud className="h-3.5 w-3.5" />
-        <span className="hidden sm:inline">Hosted</span>
+        <span className="hidden sm:inline">Connect</span>
         {hosted.isLoggedIn && (
           <span className="h-1.5 w-1.5 rounded-full bg-green-400 shadow-[0_0_6px_rgba(20,196,138,0.9)]" />
         )}
@@ -1524,126 +1523,124 @@ function HostedHookPanel({
         <>
           <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} />
           <div className="glass absolute right-0 top-full z-20 mt-2 w-80 rounded-xl p-3">
-            <div className="flex items-center justify-between">
-              <p className="font-mono text-[10px] uppercase tracking-wider text-zinc-500">Orquesta Cloud</p>
-              {hosted.isLoggedIn && (
-                <span className="flex items-center gap-1 font-mono text-[10px] text-green-300">
-                  <CheckCircle2 className="h-3 w-3" /> connected
-                </span>
-              )}
+            {/* Tabs */}
+            <div className="flex gap-1 mb-3 rounded-lg bg-zinc-800/50 p-0.5">
+              <button
+                onClick={() => setTab('cloud')}
+                className={`flex-1 rounded-md px-2.5 py-1.5 text-[10px] font-medium transition-colors ${
+                  tab === 'cloud' ? 'bg-zinc-700 text-white' : 'text-zinc-500 hover:text-zinc-300'
+                }`}
+              >
+                ☁ Orquesta Cloud
+              </button>
+              <button
+                onClick={() => setTab('selfhosted')}
+                className={`flex-1 rounded-md px-2.5 py-1.5 text-[10px] font-medium transition-colors ${
+                  tab === 'selfhosted' ? 'bg-zinc-700 text-white' : 'text-zinc-500 hover:text-zinc-300'
+                }`}
+              >
+                🖥 Self-Hosted
+              </button>
             </div>
 
-            {hosted.isLoggedIn ? (
-              <div className="mt-2">
-                <p className="text-xs text-zinc-300">
-                  <span className="text-white font-medium">{hosted.auth!.organizationName}</span>
-                  {' · '}{hosted.auth!.projects.length} project{hosted.auth!.projects.length !== 1 ? 's' : ''}
-                </p>
-                <div className="mt-2 space-y-1 max-h-40 overflow-y-auto">
-                  {hosted.auth!.projects.map(p => (
-                    <div key={p.id} className="flex items-center gap-2 rounded border border-zinc-800 bg-zinc-900/60 px-2.5 py-1.5">
+            {tab === 'cloud' && (
+              <>
+                {hosted.isLoggedIn ? (
+                  <div>
+                    <div className="flex items-center gap-1.5 mb-2">
                       <span className="h-1.5 w-1.5 rounded-full bg-green-400" />
-                      <span className="text-[11px] text-zinc-200 truncate">{p.name}</span>
+                      <span className="text-[10px] text-green-300 font-medium">Connected</span>
                     </div>
-                  ))}
-                </div>
-                <p className="mt-2 text-[10px] text-zinc-500">
-                  Select a project in each terminal pane to report sessions there.
-                </p>
-                <button
-                  onClick={hosted.logout}
-                  className="mt-2 text-[11px] text-zinc-400 underline-offset-2 hover:text-white hover:underline"
-                >
-                  Disconnect
-                </button>
-              </div>
-            ) : (
-              <div className="mt-2">
-                <p className="text-[11px] leading-relaxed text-zinc-400">
-                  Connect to see your projects and report sessions to the cloud.
-                </p>
-
-                {/* OAuth login — primary */}
-                <button
-                  onClick={() => hosted.loginWithBrowser(apiUrl).catch(() => {})}
-                  disabled={hosted.loading}
-                  className="mt-2.5 flex w-full items-center justify-center gap-1.5 rounded-lg bg-green-600/90 px-2.5 py-2 text-xs font-medium text-white transition-colors hover:bg-green-600 disabled:cursor-not-allowed disabled:bg-white/5 disabled:text-zinc-500"
-                >
-                  {hosted.loading ? (
-                    <><Loader2 className="h-3.5 w-3.5 animate-spin" /> Waiting…</>
-                  ) : (
-                    <><Cloud className="h-3.5 w-3.5" /> Sign in with browser</>
-                  )}
-                </button>
-
-                {/* Divider */}
-                <div className="mt-2.5 flex items-center gap-2">
-                  <div className="h-px flex-1 bg-white/10" />
-                  <span className="text-[9px] uppercase tracking-wider text-zinc-600">or token</span>
-                  <div className="h-px flex-1 bg-white/10" />
-                </div>
-
-                <div className="mt-2">
-                  <div className="flex items-center justify-between">
-                    <label className="font-mono text-[10px] uppercase tracking-wider text-zinc-500">Token</label>
-                    <a
-                      href={`${apiUrl.replace(/\/$/, '')}//settings`}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="flex items-center gap-1 text-[10px] text-green-300/80 hover:text-green-200"
-                    >
-                      Get a token <ExternalLink className="h-2.5 w-2.5" />
-                    </a>
-                  </div>
-                  <input
-                    value={token}
-                    onChange={e => setToken(e.target.value)}
-                    onKeyDown={e => { if (e.key === 'Enter') connect() }}
-                    type="password"
-                    placeholder="oclt_…"
-                    autoComplete="off"
-                    className="mt-1 h-8 w-full rounded-lg border border-white/10 bg-black/30 px-2.5 font-mono text-xs text-white placeholder:text-zinc-600 focus:border-green-600/60 focus:outline-none focus:ring-1 focus:ring-green-600/40"
-                  />
-                </div>
-
-                {showUrl ? (
-                  <div className="mt-2">
-                    <label className="font-mono text-[10px] uppercase tracking-wider text-zinc-500">URL</label>
-                    <input
-                      value={apiUrl}
-                      onChange={e => setApiUrl(e.target.value)}
-                      placeholder="https://getorquesta.com"
-                      className="mt-1 h-8 w-full rounded-lg border border-white/10 bg-black/30 px-2.5 text-xs text-white placeholder:text-zinc-600 focus:border-green-600/60 focus:outline-none focus:ring-1 focus:ring-green-600/40"
-                    />
+                    <p className="text-xs text-zinc-300">
+                      <span className="text-white font-medium">{hosted.auth!.organizationName}</span>
+                      {' · '}{hosted.auth!.projects.length} project{hosted.auth!.projects.length !== 1 ? 's' : ''}
+                    </p>
+                    <div className="mt-2 space-y-1 max-h-32 overflow-y-auto">
+                      {hosted.auth!.projects.map(p => (
+                        <div key={p.id} className="flex items-center gap-2 rounded border border-zinc-800 bg-zinc-900/60 px-2.5 py-1.5">
+                          <span className="h-1.5 w-1.5 rounded-full bg-green-400" />
+                          <span className="text-[11px] text-zinc-200 truncate">{p.name}</span>
+                        </div>
+                      ))}
+                    </div>
+                    <p className="mt-2 text-[10px] text-zinc-500">Select a project in each terminal pane dropdown.</p>
+                    <button onClick={hosted.logout} className="mt-2 text-[11px] text-zinc-400 hover:text-white hover:underline">
+                      Disconnect
+                    </button>
                   </div>
                 ) : (
-                  <button
-                    type="button"
-                    onClick={() => setShowUrl(true)}
-                    className="mt-1.5 text-[10px] text-zinc-600 hover:text-zinc-400"
-                  >
-                    Custom URL? →
-                  </button>
+                  <div>
+                    <p className="text-[11px] text-zinc-400 mb-2">Connect to getorquesta.com to report sessions and see timeline.</p>
+                    <button
+                      onClick={() => hosted.loginWithBrowser(apiUrl).catch(() => {})}
+                      disabled={hosted.loading}
+                      className="flex w-full items-center justify-center gap-1.5 rounded-lg bg-green-600/90 px-2.5 py-2 text-xs font-medium text-white transition-colors hover:bg-green-600 disabled:cursor-not-allowed disabled:bg-white/5 disabled:text-zinc-500"
+                    >
+                      {hosted.loading ? (
+                        <><Loader2 className="h-3.5 w-3.5 animate-spin" /> Waiting…</>
+                      ) : (
+                        <><Cloud className="h-3.5 w-3.5" /> Sign in with browser</>
+                      )}
+                    </button>
+                    <div className="mt-2.5 flex items-center gap-2">
+                      <div className="h-px flex-1 bg-white/10" />
+                      <span className="text-[9px] uppercase tracking-wider text-zinc-600">or token</span>
+                      <div className="h-px flex-1 bg-white/10" />
+                    </div>
+                    <input
+                      value={token}
+                      onChange={e => setToken(e.target.value)}
+                      onKeyDown={e => { if (e.key === 'Enter') connect() }}
+                      type="password"
+                      placeholder="oclt_…"
+                      autoComplete="off"
+                      className="mt-2 h-8 w-full rounded-lg border border-white/10 bg-black/30 px-2.5 font-mono text-xs text-white placeholder:text-zinc-600 focus:border-green-600/60 focus:outline-none focus:ring-1 focus:ring-green-600/40"
+                    />
+                    {showUrl ? (
+                      <input
+                        value={apiUrl}
+                        onChange={e => setApiUrl(e.target.value)}
+                        placeholder="https://getorquesta.com"
+                        className="mt-1.5 h-8 w-full rounded-lg border border-white/10 bg-black/30 px-2.5 text-xs text-white placeholder:text-zinc-600 focus:border-green-600/60 focus:outline-none focus:ring-1 focus:ring-green-600/40"
+                      />
+                    ) : (
+                      <button onClick={() => setShowUrl(true)} className="mt-1 text-[10px] text-zinc-600 hover:text-zinc-400">Custom URL? →</button>
+                    )}
+                    {hosted.error && <p className="mt-2 text-[11px] text-red-400">{hosted.error}</p>}
+                    <button
+                      onClick={connect}
+                      disabled={!token.trim() || hosted.loading}
+                      className="mt-2 flex w-full items-center justify-center gap-1.5 rounded-lg border border-white/10 bg-white/5 px-2.5 py-1.5 text-xs text-zinc-300 hover:bg-white/10 disabled:opacity-40"
+                    >
+                      Connect with token
+                    </button>
+                  </div>
                 )}
+              </>
+            )}
 
-                {hosted.error && (
-                  <p className="mt-2 flex items-start gap-1.5 text-[11px] text-red-400">
-                    <AlertCircle className="mt-0.5 h-3 w-3 shrink-0" />
-                    <span className="min-w-0 break-words">{hosted.error}</span>
-                  </p>
-                )}
-
-                <button
-                  onClick={connect}
-                  disabled={!token.trim() || hosted.loading}
-                  className="mt-2.5 flex w-full items-center justify-center gap-1.5 rounded-lg bg-green-600/90 px-2.5 py-2 text-xs font-medium text-white transition-colors hover:bg-green-600 disabled:cursor-not-allowed disabled:bg-white/5 disabled:text-zinc-500"
+            {tab === 'selfhosted' && (
+              <div>
+                <p className="text-[11px] text-zinc-400 mb-3">
+                  Connect to your own Orquesta OSS backend for project management, team, and prompt history.
+                </p>
+                <div className="rounded-lg border border-zinc-800 bg-zinc-900/80 p-3">
+                  <p className="text-[10px] text-zinc-300 font-medium mb-2">Setup:</p>
+                  <ol className="space-y-1.5 text-[10px] text-zinc-500">
+                    <li>1. Clone & run <code className="text-zinc-400">orquesta-oss</code> on port 3000</li>
+                    <li>2. Create a project and agent token</li>
+                    <li>3. Set <code className="text-zinc-400">NEXT_PUBLIC_BACKEND_URL=http://localhost:3000</code> in <code className="text-zinc-400">.env</code></li>
+                    <li>4. Restart this terminal</li>
+                  </ol>
+                </div>
+                <a
+                  href="https://github.com/Getorquesta/orquesta-oss"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="mt-3 flex items-center justify-center gap-1.5 rounded-lg border border-white/10 bg-white/5 px-2.5 py-1.5 text-[11px] text-zinc-300 hover:bg-white/10"
                 >
-                  {hosted.loading ? (
-                    <><Loader2 className="h-3.5 w-3.5 animate-spin" /> Connecting…</>
-                  ) : (
-                    <><Cloud className="h-3.5 w-3.5" /> Connect</>
-                  )}
-                </button>
+                  <ExternalLink className="h-3 w-3" /> GitHub: orquesta-oss
+                </a>
               </div>
             )}
           </div>
