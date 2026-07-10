@@ -63,11 +63,11 @@ app.prepare().then(() => {
 
       try {
         const term = ptyModule.spawn(command, args, {
-          name: 'xterm-color',
+          name: 'xterm-256color',
           rows,
           cols,
           cwd: process.env.HOME || process.cwd(),
-          env: process.env,
+          env: { ...process.env, TERM: 'xterm-256color', COLORTERM: 'truecolor' },
         })
 
         sessions.set(sessionId, term)
