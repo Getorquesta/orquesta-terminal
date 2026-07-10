@@ -245,7 +245,12 @@ function TerminalCell({
           hostedApiUrl: hostedRef.current.apiUrl, hostedToken: hostedRef.current.token,
         })
       }
-      startSession()
+      // Delay session start slightly so the container has its final size
+      // (prevents orquesta-cli/Ink from getting 24x80 when pane is larger)
+      setTimeout(() => {
+        try { fitAddon.fit() } catch {}
+        startSession()
+      }, 100)
 
       term.onData((data) => {
         socket?.emit('session:input', { sessionId: sessionIdRef.current, data })
