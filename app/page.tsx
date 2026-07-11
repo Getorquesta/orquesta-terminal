@@ -6,7 +6,7 @@ import { BACKEND_URL } from '@/lib/config'
 import Image from 'next/image'
 import { useRouter } from 'next/navigation'
 import { useSocket } from '@/hooks/useSocket'
-import { AgentGrid, type AgentGridHandle } from '@/components/features/AgentGrid'
+import { AgentGrid, type AgentGridHandle, type ImportSpec } from '@/components/features/AgentGrid'
 import { useHostedAuth, type HostedAuth } from '@/hooks/useHostedAuth'
 import { CommandPalette, type Command } from '@/components/features/CommandPalette'
 import { Button } from '@/components/ui/button'
@@ -16,6 +16,7 @@ import {
   LayoutGrid, Settings, RotateCcw, Paintbrush, Plus, X, Upload,
   Cloud, ExternalLink, Loader2, CheckCircle2, AlertCircle, Clock,
   Star, Tag, MessageSquare, Send, Monitor, Puzzle,
+  Activity, ScrollText,
 } from 'lucide-react'
 
 interface Project {
@@ -248,7 +249,7 @@ export default function TerminalWorkspacePage() {
           {pickerOpen && (
             <>
               <div className="fixed inset-0 z-10" onClick={() => setPickerOpen(false)} />
-              <div className="glass absolute right-0 top-full z-20 mt-2 w-64 rounded-xl p-1.5">
+              <div className="glass-solid absolute right-0 top-full z-20 mt-2 w-64 rounded-xl p-1.5">
                 <p className="px-2.5 py-1.5 font-mono text-[10px] uppercase tracking-wider text-zinc-500">Projects</p>
                 <div className="max-h-72 overflow-auto">
                   {projects.length === 0 && (
@@ -298,7 +299,7 @@ export default function TerminalWorkspacePage() {
             {bgOpen && (
               <>
                 <div className="fixed inset-0 z-10" onClick={() => setBgOpen(false)} />
-                <div className="glass absolute right-0 top-full z-20 mt-2 w-72 rounded-xl p-3">
+                <div className="glass-solid absolute right-0 top-full z-20 mt-2 w-72 rounded-xl p-3">
                   <p className="mb-2 font-mono text-[10px] uppercase tracking-wider text-zinc-500">Wallpaper</p>
                   <div className="grid grid-cols-5 gap-1.5">
                     {WALLPAPERS.map(w => (
@@ -398,9 +399,11 @@ export default function TerminalWorkspacePage() {
               <span className="hidden sm:inline">Timeline</span>
             </button>
           )}
-          {online && (
-            <ExternalSessionsButton socket={socket} />
-          )}
+          <ExternalSessionsButton
+            socket={socket}
+            onImport={(specs) => gridRef.current?.importSessions(specs)}
+          />
+          <TerminalMonitorButton socket={socket} />
           <button
             onClick={() => setPluginsOpen(o => !o)}
             className={`flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs transition-colors ${
@@ -1286,6 +1289,177 @@ function PluginsPanel() {
 }
 
 /**
+ * "Terminal Monitor" — clone of the orquesta-agent "All Logs" tab.
+ * Shows a grid of cards, one per open terminal (PTY session), each with a live
+ * log-viewer that streams that terminal's activity. Data comes from the server's
+ * `log` broadcast (session lifecycle + throttled output), grouped by sessionId.
+ */
+interface MonitorLog {
+  id: string
+  timestamp: number
+  level: string
+  message: string
+}
+
+interface MonitorSession {
+  id: string
+  cli: string
+  pid?: number
+  active: boolean
+  startedAt: number
+  lines: MonitorLog[]
+}
+
+function TerminalMonitorButton({ socket }: { socket: ReturnType<typeof useSocket>['socket'] }) {
+  const [open, setOpen] = useState(false)
+  // sessionId → session card state, in Map to preserve insertion order
+  const [sessions, setSessions] = useState<Map<string, MonitorSession>>(new Map())
+
+  useEffect(() => {
+    if (!socket) return
+    const onLog = (data: {
+      sessionId?: string; level?: string; type?: string; message?: string
+      timestamp?: number; cli?: string; event?: string; pid?: number
+    }) => {
+      const sid = data.sessionId
+      if (!sid) return
+      const ts = data.timestamp ?? Date.now()
+      setSessions(prev => {
+        const next = new Map(prev)
+        const cur = next.get(sid) ?? {
+          id: sid, cli: data.cli || 'shell', active: true, startedAt: ts, lines: [],
+        }
+        const line: MonitorLog = {
+          id: `${ts}-${Math.random().toString(36).slice(2, 8)}`,
+          timestamp: ts,
+          level: data.level || 'info',
+          message: data.message || '',
+        }
+        const updated: MonitorSession = {
+          ...cur,
+          cli: data.cli || cur.cli,
+          pid: data.pid ?? cur.pid,
+          active: data.event === 'ended' ? false : data.event === 'started' ? true : cur.active,
+          lines: [...cur.lines.slice(-149), line],
+        }
+        next.set(sid, updated)
+        return next
+      })
+    }
+    socket.on('log', onLog)
+    return () => { socket.off('log', onLog) }
+  }, [socket])
+
+  const list = [...sessions.values()].sort((a, b) =>
+    (Number(b.active) - Number(a.active)) || (b.startedAt - a.startedAt))
+  const activeCount = list.filter(s => s.active).length
+
+  return (
+    <div className="relative">
+      <button
+        onClick={() => setOpen(o => !o)}
+        className="flex items-center gap-1.5 rounded-lg border border-white/10 bg-white/5 px-2.5 py-1.5 text-xs text-zinc-300 transition-colors hover:bg-white/10 hover:text-white"
+        title="Terminal monitor — live logs from all open terminals"
+      >
+        <Activity className="h-3.5 w-3.5" />
+        <span className="hidden sm:inline">Monitor</span>
+        {activeCount > 0 && (
+          <span className="rounded-full bg-green-500/20 px-1.5 text-[9px] font-mono text-green-300">
+            {activeCount}
+          </span>
+        )}
+      </button>
+
+      {open && (
+        <>
+          <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} />
+          <div className="glass-solid absolute right-0 top-full z-20 mt-2 w-[34rem] max-w-[92vw] rounded-xl p-3 max-h-[76vh] overflow-hidden flex flex-col">
+            <div className="flex items-center justify-between mb-2.5">
+              <div className="flex items-center gap-1.5">
+                <span className="relative flex h-2 w-2">
+                  <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-green-400 opacity-50" />
+                  <span className="relative inline-flex h-2 w-2 rounded-full bg-green-500" />
+                </span>
+                <p className="font-mono text-[10px] uppercase tracking-wider text-zinc-500">
+                  All Logs — {activeCount} live
+                </p>
+              </div>
+              <button
+                onClick={() => setSessions(new Map())}
+                disabled={sessions.size === 0}
+                className="text-[10px] text-zinc-500 hover:text-white disabled:opacity-40"
+              >
+                Clear
+              </button>
+            </div>
+
+            {list.length === 0 ? (
+              <div className="flex flex-col items-center justify-center py-12 text-zinc-600 gap-1.5">
+                <ScrollText className="h-7 w-7 text-zinc-700" />
+                <p className="text-xs">No terminals running</p>
+                <p className="text-[10px] text-zinc-700">
+                  Open a terminal and it will stream here.
+                </p>
+              </div>
+            ) : (
+              <div className="flex-1 overflow-y-auto grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                {list.map(s => (
+                  <MonitorCard key={s.id} session={s} />
+                ))}
+              </div>
+            )}
+          </div>
+        </>
+      )}
+    </div>
+  )
+}
+
+function MonitorCard({ session }: { session: MonitorSession }) {
+  const viewRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (viewRef.current) viewRef.current.scrollTop = viewRef.current.scrollHeight
+  }, [session.lines.length])
+
+  const lineColor = (level: string) => {
+    switch (level) {
+      case 'error': return 'text-red-400'
+      case 'warn': return 'text-yellow-400'
+      case 'success': return 'text-green-400'
+      default: return 'text-zinc-300'
+    }
+  }
+
+  return (
+    <div className="rounded-lg border border-white/10 bg-black/30 overflow-hidden flex flex-col min-h-[160px]">
+      <div className="flex items-center justify-between px-2.5 py-1.5 border-b border-white/5 bg-white/5">
+        <span className="flex items-center gap-1.5 text-[11px] text-zinc-200">
+          <span className={`h-1.5 w-1.5 rounded-full ${session.active ? 'bg-green-400 animate-pulse' : 'bg-zinc-600'}`} />
+          <span className="font-mono">{session.cli}</span>
+        </span>
+        <span className="text-[9px] text-zinc-600 font-mono">
+          {session.pid ? `PID ${session.pid}` : session.id.slice(0, 8)}
+        </span>
+      </div>
+      <div ref={viewRef} className="flex-1 max-h-40 overflow-y-auto px-2 py-1.5 font-mono text-[10px] leading-relaxed">
+        {session.lines.length === 0 ? (
+          <p className="text-zinc-700">waiting for output…</p>
+        ) : (
+          session.lines.map(l => (
+            <div key={l.id} className="flex gap-1.5">
+              <span className="shrink-0 text-zinc-700">
+                [{new Date(l.timestamp).toLocaleTimeString()}]
+              </span>
+              <span className={`break-all ${lineColor(l.level)}`}>{l.message}</span>
+            </div>
+          ))
+        )}
+      </div>
+    </div>
+  )
+}
+
+/**
  * "Import Sessions" — detects Claude/orquesta-cli sessions running outside
  * the OSS and lets the user attach (read-only tail of the JSONL transcript).
  */
@@ -1298,7 +1472,10 @@ interface ExternalSession {
   isActive: boolean
 }
 
-function ExternalSessionsButton({ socket }: { socket: ReturnType<typeof useSocket>['socket'] }) {
+function ExternalSessionsButton({ socket, onImport }: {
+  socket: ReturnType<typeof useSocket>['socket']
+  onImport?: (specs: ImportSpec[]) => void
+}) {
   const [open, setOpen] = useState(false)
   const [sessions, setSessions] = useState<ExternalSession[]>([])
   const [loading, setLoading] = useState(false)
@@ -1364,6 +1541,24 @@ function ExternalSessionsButton({ socket }: { socket: ReturnType<typeof useSocke
     setTranscript([])
   }
 
+  // Detected sessions live under ~/.claude/projects, so they're Claude sessions:
+  // recreate each as a live pane that resumes the conversation in its own cwd.
+  const toSpec = (s: ExternalSession): ImportSpec => ({
+    cliType: 'claude',
+    cwd: s.cwd,
+    resumeId: s.id,
+    name: s.cwd.split('/').filter(Boolean).pop() || '',
+  })
+  const importOne = (s: ExternalSession) => {
+    onImport?.([toSpec(s)])
+    setOpen(false)
+  }
+  const importAll = () => {
+    if (!sessions.length) return
+    onImport?.(sessions.map(toSpec))
+    setOpen(false)
+  }
+
   const relTime = (ms: number) => {
     const s = Math.floor((Date.now() - ms) / 1000)
     if (s < 60) return `${s}s ago`
@@ -1388,14 +1583,25 @@ function ExternalSessionsButton({ socket }: { socket: ReturnType<typeof useSocke
       {open && (
         <>
           <div className="fixed inset-0 z-10" onClick={() => { setOpen(false); detach() }} />
-          <div className="glass absolute right-0 top-full z-20 mt-2 w-96 rounded-xl p-3 max-h-[70vh] overflow-hidden flex flex-col">
+          <div className="glass-solid absolute right-0 top-full z-20 mt-2 w-96 rounded-xl p-3 max-h-[70vh] overflow-hidden flex flex-col">
             <div className="flex items-center justify-between mb-2">
               <p className="font-mono text-[10px] uppercase tracking-wider text-zinc-500">
                 External Sessions
               </p>
-              <button onClick={fetchSessions} className="text-[10px] text-zinc-500 hover:text-white">
-                ↻ Refresh
-              </button>
+              <div className="flex items-center gap-2">
+                {!attached && sessions.length > 0 && (
+                  <button
+                    onClick={importAll}
+                    className="flex items-center gap-1 rounded bg-cyan-500/15 px-1.5 py-0.5 text-[10px] text-cyan-300 hover:bg-cyan-500/25"
+                    title="Open every detected session as a live terminal pane"
+                  >
+                    <Plus className="h-2.5 w-2.5" /> Import all ({sessions.length})
+                  </button>
+                )}
+                <button onClick={fetchSessions} className="text-[10px] text-zinc-500 hover:text-white">
+                  ↻ Refresh
+                </button>
+              </div>
             </div>
 
             {!attached ? (
@@ -1414,10 +1620,9 @@ function ExternalSessionsButton({ socket }: { socket: ReturnType<typeof useSocke
                   </div>
                 ) : (
                   sessions.map(s => (
-                    <button
+                    <div
                       key={s.id}
-                      onClick={() => attach(s)}
-                      className="w-full rounded-lg border border-zinc-800 bg-zinc-900/60 px-2.5 py-2 text-left hover:border-zinc-700 transition-colors"
+                      className="group rounded-lg border border-zinc-800 bg-zinc-900/60 px-2.5 py-2 hover:border-cyan-700/50 transition-colors"
                     >
                       <div className="flex items-center gap-2">
                         <span className={`h-2 w-2 rounded-full ${s.isActive ? 'bg-cyan-400 animate-pulse' : 'bg-zinc-600'}`} />
@@ -1427,10 +1632,28 @@ function ExternalSessionsButton({ socket }: { socket: ReturnType<typeof useSocke
                         <span className="text-[9px] text-zinc-600">{relTime(s.lastActivity)}</span>
                       </div>
                       <p className="mt-0.5 text-[9px] text-zinc-500 truncate font-mono">{s.cwd}</p>
-                      <p className="mt-0.5 text-[9px] text-zinc-600">
-                        {s.isActive ? '● active' : '○ idle'} · {Math.round(s.size / 1024)}KB
-                      </p>
-                    </button>
+                      <div className="mt-1 flex items-center justify-between">
+                        <span className="text-[9px] text-zinc-600">
+                          {s.isActive ? '● active' : '○ idle'} · {Math.round(s.size / 1024)}KB
+                        </span>
+                        <div className="flex items-center gap-1.5">
+                          <button
+                            onClick={() => attach(s)}
+                            className="text-[9px] text-zinc-500 hover:text-white"
+                            title="Preview transcript (read-only)"
+                          >
+                            Preview
+                          </button>
+                          <button
+                            onClick={() => importOne(s)}
+                            className="flex items-center gap-1 rounded bg-cyan-500/15 px-1.5 py-0.5 text-[9px] text-cyan-300 hover:bg-cyan-500/25"
+                            title="Open as a live terminal (resumes the session)"
+                          >
+                            <Plus className="h-2.5 w-2.5" /> Import
+                          </button>
+                        </div>
+                      </div>
+                    </div>
                   ))
                 )}
               </div>
@@ -1522,7 +1745,7 @@ function HostedHookPanel({
       {open && (
         <>
           <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} />
-          <div className="glass absolute right-0 top-full z-20 mt-2 w-80 rounded-xl p-3">
+          <div className="glass-solid absolute right-0 top-full z-20 mt-2 w-80 rounded-xl p-3">
             {/* Tabs */}
             <div className="flex gap-1 mb-3 rounded-lg bg-zinc-800/50 p-0.5">
               <button

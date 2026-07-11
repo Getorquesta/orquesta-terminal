@@ -40,11 +40,32 @@ app.prepare().then(() => {
   // Track active PTY sessions
   const sessions = new Map<string, any>()
 
+  // ── Terminal Monitor (live activity log broadcast to all clients) ──
+  const activityAt = new Map<string, number>()
+  const stripAnsi = (s: string) =>
+    s.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '').replace(/\x1b\][^\x07]*(\x07|\x1b\\)/g, '')
+
+  function logTerminal(level: string, message: string, sessionId: string, extra: Record<string, unknown> = {}) {
+    io.emit('log', { level, type: 'session', message, sessionId, timestamp: Date.now(), ...extra })
+  }
+
+  function logActivity(sessionId: string, label: string, data: string) {
+    const now = Date.now()
+    if (now - (activityAt.get(sessionId) || 0) < 1500) return
+    const line = stripAnsi(data).split('\n').map(l => l.trim()).filter(Boolean).pop()
+    if (!line) return
+    activityAt.set(sessionId, now)
+    io.emit('log', {
+      level: 'info', type: 'output', sessionId, cli: label, timestamp: now,
+      message: line.slice(0, 200),
+    })
+  }
+
   io.on('connection', (socket) => {
     console.log('[terminal] Client connected:', socket.id)
 
     // Spawn a PTY session
-    socket.on('session:start', ({ sessionId, cliType = 'shell', rows = 24, cols = 80 }) => {
+    socket.on('session:start', ({ sessionId, cliType = 'shell', rows = 24, cols = 80, cwd, resumeId }) => {
       if (!ptyModule) {
         socket.emit('session:error', { sessionId, error: 'node-pty not installed' })
         return
@@ -55,10 +76,17 @@ app.prepare().then(() => {
       let args: string[] = []
 
       switch (cliType) {
-        case 'claude': command = 'claude'; break
-        case 'orquesta': command = 'orquesta'; break
+        case 'claude': command = 'claude'; if (resumeId) args = ['--resume', resumeId]; break
+        case 'orquesta': command = 'orquesta'; if (resumeId) args = ['--resume', resumeId]; break
         case 'kimi': command = 'kimi'; break
+        case 'kiro': command = 'kiro-cli'; args = ['chat']; if (resumeId) args.push('--resume-id', resumeId); break
         case 'opencode': command = 'opencode'; break
+      }
+
+      // Imported panes spawn in the original session's directory when it exists.
+      let spawnCwd = process.env.HOME || process.cwd()
+      if (cwd) {
+        try { if (require('fs').statSync(cwd).isDirectory()) spawnCwd = cwd } catch {}
       }
 
       try {
@@ -66,7 +94,7 @@ app.prepare().then(() => {
           name: 'xterm-256color',
           rows,
           cols,
-          cwd: process.env.HOME || process.cwd(),
+          cwd: spawnCwd,
           env: { ...process.env, TERM: 'xterm-256color', COLORTERM: 'truecolor' },
         })
 
@@ -74,16 +102,21 @@ app.prepare().then(() => {
 
         term.onData((data: string) => {
           socket.emit('session:output', { sessionId, data })
+          logActivity(sessionId, cliType, data)
         })
 
         term.onExit(() => {
           sessions.delete(sessionId)
+          activityAt.delete(sessionId)
           socket.emit('session:ended', { sessionId })
+          logTerminal('warn', `■ ${cliType} session ended`, sessionId, { cli: cliType, event: 'ended' })
         })
 
         socket.emit('session:started', { sessionId, cliType })
+        logTerminal('success', `▶ ${cliType} session started`, sessionId, { cli: cliType, event: 'started', pid: term.pid })
       } catch (err: any) {
         socket.emit('session:error', { sessionId, error: err.message })
+        logTerminal('error', `✕ ${cliType} failed: ${err.message}`, sessionId, { cli: cliType, event: 'error' })
       }
     })
 

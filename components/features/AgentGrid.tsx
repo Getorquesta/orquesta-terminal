@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect, useRef, useCallback, forwardRef, useImperativeHandle } from 'react'
+import { useState, useEffect, useMemo, useRef, useCallback, forwardRef, useImperativeHandle } from 'react'
 import { ResponsiveGridLayout, useContainerWidth } from 'react-grid-layout'
 import type { LayoutItem, ResponsiveLayouts } from 'react-grid-layout'
 import { Socket } from 'socket.io-client'
@@ -20,6 +20,18 @@ interface GridCell {
   name: string
   /** Each pane can target a different hosted project for hook reporting. */
   hostedProjectId?: string
+  /** Imported panes start their PTY in this working directory. */
+  cwd?: string
+  /** For imported CLI sessions: resume this session id (e.g. `claude --resume <id>`). */
+  resumeId?: string
+}
+
+/** One external session to import as a live terminal pane. */
+export interface ImportSpec {
+  cliType: CliType
+  cwd?: string
+  resumeId?: string
+  name?: string
 }
 
 // On-brand terminal theme — cohesive with the app palette (globals.css):
@@ -57,6 +69,7 @@ const CLI_OPTIONS = [
   { value: 'claude', label: 'Claude' },
   { value: 'orquesta', label: 'Orquesta' },
   { value: 'kimi', label: 'Kimi' },
+  { value: 'kiro', label: 'Kiro' },
   { value: 'opencode', label: 'OpenCode' },
 ] as const
 
@@ -85,6 +98,10 @@ interface TerminalCellProps {
   hostedProjects?: HostedProject[]
   /** This pane's selected hosted project. */
   hostedProjectId?: string
+  /** Imported panes: working directory to spawn the PTY in. */
+  cwd?: string
+  /** Imported panes: resume this CLI session id (e.g. claude --resume). */
+  resumeId?: string
   onClose: () => void
   onCliTypeChange: (v: CliType) => void
   onRename: (v: string) => void
@@ -98,13 +115,14 @@ interface TerminalCellProps {
 
 function TerminalCell({
   cellId, socket, cliType, name, fontSize, opacity, hostedApiUrl, hostedToken,
-  hostedProjects, hostedProjectId,
+  hostedProjects, hostedProjectId, cwd, resumeId,
   onClose, onCliTypeChange, onRename, onHostedProjectChange, onFocusCell, onNew, onArrange, onZoom, registerApi,
 }: TerminalCellProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const termRef = useRef<import('@xterm/xterm').Terminal | null>(null)
   const fitAddonRef = useRef<import('@xterm/addon-fit').FitAddon | null>(null)
   const sessionIdRef = useRef<string | null>(null)
+  const hoverTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [branch, setBranch] = useState<string | null>(null)
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState(name)
@@ -119,6 +137,8 @@ function TerminalCell({
   // panel doesn't restart the terminal — the next session picks it up.
   const hostedRef = useRef({ apiUrl: hostedApiUrl, token: hostedToken })
   hostedRef.current = { apiUrl: hostedApiUrl, token: hostedToken }
+  const importRef = useRef({ cwd, resumeId })
+  importRef.current = { cwd, resumeId }
 
   useEffect(() => { setDraft(name) }, [name])
 
@@ -243,6 +263,7 @@ function TerminalCell({
         socket?.emit('session:start', {
           sessionId, cellId, cliType, rows: term.rows, cols: term.cols,
           hostedApiUrl: hostedRef.current.apiUrl, hostedToken: hostedRef.current.token,
+          cwd: importRef.current.cwd, resumeId: importRef.current.resumeId,
         })
       }
       // Delay session start slightly so the container has its final size
@@ -345,6 +366,20 @@ function TerminalCell({
     <div
       className="flex h-full flex-col rounded-md border border-zinc-800 overflow-hidden backdrop-blur-sm"
       style={{ backgroundColor: `rgba(10, 12, 16, ${opacity})` }}
+      // Focus-follows-mouse: once the cursor settles on a pane (~150ms) it
+      // becomes active for the keyboard — no click needed. The delay avoids
+      // stealing focus while merely passing over, and we never steal it mid-
+      // selection so dragging to copy text across panes still works.
+      onMouseEnter={() => {
+        if (hoverTimerRef.current) clearTimeout(hoverTimerRef.current)
+        hoverTimerRef.current = setTimeout(() => {
+          if (!window.getSelection()?.isCollapsed) return
+          try { termRef.current?.focus() } catch {}
+        }, 150)
+      }}
+      onMouseLeave={() => {
+        if (hoverTimerRef.current) { clearTimeout(hoverTimerRef.current); hoverTimerRef.current = null }
+      }}
     >
       <div className="flex items-center justify-between gap-2 border-b border-zinc-800/80 px-2.5 py-1.5 drag-handle cursor-grab active:cursor-grabbing">
         <div className="flex min-w-0 items-center gap-2">
@@ -435,6 +470,8 @@ export interface AgentGridHandle {
   addTerminal: () => void
   arrange: () => void
   closeActive: () => void
+  /** Create one live terminal pane per external session, then tidy the grid. */
+  importSessions: (specs: ImportSpec[]) => void
 }
 
 interface AgentGridProps {
@@ -456,13 +493,20 @@ interface PersistShape {
   layouts: ResponsiveLayouts
 }
 
+// Total grid-row budget a tidy layout spans. Combined with a dynamic rowHeight
+// (see AgentGridInner), the grid always fills exactly the visible viewport.
+const GRID_ROWS = 12
+// Gap between panes (px) and estimated height of the Arrange/Add toolbar above.
+const GRID_MARGIN = 6
+const TOOLBAR_H = 44
+
 function buildTidyLayout(cells: GridCell[]): LayoutItem[] {
   const n = cells.length
   if (!n) return []
   const cols = Math.ceil(Math.sqrt(n))
   const rows = Math.ceil(n / cols)
   const w = Math.max(1, Math.floor(12 / cols))
-  const h = Math.max(4, Math.floor(24 / rows))
+  const h = Math.max(2, Math.floor(GRID_ROWS / rows))
   return cells.map((c, i) => ({
     i: c.id,
     x: (i % cols) * w,
@@ -470,19 +514,20 @@ function buildTidyLayout(cells: GridCell[]): LayoutItem[] {
     w,
     h,
     minW: 2,
-    minH: 3,
+    minH: 2,
   }))
 }
 
 function AgentGridInner({
-  socket, containerWidth, storageKey, terminalOpacity = 1, hostedApiUrl, hostedToken, hostedProjects,
+  socket, containerWidth, containerHeight, storageKey, terminalOpacity = 1, hostedApiUrl, hostedToken, hostedProjects,
   apiRef,
-}: AgentGridProps & { containerWidth: number; apiRef: React.MutableRefObject<AgentGridHandle> }) {
+}: AgentGridProps & { containerWidth: number; containerHeight: number; apiRef: React.MutableRefObject<AgentGridHandle> }) {
   const key = storageKey || STORAGE_KEY
   const [cells, setCells] = useState<GridCell[]>([])
   const [layouts, setLayouts] = useState<ResponsiveLayouts>({ lg: [] })
   const [fontSize, setFontSize] = useState(DEFAULT_FONT)
   const loadedRef = useRef(false)
+  const toolbarRef = useRef<HTMLDivElement>(null)
   const activeCellIdRef = useRef<string | null>(null)
   const cellApiRef = useRef<Map<string, CellApi>>(new Map())
   const cellsRef = useRef<GridCell[]>([])
@@ -526,16 +571,29 @@ function AgentGridInner({
     } catch {}
   }, [key, cells, layouts])
 
-  const addCell = useCallback(() => {
-    const id = `cell-${Date.now()}`
-    setCells((prev) => [...prev, { id, cliType: 'shell', name: '' }])
+  const addCell = useCallback((init?: Partial<Omit<GridCell, 'id'>>) => {
+    const id = `cell-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
+    setCells((prev) => [...prev, { id, cliType: 'shell', name: '', ...init }])
     setLayouts((prev) => {
       const lg = (prev.lg || []) as LayoutItem[]
       const col = lg.length % 2
-      const newItem: LayoutItem = { i: id, x: col * 6, y: Infinity, w: 6, h: 8, minW: 2, minH: 3 }
+      const newItem: LayoutItem = { i: id, x: col * 6, y: Infinity, w: 6, h: 6, minW: 2, minH: 2 }
       return { ...prev, lg: [...lg, newItem] }
     })
+    return id
   }, [])
+
+  // Import external sessions: one live pane each, resumed in its own cwd.
+  const importSessions = useCallback((specs: ImportSpec[]) => {
+    for (const s of specs) {
+      addCell({ cliType: s.cliType, name: s.name || '', cwd: s.cwd, resumeId: s.resumeId })
+    }
+    // Reflow into a tidy grid once the new cells have mounted.
+    setTimeout(() => {
+      setLayouts((prev) => ({ ...prev, lg: buildTidyLayout(cellsRef.current) }))
+      setTimeout(() => cellApiRef.current.forEach((a) => a.fit()), 80)
+    }, 60)
+  }, [addCell])
 
   const removeCell = useCallback((id: string) => {
     cellApiRef.current.delete(id)
@@ -591,8 +649,8 @@ function AgentGridInner({
 
   // Expose imperative controls to the host page (palette / buttons).
   useEffect(() => {
-    apiRef.current = { addTerminal: addCell, arrange, closeActive }
-  }, [apiRef, addCell, arrange, closeActive])
+    apiRef.current = { addTerminal: () => addCell(), arrange, closeActive, importSessions }
+  }, [apiRef, addCell, arrange, closeActive, importSessions])
 
   // Grid-level keyboard shortcuts for when NO terminal is focused (the focused
   // case is handled inside the pane so the keys don't reach the shell).
@@ -616,6 +674,18 @@ function AgentGridInner({
     setLayouts(allLayouts)
   }
 
+  // Dynamic row height: divide the visible area by the current layout's row span
+  // so the whole grid always fits the viewport — no page scroll to lose panes.
+  const rowHeight = useMemo(() => {
+    const items = (layouts.lg || []) as LayoutItem[]
+    const span = items.length ? Math.max(...items.map((it) => it.y + it.h)) : GRID_ROWS
+    // Measured toolbar height (incl. its bottom margin) when mounted; estimate otherwise.
+    const toolbarH = toolbarRef.current ? toolbarRef.current.offsetHeight + 12 : TOOLBAR_H
+    const avail = containerHeight - toolbarH
+    if (avail <= 0 || span <= 0) return 40
+    return Math.max(16, Math.floor((avail - (span - 1) * GRID_MARGIN) / span))
+  }, [layouts, containerHeight])
+
   if (cells.length === 0) {
     return (
       <div className="flex flex-col items-center justify-center py-24 text-center">
@@ -626,7 +696,7 @@ function AgentGridInner({
         <p className="mt-1 text-sm text-zinc-600 max-w-xs">
           Add terminal panes to run CLIs side by side. <span className="font-mono text-zinc-500">Alt+T</span> new · <span className="font-mono text-zinc-500">Ctrl+P</span> arrange.
         </p>
-        <Button onClick={addCell} className="mt-6" size="sm">
+        <Button onClick={() => addCell()} className="mt-6" size="sm">
           <Plus className="h-4 w-4" /> Add Terminal
         </Button>
       </div>
@@ -635,11 +705,11 @@ function AgentGridInner({
 
   return (
     <div>
-      <div className="mb-3 flex justify-end gap-2">
+      <div ref={toolbarRef} className="mb-3 flex justify-end gap-2">
         <Button onClick={arrange} size="sm" variant="outline" title="Auto-arrange & fit all panes (Ctrl+P)">
           <LayoutGrid className="h-4 w-4" /> Arrange
         </Button>
-        <Button onClick={addCell} size="sm" variant="outline" title="New terminal (Alt+T)">
+        <Button onClick={() => addCell()} size="sm" variant="outline" title="New terminal (Alt+T)">
           <Plus className="h-4 w-4" /> Add Terminal
         </Button>
       </div>
@@ -649,7 +719,9 @@ function AgentGridInner({
         layouts={layouts}
         breakpoints={{ lg: 1200, md: 996, sm: 768 }}
         cols={{ lg: 12, md: 8, sm: 4 }}
-        rowHeight={40}
+        rowHeight={rowHeight}
+        margin={[GRID_MARGIN, GRID_MARGIN]}
+        containerPadding={[0, 0]}
         onLayoutChange={handleLayoutChange}
         dragConfig={{ enabled: true, handle: '.drag-handle', bounded: true }}
         resizeConfig={{ enabled: true }}
@@ -667,12 +739,14 @@ function AgentGridInner({
               hostedToken={hostedToken}
               hostedProjects={hostedProjects}
               hostedProjectId={cell.hostedProjectId}
+              cwd={cell.cwd}
+              resumeId={cell.resumeId}
               onClose={() => removeCell(cell.id)}
               onCliTypeChange={(v) => setCellCli(cell.id, v)}
               onRename={(v) => setCellName(cell.id, v)}
               onHostedProjectChange={(v) => setCellHostedProject(cell.id, v)}
               onFocusCell={() => { activeCellIdRef.current = cell.id }}
-              onNew={addCell}
+              onNew={() => addCell()}
               onArrange={arrange}
               onZoom={zoom}
               registerApi={(api) => {
@@ -691,12 +765,33 @@ export const AgentGrid = forwardRef<AgentGridHandle, AgentGridProps>(function Ag
   { socket, storageKey, terminalOpacity, hostedApiUrl, hostedToken, hostedProjects }, ref,
 ) {
   const { containerRef, width } = useContainerWidth()
-  const apiRef = useRef<AgentGridHandle>({ addTerminal() {}, arrange() {}, closeActive() {} })
+  const [height, setHeight] = useState(0)
+  const apiRef = useRef<AgentGridHandle>({ addTerminal() {}, arrange() {}, closeActive() {}, importSessions() {} })
   useImperativeHandle(ref, () => ({
     addTerminal: () => apiRef.current.addTerminal(),
     arrange: () => apiRef.current.arrange(),
     closeActive: () => apiRef.current.closeActive(),
+    importSessions: (specs) => apiRef.current.importSessions(specs),
   }), [])
+
+  // Available height for the grid = the scroll container's inner content box
+  // (its clientHeight minus vertical padding). Keeps the grid fitting exactly
+  // what the user sees so panes never fall below the fold.
+  useEffect(() => {
+    const el = containerRef.current
+    const parent = el?.parentElement
+    if (!parent) return
+    const measure = () => {
+      const cs = getComputedStyle(parent)
+      const padY = parseFloat(cs.paddingTop || '0') + parseFloat(cs.paddingBottom || '0')
+      setHeight(Math.max(240, parent.clientHeight - padY))
+    }
+    measure()
+    window.addEventListener('resize', measure)
+    const ro = new ResizeObserver(measure)
+    ro.observe(parent)
+    return () => { window.removeEventListener('resize', measure); ro.disconnect() }
+  }, [containerRef])
 
   return (
     <div ref={containerRef}>
@@ -704,6 +799,7 @@ export const AgentGrid = forwardRef<AgentGridHandle, AgentGridProps>(function Ag
         <AgentGridInner
           socket={socket}
           containerWidth={width}
+          containerHeight={height}
           storageKey={storageKey}
           terminalOpacity={terminalOpacity}
           hostedApiUrl={hostedApiUrl}
