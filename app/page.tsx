@@ -688,17 +688,18 @@ function PromptCard({
 }
 
 function HostedTimeline({ auth }: { auth: HostedAuth }) {
-  const [tab, setTab] = useState<'timeline' | 'coordination'>('timeline')
+  const [tab, setTab] = useState<'timeline' | 'coordination' | 'team'>('timeline')
   const [selectedProjectId, setSelectedProjectId] = useState<string>(
     auth.projects.length === 1 ? auth.projects[0].id : ''
   )
+  const TAB_LABELS = { timeline: '⏱ Timeline', coordination: '🔗 Coordination', team: '💬 Team' } as const
 
   return (
     <aside className="relative z-10 flex w-72 shrink-0 flex-col border-l border-white/10 bg-zinc-900/80 backdrop-blur-sm">
       {/* Header with project selector */}
       <div className="flex items-center justify-between border-b border-white/10 px-3 py-2">
         <div className="flex items-center gap-2">
-          {(['timeline', 'coordination'] as const).map(t => (
+          {(['timeline', 'coordination', 'team'] as const).map(t => (
             <button
               key={t}
               onClick={() => setTab(t)}
@@ -706,7 +707,7 @@ function HostedTimeline({ auth }: { auth: HostedAuth }) {
                 tab === t ? 'text-green-400' : 'text-zinc-600 hover:text-zinc-400'
               }`}
             >
-              {t === 'timeline' ? '⏱ Timeline' : '🔗 Coordination'}
+              {TAB_LABELS[t]}
             </button>
           ))}
         </div>
@@ -727,10 +728,190 @@ function HostedTimeline({ auth }: { auth: HostedAuth }) {
       {/* Tab content */}
       {tab === 'timeline' ? (
         <TimelineTab auth={auth} selectedProjectId={selectedProjectId} />
-      ) : (
+      ) : tab === 'coordination' ? (
         <CoordinationTab auth={auth} selectedProjectId={selectedProjectId} />
+      ) : (
+        <TeamChatTab auth={auth} selectedProjectId={selectedProjectId} />
       )}
     </aside>
+  )
+}
+
+/** Team chat tab — human team chat (Slack-style) backed by the hosted project.
+ *  Talks to the CLI-token-authed /api/orquesta-cli/projects/:id/chat routes via
+ *  the proxy, and polls for new messages (no socket available with an oclt_ token). */
+interface TeamChatAuthor { id: string; full_name: string | null; avatar_url: string | null; email: string | null }
+interface TeamChatMessage {
+  id: string
+  author_id: string
+  content: string
+  created_at: string
+  parent_message_id: string | null
+  reply_count?: number
+  author?: TeamChatAuthor
+}
+
+function teamChatDisplayName(a?: TeamChatAuthor, fallbackId?: string): string {
+  return a?.full_name || a?.email?.split('@')[0] || (fallbackId ? `user-${fallbackId.slice(0, 4)}` : 'Unknown')
+}
+
+function TeamChatTab({ auth, selectedProjectId }: { auth: HostedAuth; selectedProjectId: string }) {
+  const [messages, setMessages] = useState<TeamChatMessage[]>([])
+  const [currentUserId, setCurrentUserId] = useState<string | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+  const [input, setInput] = useState('')
+  const [sending, setSending] = useState(false)
+  const scrollRef = useRef<HTMLDivElement>(null)
+  const atBottomRef = useRef(true)
+
+  const projectId = selectedProjectId || auth.projects[0]?.id
+
+  const fetchMessages = useCallback(async () => {
+    if (!projectId || !auth.token) return
+    try {
+      const res = await fetch('/api/hosted/proxy', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          url: `${auth.apiUrl}/api/orquesta-cli/projects/${projectId}/chat?limit=50`,
+          token: auth.token,
+        }),
+      })
+      if (!res.ok) {
+        const d = await res.json().catch(() => ({}))
+        throw new Error(d.error || `HTTP ${res.status}`)
+      }
+      const data = await res.json() as { messages?: TeamChatMessage[]; currentUserId?: string }
+      setMessages(data.messages || [])
+      if (data.currentUserId) setCurrentUserId(data.currentUserId)
+      setError(null)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to load')
+    } finally {
+      setLoading(false)
+    }
+  }, [auth.token, auth.apiUrl, projectId])
+
+  useEffect(() => {
+    setLoading(true)
+    setMessages([])
+    fetchMessages()
+    const t = setInterval(fetchMessages, 4000)
+    return () => clearInterval(t)
+  }, [fetchMessages])
+
+  // Keep pinned to the newest message when the user hasn't scrolled up.
+  useEffect(() => {
+    if (atBottomRef.current && scrollRef.current) {
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight
+    }
+  }, [messages])
+
+  const onScroll = () => {
+    const el = scrollRef.current
+    if (!el) return
+    atBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40
+  }
+
+  const send = useCallback(async () => {
+    const content = input.trim()
+    if (!content || !projectId || sending) return
+    setSending(true)
+    atBottomRef.current = true
+    try {
+      const res = await fetch('/api/hosted/proxy', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          url: `${auth.apiUrl}/api/orquesta-cli/projects/${projectId}/chat`,
+          token: auth.token,
+          method: 'POST',
+          body: { content },
+        }),
+      })
+      if (!res.ok) {
+        const d = await res.json().catch(() => ({}))
+        throw new Error(d.error || `HTTP ${res.status}`)
+      }
+      const created = await res.json() as TeamChatMessage
+      setInput('')
+      // Optimistically append (dedupe against the next poll by id).
+      setMessages(prev => (prev.some(m => m.id === created.id) ? prev : [...prev, created]))
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to send')
+    } finally {
+      setSending(false)
+    }
+  }, [input, projectId, sending, auth.apiUrl, auth.token])
+
+  if (!projectId) {
+    return <div className="flex-1 flex items-center justify-center p-4 text-center text-xs text-zinc-500">Select a project to open its team chat.</div>
+  }
+
+  return (
+    <div className="flex flex-1 flex-col overflow-hidden">
+      <div ref={scrollRef} onScroll={onScroll} className="flex-1 overflow-y-auto p-2 space-y-2">
+        {loading && messages.length === 0 ? (
+          <div className="flex items-center justify-center py-8 text-zinc-500 text-xs">
+            <Loader2 className="h-3 w-3 animate-spin mr-1.5" /> Loading…
+          </div>
+        ) : error && messages.length === 0 ? (
+          <div className="text-center py-6 text-xs text-red-400">{error}</div>
+        ) : messages.length === 0 ? (
+          <div className="text-center py-8 text-zinc-500 text-xs">No messages yet. Say hi 👋</div>
+        ) : (
+          messages.map(m => {
+            const mine = currentUserId != null && m.author_id === currentUserId
+            return (
+              <div key={m.id} className={`flex flex-col ${mine ? 'items-end' : 'items-start'}`}>
+                <div className="flex items-baseline gap-1.5 px-0.5">
+                  <span className="text-[10px] font-mono font-semibold text-zinc-400">
+                    {mine ? 'You' : teamChatDisplayName(m.author, m.author_id)}
+                  </span>
+                  <span className="text-[9px] text-zinc-600">
+                    {new Date(m.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                  </span>
+                </div>
+                <div className={`max-w-[85%] whitespace-pre-wrap break-words rounded-lg px-2.5 py-1.5 text-xs ${
+                  mine ? 'bg-green-600/25 text-green-50' : 'bg-zinc-800 text-zinc-200'
+                }`}>
+                  {m.content}
+                  {!!m.reply_count && (
+                    <span className="ml-1.5 text-[9px] text-zinc-500">↳ {m.reply_count}</span>
+                  )}
+                </div>
+              </div>
+            )
+          })
+        )}
+      </div>
+
+      <div className="border-t border-white/10 p-2">
+        {error && messages.length > 0 && (
+          <div className="mb-1 text-[10px] text-red-400">{error}</div>
+        )}
+        <div className="flex items-end gap-1.5">
+          <textarea
+            value={input}
+            onChange={e => setInput(e.target.value)}
+            onKeyDown={e => {
+              if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send() }
+            }}
+            placeholder="Message the team…  (Enter to send)"
+            rows={1}
+            className="flex-1 resize-none rounded bg-zinc-800 px-2 py-1.5 text-xs text-zinc-200 outline-none placeholder:text-zinc-600 focus:ring-1 focus:ring-green-600/40"
+          />
+          <button
+            onClick={send}
+            disabled={!input.trim() || sending}
+            className="rounded bg-green-600/80 px-2.5 py-1.5 text-xs font-medium text-white transition-colors hover:bg-green-600 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            {sending ? <Loader2 className="h-3 w-3 animate-spin" /> : 'Send'}
+          </button>
+        </div>
+      </div>
+    </div>
   )
 }
 
