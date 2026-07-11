@@ -692,37 +692,44 @@ function HostedTimeline({ auth }: { auth: HostedAuth }) {
   const [selectedProjectId, setSelectedProjectId] = useState<string>(
     auth.projects.length === 1 ? auth.projects[0].id : ''
   )
-  const TAB_LABELS = { timeline: '⏱ Timeline', coordination: '🔗 Coordination', team: '💬 Team' } as const
+  const TABS = [
+    { id: 'timeline', icon: '⏱', label: 'Timeline' },
+    { id: 'coordination', icon: '🔗', label: 'Coord' },
+    { id: 'team', icon: '💬', label: 'Team' },
+  ] as const
 
   return (
-    <aside className="relative z-10 flex w-72 shrink-0 flex-col border-l border-white/10 bg-zinc-900/80 backdrop-blur-sm">
-      {/* Header with project selector */}
-      <div className="flex items-center justify-between border-b border-white/10 px-3 py-2">
-        <div className="flex items-center gap-2">
-          {(['timeline', 'coordination', 'team'] as const).map(t => (
-            <button
-              key={t}
-              onClick={() => setTab(t)}
-              className={`text-[10px] font-mono uppercase tracking-wider transition-colors ${
-                tab === t ? 'text-green-400' : 'text-zinc-600 hover:text-zinc-400'
-              }`}
-            >
-              {TAB_LABELS[t]}
-            </button>
-          ))}
-        </div>
+    <aside className="relative z-10 flex w-80 shrink-0 flex-col border-l border-white/10 bg-zinc-900/80 backdrop-blur-sm">
+      {/* Header: project selector on its own row, then a full-width segmented tab bar */}
+      <div className="space-y-2 border-b border-white/10 p-2">
         {auth.projects.length > 1 && (
           <select
             value={selectedProjectId}
             onChange={e => setSelectedProjectId(e.target.value)}
-            className="max-w-[7rem] truncate rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] font-mono text-zinc-300 outline-none hover:bg-zinc-700 focus:ring-1 focus:ring-green-600/40"
+            className="w-full truncate rounded-md bg-zinc-800 px-2 py-1.5 text-xs font-medium text-zinc-300 outline-none hover:bg-zinc-700 focus:ring-1 focus:ring-green-600/40"
           >
-            <option value="">All</option>
+            <option value="">All projects</option>
             {auth.projects.map(p => (
               <option key={p.id} value={p.id}>{p.name}</option>
             ))}
           </select>
         )}
+        <div className="flex gap-0.5 rounded-lg bg-zinc-800/60 p-0.5">
+          {TABS.map(t => (
+            <button
+              key={t.id}
+              onClick={() => setTab(t.id)}
+              className={`flex flex-1 items-center justify-center gap-1 rounded-md px-2 py-1.5 text-[11px] font-medium transition-colors ${
+                tab === t.id
+                  ? 'bg-zinc-700 text-green-400 shadow-sm'
+                  : 'text-zinc-500 hover:bg-zinc-700/40 hover:text-zinc-300'
+              }`}
+            >
+              <span className="text-[13px] leading-none">{t.icon}</span>
+              <span>{t.label}</span>
+            </button>
+          ))}
+        </div>
       </div>
 
       {/* Tab content */}
@@ -741,12 +748,14 @@ function HostedTimeline({ auth }: { auth: HostedAuth }) {
  *  Talks to the CLI-token-authed /api/orquesta-cli/projects/:id/chat routes via
  *  the proxy, and polls for new messages (no socket available with an oclt_ token). */
 interface TeamChatAuthor { id: string; full_name: string | null; avatar_url: string | null; email: string | null }
+interface TeamChatMember { user_id: string; profile: TeamChatAuthor }
 interface TeamChatMessage {
   id: string
   author_id: string
   content: string
   created_at: string
   parent_message_id: string | null
+  mentions?: string[]
   reply_count?: number
   author?: TeamChatAuthor
 }
@@ -755,15 +764,38 @@ function teamChatDisplayName(a?: TeamChatAuthor, fallbackId?: string): string {
   return a?.full_name || a?.email?.split('@')[0] || (fallbackId ? `user-${fallbackId.slice(0, 4)}` : 'Unknown')
 }
 
+function memberName(m: TeamChatMember): string {
+  return m.profile.full_name || m.profile.email?.split('@')[0] || `user-${m.user_id.slice(0, 4)}`
+}
+
+function teamChatInitials(name: string): string {
+  return name.split(/\s+/).filter(Boolean).map(w => w[0]).slice(0, 2).join('').toUpperCase() || '?'
+}
+
+// A stable-ish color per user so avatars/names are distinguishable at a glance.
+function teamChatHue(id: string): number {
+  let h = 0
+  for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) % 360
+  return h
+}
+
 function TeamChatTab({ auth, selectedProjectId }: { auth: HostedAuth; selectedProjectId: string }) {
   const [messages, setMessages] = useState<TeamChatMessage[]>([])
+  const [members, setMembers] = useState<TeamChatMember[]>([])
   const [currentUserId, setCurrentUserId] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [input, setInput] = useState('')
   const [sending, setSending] = useState(false)
+  // @mention autocomplete
+  const [mentionQuery, setMentionQuery] = useState<string | null>(null)
+  const [mentionIndex, setMentionIndex] = useState(0)
   const scrollRef = useRef<HTMLDivElement>(null)
+  const taRef = useRef<HTMLTextAreaElement>(null)
   const atBottomRef = useRef(true)
+  // Optimistic messages not yet echoed back by the poll — kept visible so a
+  // poll that races ahead of the write can't wipe a just-sent message.
+  const pendingRef = useRef<TeamChatMessage[]>([])
 
   const projectId = selectedProjectId || auth.projects[0]?.id
 
@@ -783,7 +815,11 @@ function TeamChatTab({ auth, selectedProjectId }: { auth: HostedAuth; selectedPr
         throw new Error(d.error || `HTTP ${res.status}`)
       }
       const data = await res.json() as { messages?: TeamChatMessage[]; currentUserId?: string }
-      setMessages(data.messages || [])
+      const fetched = data.messages || []
+      const fetchedIds = new Set(fetched.map(m => m.id))
+      // Drop pending optimistic messages the server now returns; keep the rest.
+      pendingRef.current = pendingRef.current.filter(p => !fetchedIds.has(p.id))
+      setMessages([...fetched, ...pendingRef.current])
       if (data.currentUserId) setCurrentUserId(data.currentUserId)
       setError(null)
     } catch (e) {
@@ -796,10 +832,33 @@ function TeamChatTab({ auth, selectedProjectId }: { auth: HostedAuth; selectedPr
   useEffect(() => {
     setLoading(true)
     setMessages([])
+    pendingRef.current = []
     fetchMessages()
     const t = setInterval(fetchMessages, 4000)
     return () => clearInterval(t)
   }, [fetchMessages])
+
+  // Load project members once per project (for @mention autocomplete + name resolution).
+  useEffect(() => {
+    if (!projectId || !auth.token) return
+    let cancelled = false
+    ;(async () => {
+      try {
+        const res = await fetch('/api/hosted/proxy', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            url: `${auth.apiUrl}/api/orquesta-cli/projects/${projectId}/members`,
+            token: auth.token,
+          }),
+        })
+        if (!res.ok) return
+        const data = await res.json() as TeamChatMember[]
+        if (!cancelled) setMembers(Array.isArray(data) ? data : [])
+      } catch { /* non-fatal: mentions just won't autocomplete */ }
+    })()
+    return () => { cancelled = true }
+  }, [projectId, auth.token, auth.apiUrl])
 
   // Keep pinned to the newest message when the user hasn't scrolled up.
   useEffect(() => {
@@ -814,11 +873,58 @@ function TeamChatTab({ auth, selectedProjectId }: { auth: HostedAuth; selectedPr
     atBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40
   }
 
+  // Regex that matches @<known member name> in message content, longest name first.
+  const mentionRegex = useMemo(() => {
+    const names = members.map(memberName).filter(Boolean)
+    if (!names.length) return null
+    const escaped = names
+      .sort((a, b) => b.length - a.length)
+      .map(n => n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+    return new RegExp(`@(?:${escaped.join('|')})`, 'g')
+  }, [members])
+
+  const mentionMatches = useMemo(() => {
+    if (mentionQuery == null) return [] as TeamChatMember[]
+    const q = mentionQuery.toLowerCase()
+    const excludeSelf = (m: TeamChatMember) => m.user_id !== currentUserId
+    return members
+      .filter(excludeSelf)
+      .filter(m => memberName(m).toLowerCase().includes(q) || (m.profile.email || '').toLowerCase().includes(q))
+      .slice(0, 6)
+  }, [mentionQuery, members, currentUserId])
+
+  const handleChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    const val = e.target.value
+    setInput(val)
+    const pos = e.target.selectionStart ?? val.length
+    const match = val.slice(0, pos).match(/@(\w*)$/)
+    setMentionQuery(match ? match[1] : null)
+    setMentionIndex(0)
+  }
+
+  const pickMention = (m: TeamChatMember) => {
+    const ta = taRef.current
+    const pos = ta?.selectionStart ?? input.length
+    const before = input.slice(0, pos).replace(/@(\w*)$/, `@${memberName(m)} `)
+    const next = before + input.slice(pos)
+    setInput(next)
+    setMentionQuery(null)
+    requestAnimationFrame(() => {
+      ta?.focus()
+      const caret = before.length
+      ta?.setSelectionRange(caret, caret)
+    })
+  }
+
   const send = useCallback(async () => {
     const content = input.trim()
     if (!content || !projectId || sending) return
     setSending(true)
     atBottomRef.current = true
+    // Resolve @mentions to user IDs by matching known member names in the text.
+    const mentions = members
+      .filter(m => content.includes(`@${memberName(m)}`))
+      .map(m => m.user_id)
     try {
       const res = await fetch('/api/hosted/proxy', {
         method: 'POST',
@@ -827,7 +933,7 @@ function TeamChatTab({ auth, selectedProjectId }: { auth: HostedAuth; selectedPr
           url: `${auth.apiUrl}/api/orquesta-cli/projects/${projectId}/chat`,
           token: auth.token,
           method: 'POST',
-          body: { content },
+          body: mentions.length ? { content, mentions } : { content },
         }),
       })
       if (!res.ok) {
@@ -836,50 +942,80 @@ function TeamChatTab({ auth, selectedProjectId }: { auth: HostedAuth; selectedPr
       }
       const created = await res.json() as TeamChatMessage
       setInput('')
-      // Optimistically append (dedupe against the next poll by id).
+      setMentionQuery(null)
+      // Track as pending until the poll echoes it back, then show immediately.
+      pendingRef.current = [...pendingRef.current.filter(p => p.id !== created.id), created]
       setMessages(prev => (prev.some(m => m.id === created.id) ? prev : [...prev, created]))
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to send')
     } finally {
       setSending(false)
     }
-  }, [input, projectId, sending, auth.apiUrl, auth.token])
+  }, [input, projectId, sending, members, auth.apiUrl, auth.token])
+
+  // Render message content with @mentions highlighted.
+  const renderContent = (content: string) => {
+    if (!mentionRegex) return content
+    const nodes: React.ReactNode[] = []
+    let last = 0
+    content.replace(mentionRegex, (match: string, offset: number) => {
+      if (offset > last) nodes.push(content.slice(last, offset))
+      nodes.push(
+        <span key={offset} className="rounded bg-green-500/20 px-0.5 font-medium text-green-300">{match}</span>
+      )
+      last = offset + match.length
+      return match
+    })
+    if (last < content.length) nodes.push(content.slice(last))
+    return nodes
+  }
 
   if (!projectId) {
-    return <div className="flex-1 flex items-center justify-center p-4 text-center text-xs text-zinc-500">Select a project to open its team chat.</div>
+    return <div className="flex flex-1 items-center justify-center p-4 text-center text-xs text-zinc-500">Select a project to open its team chat.</div>
   }
 
   return (
     <div className="flex flex-1 flex-col overflow-hidden">
-      <div ref={scrollRef} onScroll={onScroll} className="flex-1 overflow-y-auto p-2 space-y-2">
+      <div ref={scrollRef} onScroll={onScroll} className="flex-1 space-y-3 overflow-y-auto p-3">
         {loading && messages.length === 0 ? (
-          <div className="flex items-center justify-center py-8 text-zinc-500 text-xs">
-            <Loader2 className="h-3 w-3 animate-spin mr-1.5" /> Loading…
+          <div className="flex items-center justify-center py-8 text-xs text-zinc-500">
+            <Loader2 className="mr-1.5 h-3 w-3 animate-spin" /> Loading…
           </div>
         ) : error && messages.length === 0 ? (
-          <div className="text-center py-6 text-xs text-red-400">{error}</div>
+          <div className="py-6 text-center text-xs text-red-400">{error}</div>
         ) : messages.length === 0 ? (
-          <div className="text-center py-8 text-zinc-500 text-xs">No messages yet. Say hi 👋</div>
+          <div className="py-10 text-center text-xs text-zinc-500">No messages yet. Say hi 👋</div>
         ) : (
           messages.map(m => {
             const mine = currentUserId != null && m.author_id === currentUserId
+            const name = mine ? 'You' : teamChatDisplayName(m.author, m.author_id)
+            const hue = teamChatHue(m.author_id)
             return (
-              <div key={m.id} className={`flex flex-col ${mine ? 'items-end' : 'items-start'}`}>
-                <div className="flex items-baseline gap-1.5 px-0.5">
-                  <span className="text-[10px] font-mono font-semibold text-zinc-400">
-                    {mine ? 'You' : teamChatDisplayName(m.author, m.author_id)}
-                  </span>
-                  <span className="text-[9px] text-zinc-600">
-                    {new Date(m.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                  </span>
-                </div>
-                <div className={`max-w-[85%] whitespace-pre-wrap break-words rounded-lg px-2.5 py-1.5 text-xs ${
-                  mine ? 'bg-green-600/25 text-green-50' : 'bg-zinc-800 text-zinc-200'
-                }`}>
-                  {m.content}
-                  {!!m.reply_count && (
-                    <span className="ml-1.5 text-[9px] text-zinc-500">↳ {m.reply_count}</span>
-                  )}
+              <div key={m.id} className={`flex items-end gap-2 ${mine ? 'flex-row-reverse' : ''}`}>
+                {!mine && (
+                  <div
+                    className="mb-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[9px] font-semibold text-white"
+                    style={{ backgroundColor: `hsl(${hue} 45% 40%)` }}
+                    title={name}
+                  >
+                    {teamChatInitials(name)}
+                  </div>
+                )}
+                <div className={`flex min-w-0 flex-col ${mine ? 'items-end' : 'items-start'}`}>
+                  <div className="flex items-baseline gap-1.5 px-0.5">
+                    {!mine && <span className="text-[10px] font-semibold text-zinc-400">{name}</span>}
+                    <span className="text-[9px] text-zinc-600">
+                      {new Date(m.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                    </span>
+                  </div>
+                  <div className={`max-w-full whitespace-pre-wrap break-words rounded-2xl px-3 py-1.5 text-xs leading-relaxed ${
+                    mine ? 'rounded-br-sm bg-green-600/25 text-green-50' : 'rounded-bl-sm bg-zinc-800 text-zinc-200'
+                  }`}>
+                    {renderContent(m.content)}
+                    {!!m.reply_count && (
+                      <span className="ml-1.5 text-[9px] text-zinc-500">↳ {m.reply_count}</span>
+                    )}
+                  </div>
                 </div>
               </div>
             )
@@ -887,25 +1023,60 @@ function TeamChatTab({ auth, selectedProjectId }: { auth: HostedAuth; selectedPr
         )}
       </div>
 
-      <div className="border-t border-white/10 p-2">
+      <div className="relative border-t border-white/10 p-2">
+        {/* @mention autocomplete */}
+        {mentionMatches.length > 0 && (
+          <div className="absolute bottom-full left-2 right-2 mb-1 overflow-hidden rounded-lg border border-white/10 bg-zinc-800 shadow-lg">
+            {mentionMatches.map((m, i) => {
+              const name = memberName(m)
+              return (
+                <button
+                  key={m.user_id}
+                  onMouseDown={e => { e.preventDefault(); pickMention(m) }}
+                  onMouseEnter={() => setMentionIndex(i)}
+                  className={`flex w-full items-center gap-2 px-2 py-1.5 text-left text-xs ${
+                    i === mentionIndex ? 'bg-green-600/20 text-green-100' : 'text-zinc-300 hover:bg-zinc-700/60'
+                  }`}
+                >
+                  <span
+                    className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[8px] font-semibold text-white"
+                    style={{ backgroundColor: `hsl(${teamChatHue(m.user_id)} 45% 40%)` }}
+                  >
+                    {teamChatInitials(name)}
+                  </span>
+                  <span className="truncate">{name}</span>
+                  {m.profile.email && <span className="ml-auto truncate text-[9px] text-zinc-500">{m.profile.email}</span>}
+                </button>
+              )
+            })}
+          </div>
+        )}
+
         {error && messages.length > 0 && (
           <div className="mb-1 text-[10px] text-red-400">{error}</div>
         )}
         <div className="flex items-end gap-1.5">
           <textarea
+            ref={taRef}
             value={input}
-            onChange={e => setInput(e.target.value)}
+            onChange={handleChange}
             onKeyDown={e => {
+              if (mentionMatches.length > 0) {
+                if (e.key === 'ArrowDown') { e.preventDefault(); setMentionIndex(i => (i + 1) % mentionMatches.length); return }
+                if (e.key === 'ArrowUp') { e.preventDefault(); setMentionIndex(i => (i - 1 + mentionMatches.length) % mentionMatches.length); return }
+                if (e.key === 'Enter' || e.key === 'Tab') { e.preventDefault(); pickMention(mentionMatches[mentionIndex] || mentionMatches[0]); return }
+                if (e.key === 'Escape') { e.preventDefault(); setMentionQuery(null); return }
+              }
               if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send() }
             }}
-            placeholder="Message the team…  (Enter to send)"
+            placeholder="Message the team…  (@ to mention · Enter to send)"
             rows={1}
-            className="flex-1 resize-none rounded bg-zinc-800 px-2 py-1.5 text-xs text-zinc-200 outline-none placeholder:text-zinc-600 focus:ring-1 focus:ring-green-600/40"
+            className="max-h-24 flex-1 resize-none rounded-lg bg-zinc-800 px-2.5 py-1.5 text-xs text-zinc-200 outline-none placeholder:text-zinc-600 focus:ring-1 focus:ring-green-600/40"
           />
           <button
             onClick={send}
             disabled={!input.trim() || sending}
-            className="rounded bg-green-600/80 px-2.5 py-1.5 text-xs font-medium text-white transition-colors hover:bg-green-600 disabled:cursor-not-allowed disabled:opacity-40"
+            className="rounded-lg bg-green-600/80 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-green-600 disabled:cursor-not-allowed disabled:opacity-40"
           >
             {sending ? <Loader2 className="h-3 w-3 animate-spin" /> : 'Send'}
           </button>
