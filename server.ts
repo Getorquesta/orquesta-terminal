@@ -384,6 +384,36 @@ app.prepare().then(() => {
   io.on('connection', (socket) => {
     console.log('[terminal] Client connected:', socket.id)
 
+    // ── Directory browser (folder picker) ───────────────────────────────
+    // Lists sub-directories of a path so the cockpit can pick a working dir for
+    // a new terminal. Read-only, directories only. This runs on the user's own
+    // machine (localhost cockpit) listing their own filesystem — the same trust
+    // model as the local agent UI's working-dir browser.
+    socket.on('fs:list-dir', async ({ path: reqPath }: { path?: string } = {}) => {
+      try {
+        const target = reqPath && reqPath.trim() ? path.resolve(reqPath) : HOME_DIR
+        const dirents = await fsp.readdir(target, { withFileTypes: true })
+        const entries = dirents
+          .filter((d: import('fs').Dirent) => {
+            // Directories (and symlinks that may point at directories), no dotfiles.
+            if (d.name.startsWith('.')) return false
+            return d.isDirectory() || d.isSymbolicLink()
+          })
+          .map((d: import('fs').Dirent) => ({ name: d.name, path: path.join(target, d.name) }))
+          .sort((a: { name: string }, b: { name: string }) => a.name.localeCompare(b.name))
+        const parent = path.dirname(target)
+        socket.emit('fs:list-dir-result', {
+          ok: true,
+          path: target,
+          parent: parent !== target ? parent : null,
+          home: HOME_DIR,
+          entries,
+        })
+      } catch (err: any) {
+        socket.emit('fs:list-dir-result', { ok: false, path: reqPath || HOME_DIR, error: err.message })
+      }
+    })
+
     // Spawn a PTY session
     socket.on('session:start', ({ sessionId, cliType = 'shell', rows = 24, cols = 80, cwd, resumeId }) => {
       if (!ptyModule) {

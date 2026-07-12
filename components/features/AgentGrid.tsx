@@ -6,7 +6,7 @@ import type { LayoutItem, ResponsiveLayouts } from 'react-grid-layout'
 import { Socket } from 'socket.io-client'
 import { GeistMono } from 'geist/font/mono'
 import { Button } from '@/components/ui/button'
-import { Plus, X, Maximize2, GitBranch, LayoutGrid, Pencil, Cloud, Share2, Eye, Keyboard, Search, Check, ChevronDown, Link2, Users, Cpu, AlertTriangle } from 'lucide-react'
+import { Plus, X, Maximize2, GitBranch, LayoutGrid, Pencil, Cloud, Share2, Eye, Keyboard, Search, Check, ChevronDown, Link2, Users, Cpu, AlertTriangle, Folder, FolderOpen, Home, CornerLeftUp } from 'lucide-react'
 import '@xterm/xterm/css/xterm.css'
 
 export interface HostedProject {
@@ -274,6 +274,8 @@ interface TerminalCellProps {
   onHostedProjectChange: (projectId: string | undefined) => void
   /** Open the "make this the project agent" (daemon takeover) confirm modal. */
   onMakeAgent: () => void
+  /** Open the folder picker to change this pane's working directory. */
+  onPickFolder: () => void
   onFocusCell: () => void
   onNew: () => void
   onArrange: () => void
@@ -284,7 +286,7 @@ interface TerminalCellProps {
 function TerminalCell({
   cellId, socket, cliType, name, fontSize, opacity, hostedApiUrl, hostedToken,
   hostedProjects, hostedProjectId, cwd, resumeId, daemonRunning,
-  onClose, onCliTypeChange, onRename, onHostedProjectChange, onMakeAgent, onFocusCell, onNew, onArrange, onZoom, registerApi,
+  onClose, onCliTypeChange, onRename, onHostedProjectChange, onMakeAgent, onPickFolder, onFocusCell, onNew, onArrange, onZoom, registerApi,
 }: TerminalCellProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const termRef = useRef<import('@xterm/xterm').Terminal | null>(null)
@@ -488,7 +490,9 @@ function TerminalCell({
         socket?.emit('session:force_end', { sessionId: sessionIdRef.current })
       }
     }
-  }, [cellId, socket, cliType])
+    // `cwd` is in the deps so changing the pane's working directory tears down
+    // the PTY and starts a fresh session in the new folder.
+  }, [cellId, socket, cliType, cwd])
 
   // Live font-size (zoom) without recreating the terminal.
   useEffect(() => {
@@ -726,6 +730,17 @@ function TerminalCell({
               <option key={opt.value} value={opt.value}>{opt.label}</option>
             ))}
           </select>
+          <button
+            onClick={onPickFolder}
+            onMouseDown={(e) => e.stopPropagation()}
+            className={`flex min-w-0 shrink items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-mono transition-colors ${
+              cwd ? 'bg-zinc-800/70 text-amber-300/90 hover:bg-zinc-700' : 'bg-zinc-800/70 text-zinc-400 hover:bg-zinc-700 hover:text-zinc-200'
+            }`}
+            title={cwd ? `Working dir: ${cwd} — click to change (restarts the session)` : 'Choose a working folder for this terminal'}
+          >
+            <Folder className="h-3 w-3 shrink-0" />
+            <span className="truncate max-w-[7rem]">{cwd ? cwd.replace(/\/+$/, '').split('/').pop() || cwd : 'Folder'}</span>
+          </button>
           {branch && (
             <span
               className="flex min-w-0 items-center gap-1 rounded bg-zinc-800/70 px-1.5 py-0.5 text-xs font-mono text-green-400"
@@ -900,6 +915,118 @@ function buildTidyLayout(cells: GridCell[]): LayoutItem[] {
 }
 
 /**
+ * Directory browser modal — pick a working folder for a terminal. Talks to the
+ * server's `fs:list-dir` handler (read-only, dirs only) to walk the local
+ * filesystem. Used both to open a new terminal in a folder and to change an
+ * existing pane's working directory (which restarts its session there).
+ */
+function FolderPicker({
+  socket, initialPath, title, onChoose, onClose,
+}: {
+  socket: Socket | null
+  initialPath?: string
+  title: string
+  onChoose: (dir: string) => void
+  onClose: () => void
+}) {
+  const [path, setPath] = useState(initialPath || '')
+  const [parent, setParent] = useState<string | null>(null)
+  const [home, setHome] = useState<string>('')
+  const [entries, setEntries] = useState<{ name: string; path: string }[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (!socket) return
+    const onResult = (r: any = {}) => {
+      setLoading(false)
+      if (!r.ok) { setError(r.error || 'Could not read folder'); return }
+      setError(null)
+      setPath(r.path)
+      setParent(r.parent || null)
+      if (r.home) setHome(r.home)
+      setEntries(Array.isArray(r.entries) ? r.entries : [])
+    }
+    socket.on('fs:list-dir-result', onResult)
+    socket.emit('fs:list-dir', { path: initialPath })
+    return () => { socket.off('fs:list-dir-result', onResult) }
+  }, [socket, initialPath])
+
+  const go = (p?: string | null) => {
+    if (p === undefined || p === null) return
+    setLoading(true)
+    socket?.emit('fs:list-dir', { path: p })
+  }
+
+  return (
+    <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 p-4" onMouseDown={onClose}>
+      <div
+        className="flex max-h-[70vh] w-full max-w-lg flex-col rounded-lg border border-zinc-700 bg-zinc-900 shadow-2xl"
+        onMouseDown={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between border-b border-zinc-800 px-4 py-3">
+          <div className="flex items-center gap-2 text-sm font-medium text-zinc-100">
+            <FolderOpen className="h-4 w-4 text-amber-400" />
+            {title}
+          </div>
+          <button onClick={onClose} className="text-zinc-500 hover:text-zinc-300"><X className="h-4 w-4" /></button>
+        </div>
+        <div className="flex items-center gap-1.5 border-b border-zinc-800 px-3 py-2">
+          <button
+            onClick={() => go(home)}
+            disabled={!home}
+            className="flex shrink-0 items-center gap-1 rounded bg-zinc-800 px-1.5 py-1 text-[11px] text-zinc-300 hover:bg-zinc-700 disabled:opacity-40"
+            title="Home"
+          >
+            <Home className="h-3 w-3" />
+          </button>
+          <button
+            onClick={() => go(parent)}
+            disabled={!parent}
+            className="flex shrink-0 items-center gap-1 rounded bg-zinc-800 px-1.5 py-1 text-[11px] text-zinc-300 hover:bg-zinc-700 disabled:opacity-40"
+            title="Up one level"
+          >
+            <CornerLeftUp className="h-3 w-3" />
+          </button>
+          <div className="min-w-0 flex-1 truncate rounded bg-zinc-800/60 px-2 py-1 font-mono text-[11px] text-zinc-400" title={path}>
+            {path || '…'}
+          </div>
+        </div>
+        <div className="min-h-0 flex-1 overflow-y-auto py-1">
+          {loading ? (
+            <div className="px-4 py-6 text-center text-xs text-zinc-500">Loading…</div>
+          ) : error ? (
+            <div className="px-4 py-6 text-center text-xs text-amber-300">{error}</div>
+          ) : entries.length === 0 ? (
+            <div className="px-4 py-6 text-center text-xs text-zinc-600">No sub-folders here</div>
+          ) : (
+            entries.map((e) => (
+              <button
+                key={e.path}
+                onDoubleClick={() => go(e.path)}
+                onClick={() => go(e.path)}
+                className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs text-zinc-300 hover:bg-zinc-800"
+                title={`Open ${e.name}`}
+              >
+                <Folder className="h-3.5 w-3.5 shrink-0 text-amber-400/80" />
+                <span className="truncate font-mono">{e.name}</span>
+              </button>
+            ))
+          )}
+        </div>
+        <div className="flex items-center justify-between gap-2 border-t border-zinc-800 px-4 py-3">
+          <span className="truncate font-mono text-[11px] text-zinc-500">Use: {path || '…'}</span>
+          <div className="flex gap-2">
+            <Button variant="outline" size="sm" onClick={onClose}>Cancel</Button>
+            <Button size="sm" onClick={() => path && onChoose(path)} disabled={!path}>Open here</Button>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/**
  * Pre-flight confirmation for daemon takeover. Shows any agents already online
  * for the project (so the user knows they'd add a second executor — untargeted
  * dispatch would double-run) and confirms before spawning the local daemon. If a
@@ -1016,6 +1143,10 @@ function AgentGridInner({
   >(null)
   const [daemonBusy, setDaemonBusy] = useState(false)
   const [daemonMsg, setDaemonMsg] = useState<{ ok: boolean; message: string } | null>(null)
+
+  // Folder picker: choose a working directory for a new terminal ('new') or an
+  // existing pane (cellId set → changing it restarts that pane's session there).
+  const [folderPicker, setFolderPicker] = useState<{ cellId: string | null; initialPath?: string } | null>(null)
 
   useEffect(() => {
     if (!socket) return
@@ -1212,6 +1343,10 @@ function AgentGridInner({
     setCells((prev) => prev.map((c) => (c.id === id ? { ...c, name } : c)))
   }, [])
 
+  const setCellCwd = useCallback((id: string, cwd: string) => {
+    setCells((prev) => prev.map((c) => (c.id === id ? { ...c, cwd } : c)))
+  }, [])
+
   const setCellHostedProject = useCallback((id: string, hostedProjectId: string | undefined) => {
     setCells((prev) => prev.map((c) => (c.id === id ? { ...c, hostedProjectId } : c)))
     // When a hosted project is selected, configure the hook on the agent so
@@ -1294,9 +1429,23 @@ function AgentGridInner({
         <p className="mt-1 text-sm text-zinc-600 max-w-xs">
           Add terminal panes to run CLIs side by side. <span className="font-mono text-zinc-500">Alt+T</span> new · <span className="font-mono text-zinc-500">Ctrl+P</span> arrange.
         </p>
-        <Button onClick={() => addCell()} className="mt-6" size="sm">
-          <Plus className="h-4 w-4" /> Add Terminal
-        </Button>
+        <div className="mt-6 flex gap-2">
+          <Button onClick={() => addCell()} size="sm">
+            <Plus className="h-4 w-4" /> Add Terminal
+          </Button>
+          <Button onClick={() => setFolderPicker({ cellId: null })} size="sm" variant="outline">
+            <FolderOpen className="h-4 w-4" /> Open in folder…
+          </Button>
+        </div>
+        {folderPicker && (
+          <FolderPicker
+            socket={socket}
+            initialPath={folderPicker.initialPath}
+            title="Open a terminal in…"
+            onChoose={(dir) => { addCell({ cwd: dir }); setFolderPicker(null) }}
+            onClose={() => setFolderPicker(null)}
+          />
+        )}
       </div>
     )
   }
@@ -1306,6 +1455,9 @@ function AgentGridInner({
       <div ref={toolbarRef} className="mb-3 flex justify-end gap-2">
         <Button onClick={arrange} size="sm" variant="outline" title="Auto-arrange & fit all panes (Ctrl+P)">
           <LayoutGrid className="h-4 w-4" /> Arrange
+        </Button>
+        <Button onClick={() => setFolderPicker({ cellId: null })} size="sm" variant="outline" title="New terminal in a chosen folder">
+          <FolderOpen className="h-4 w-4" /> Open in folder…
         </Button>
         <Button onClick={() => addCell()} size="sm" variant="outline" title="New terminal (Alt+T)">
           <Plus className="h-4 w-4" /> Add Terminal
@@ -1354,6 +1506,20 @@ function AgentGridInner({
         />
       )}
 
+      {folderPicker && (
+        <FolderPicker
+          socket={socket}
+          initialPath={folderPicker.initialPath}
+          title={folderPicker.cellId ? 'Change working folder' : 'Open a terminal in…'}
+          onChoose={(dir) => {
+            if (folderPicker.cellId) setCellCwd(folderPicker.cellId, dir)
+            else addCell({ cwd: dir })
+            setFolderPicker(null)
+          }}
+          onClose={() => setFolderPicker(null)}
+        />
+      )}
+
       <ResponsiveGridLayout
         width={containerWidth}
         layouts={layouts}
@@ -1387,6 +1553,7 @@ function AgentGridInner({
               onRename={(v) => setCellName(cell.id, v)}
               onHostedProjectChange={(v) => setCellHostedProject(cell.id, v)}
               onMakeAgent={() => openDaemonModal(cell.id)}
+              onPickFolder={() => setFolderPicker({ cellId: cell.id, initialPath: cell.cwd })}
               onFocusCell={() => { activeCellIdRef.current = cell.id }}
               onNew={() => addCell()}
               onArrange={arrange}
