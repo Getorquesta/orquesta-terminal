@@ -997,7 +997,20 @@ function FolderPicker({
     socket.on('fs:list-dir-result', onResult)
     socket.on('fs:native-pick-result', onNative)
     socket.emit('fs:list-dir', { path: initialPath })
+    // If the server never answers (e.g. an older cockpit build without the
+    // fs:list-dir handler), don't spin forever — surface a hint and fall back
+    // to the editable path field / native picker.
+    const stall = setTimeout(() => {
+      setLoading((l) => {
+        if (l) {
+          setError('Folder list didn’t load — type a path above, use Browse…, or restart the cockpit (its server needs a restart to pick up new handlers).')
+          setNativeBusy(false)
+        }
+        return false
+      })
+    }, 4000)
     return () => {
+      clearTimeout(stall)
       socket.off('fs:list-dir-result', onResult)
       socket.off('fs:native-pick-result', onNative)
     }
@@ -1007,6 +1020,12 @@ function FolderPicker({
     if (!socket) return
     setNativeBusy(true)
     socket.emit('fs:native-pick', { startDir: path || home || undefined })
+    // Don't spin forever if the running server predates the fs:native-pick
+    // handler (needs a cockpit restart) — release the button after 8s.
+    setTimeout(() => setNativeBusy((b) => {
+      if (b) setError('Native picker didn’t respond — the cockpit server needs a restart to enable it. For now, type or paste a path above.')
+      return false
+    }), 8000)
   }
 
   const go = (p?: string | null) => {
