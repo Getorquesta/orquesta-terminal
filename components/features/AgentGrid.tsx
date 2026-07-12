@@ -6,7 +6,7 @@ import type { LayoutItem, ResponsiveLayouts } from 'react-grid-layout'
 import { Socket } from 'socket.io-client'
 import { GeistMono } from 'geist/font/mono'
 import { Button } from '@/components/ui/button'
-import { Plus, X, Maximize2, GitBranch, LayoutGrid, Pencil, Cloud, Share2, Eye, Keyboard } from 'lucide-react'
+import { Plus, X, Maximize2, GitBranch, LayoutGrid, Pencil, Cloud, Share2, Eye, Keyboard, Search, Check, ChevronDown } from 'lucide-react'
 import '@xterm/xterm/css/xterm.css'
 
 export interface HostedProject {
@@ -81,6 +81,106 @@ const MAX_FONT = 24
 interface CellApi {
   clear: () => void
   fit: () => void
+}
+
+/**
+ * Searchable hosted-project picker for a pane header. A plain <select> is
+ * unusable once an org has dozens of projects (the user has 43), so this is a
+ * compact combobox: a chip that opens a popover with a filter input + a
+ * scrollable, keyboard-friendly list. Commits via onChange (undefined = none).
+ */
+function HostedProjectPicker({
+  projects, value, onChange,
+}: {
+  projects: HostedProject[]
+  value?: string
+  onChange: (projectId: string | undefined) => void
+}) {
+  const [open, setOpen] = useState(false)
+  const [query, setQuery] = useState('')
+  const rootRef = useRef<HTMLDivElement>(null)
+  const inputRef = useRef<HTMLInputElement>(null)
+
+  const selected = projects.find((p) => p.id === value)
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase()
+    if (!q) return projects
+    return projects.filter((p) => p.name.toLowerCase().includes(q))
+  }, [projects, query])
+
+  // Close on outside click / Escape.
+  useEffect(() => {
+    if (!open) return
+    const onDown = (e: MouseEvent) => {
+      if (rootRef.current && !rootRef.current.contains(e.target as Node)) setOpen(false)
+    }
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false) }
+    document.addEventListener('mousedown', onDown)
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('mousedown', onDown)
+      document.removeEventListener('keydown', onKey)
+    }
+  }, [open])
+
+  // Focus the filter as soon as the popover opens.
+  useEffect(() => {
+    if (open) { setQuery(''); requestAnimationFrame(() => inputRef.current?.focus()) }
+  }, [open])
+
+  const pick = (id: string | undefined) => { onChange(id); setOpen(false) }
+
+  return (
+    <div ref={rootRef} className="relative" onMouseDown={(e) => e.stopPropagation()}>
+      <button
+        onClick={() => setOpen((o) => !o)}
+        className={`flex max-w-[8rem] items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-mono outline-none transition-colors focus:ring-1 focus:ring-cyan-500/40 ${
+          selected ? 'bg-zinc-800/70 text-cyan-300 hover:bg-zinc-700' : 'bg-zinc-800/70 text-zinc-400 hover:bg-zinc-700 hover:text-zinc-200'
+        }`}
+        title="Hosted project (hooks report here) — click to search"
+      >
+        <span className="truncate">{selected ? selected.name : 'No project'}</span>
+        <ChevronDown className="h-2.5 w-2.5 shrink-0 opacity-70" />
+      </button>
+      {open && (
+        <div className="absolute left-0 top-full z-50 mt-1 w-56 overflow-hidden rounded-md border border-zinc-700 bg-zinc-900/95 shadow-xl backdrop-blur">
+          <div className="flex items-center gap-1.5 border-b border-zinc-800 px-2 py-1.5">
+            <Search className="h-3 w-3 shrink-0 text-zinc-500" />
+            <input
+              ref={inputRef}
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder={`Search ${projects.length} projects…`}
+              className="w-full bg-transparent text-xs font-mono text-zinc-200 outline-none placeholder:text-zinc-600"
+            />
+          </div>
+          <div className="max-h-56 overflow-y-auto py-1">
+            <button
+              onClick={() => pick(undefined)}
+              className="flex w-full items-center justify-between px-2 py-1 text-left text-[11px] font-mono text-zinc-400 hover:bg-zinc-800"
+            >
+              <span>No project</span>
+              {!value && <Check className="h-3 w-3 text-cyan-400" />}
+            </button>
+            {filtered.map((p) => (
+              <button
+                key={p.id}
+                onClick={() => pick(p.id)}
+                className="flex w-full items-center justify-between gap-2 px-2 py-1 text-left text-[11px] font-mono text-zinc-300 hover:bg-zinc-800"
+                title={p.name}
+              >
+                <span className="truncate">{p.name}</span>
+                {value === p.id && <Check className="h-3 w-3 shrink-0 text-cyan-400" />}
+              </button>
+            ))}
+            {filtered.length === 0 && (
+              <div className="px-2 py-2 text-center text-[11px] font-mono text-zinc-600">No matches</div>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  )
 }
 
 interface TerminalCellProps {
@@ -478,18 +578,11 @@ function TerminalCell({
             </span>
           )}
           {hostedProjects && hostedProjects.length > 0 && (
-            <select
-              value={hostedProjectId || ''}
-              onChange={(e) => onHostedProjectChange(e.target.value || undefined)}
-              onMouseDown={(e) => e.stopPropagation()}
-              className="max-w-[7rem] truncate rounded bg-zinc-800/70 px-1.5 py-0.5 text-[10px] font-mono text-cyan-300 outline-none hover:bg-zinc-700 focus:ring-1 focus:ring-cyan-500/40"
-              title="Hosted project (hooks report here)"
-            >
-              <option value="">No project</option>
-              {hostedProjects.map((p) => (
-                <option key={p.id} value={p.id}>{p.name}</option>
-              ))}
-            </select>
+            <HostedProjectPicker
+              projects={hostedProjects}
+              value={hostedProjectId}
+              onChange={onHostedProjectChange}
+            />
           )}
           {hostedProjectId && (
             <span title="Reporting to hosted">
