@@ -1,6 +1,6 @@
 {
   "name": "orquesta-terminal",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "private": true,
   "description": "Standalone terminal workspace for AI-powered development",
   "scripts": {

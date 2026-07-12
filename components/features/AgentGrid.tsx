@@ -6,7 +6,8 @@ import type { LayoutItem, ResponsiveLayouts } from 'react-grid-layout'
 import { Socket } from 'socket.io-client'
 import { GeistMono } from 'geist/font/mono'
 import { Button } from '@/components/ui/button'
-import { Plus, X, Maximize2, GitBranch, LayoutGrid, Pencil, Cloud, Share2, Eye, Keyboard, Search, Check, ChevronDown, Link2, Users, Cpu, AlertTriangle, Folder, FolderOpen, Home, CornerLeftUp } from 'lucide-react'
+import { Plus, X, Maximize2, GitBranch, LayoutGrid, Pencil, Cloud, Share2, Eye, Keyboard, Search, Check, ChevronDown, Link2, Users, Cpu, AlertTriangle, Folder, FolderOpen, Home, CornerLeftUp, PanelLeft } from 'lucide-react'
+import { TerminalSidebar } from './TerminalSidebar'
 import '@xterm/xterm/css/xterm.css'
 
 export interface HostedProject {
@@ -296,6 +297,19 @@ function TerminalCell({
   const [branch, setBranch] = useState<string | null>(null)
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState(name)
+  // Per-terminal task/timeline rail (Phase 1 of the Prompt Loop).
+  const [sidebarOpen, setSidebarOpen] = useState(false)
+
+  // Type a picked task's story into the LIVE pty for review-before-send. Wrap
+  // in bracketed-paste markers so multi-line bodies land as ONE paste (claude/
+  // orquesta interactive enable DECSET 2004) instead of each newline submitting.
+  const seedInput = useCallback((text: string) => {
+    const sid = sessionIdRef.current
+    if (!sid || !socket || !text) return
+    const wrapped = `\x1b[200~${text}\x1b[201~`
+    socket.emit('session:input', { sessionId: sid, data: wrapped })
+    try { termRef.current?.focus() } catch {}
+  }, [socket])
   // Share-to-Orquesta state for this pane.
   const [shared, setShared] = useState(false)
   const [allowControl, setAllowControl] = useState(false)
@@ -730,6 +744,19 @@ function TerminalCell({
               <option key={opt.value} value={opt.value}>{opt.label}</option>
             ))}
           </select>
+          {hostedProjectId && hostedApiUrl && hostedToken && (
+            <button
+              onClick={() => setSidebarOpen((v) => !v)}
+              onMouseDown={(e) => e.stopPropagation()}
+              className={`flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-mono transition-colors ${
+                sidebarOpen ? 'bg-green-500/15 text-green-300 hover:bg-green-500/25' : 'bg-zinc-800/70 text-zinc-400 hover:bg-zinc-700 hover:text-zinc-200'
+              }`}
+              title={sidebarOpen ? 'Hide task sidebar' : 'Tasks: pick a ticket/plan to start a prompt'}
+            >
+              <PanelLeft className="h-3 w-3 shrink-0" />
+              Tasks
+            </button>
+          )}
           <button
             onClick={onPickFolder}
             onMouseDown={(e) => e.stopPropagation()}
@@ -850,9 +877,20 @@ function TerminalCell({
           <X className="h-3.5 w-3.5" />
         </button>
       </div>
-      <div className="relative flex-1 overflow-hidden">
-        <div ref={containerRef} className="h-full px-1 pt-1 pb-0 overflow-hidden" />
-        {shared && remoteCursors.length > 0 && <CursorOverlay cursors={remoteCursors} />}
+      <div className="flex min-h-0 flex-1 overflow-hidden">
+        {sidebarOpen && hostedProjectId && hostedApiUrl && hostedToken && (
+          <TerminalSidebar
+            apiUrl={hostedApiUrl}
+            token={hostedToken}
+            projectId={hostedProjectId}
+            onSeed={seedInput}
+            onClose={() => setSidebarOpen(false)}
+          />
+        )}
+        <div className="relative min-w-0 flex-1 overflow-hidden">
+          <div ref={containerRef} className="h-full px-1 pt-1 pb-0 overflow-hidden" />
+          {shared && remoteCursors.length > 0 && <CursorOverlay cursors={remoteCursors} />}
+        </div>
       </div>
     </div>
   )
