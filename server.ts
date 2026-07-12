@@ -155,6 +155,13 @@ app.prepare().then(() => {
       if (!m || !p?.viewerId) return
       if (m.delete(String(p.viewerId))) emitViewers(sid)
     })
+    // Live cursors: a dashboard viewer (or another viewer) moved their mouse
+    // over the shared terminal. Relay it to the LOCAL cockpit UI so the pane
+    // that owns this PTY can draw their pointer. We only forward cursors for a
+    // session we actually host (avoids leaking foreign channel traffic).
+    cloud.on('terminal:cursor', (p: any) => {
+      if (p?.sessionId && sharedTerminals.has(p.sessionId)) io.emit('terminal:cursor', p)
+    })
   }
 
   async function startShare(opts: {
@@ -345,6 +352,18 @@ app.prepare().then(() => {
     socket.on('session:input', ({ sessionId, data }) => {
       const term = sessions.get(sessionId)
       if (term) term.write(data)
+    })
+
+    // Live cursor from the LOCAL cockpit pane (the sharer's own mouse) → relay
+    // out to the dashboard viewers over the shared channel. No-op if the pane
+    // isn't shared. Coordinates are fractional (0..1) of the terminal viewport
+    // so every participant maps them onto their own sized terminal.
+    socket.on('terminal:cursor', (p: any) => {
+      const s = p?.sessionId ? sharedTerminals.get(p.sessionId) : undefined
+      if (!s) return
+      s.cloud.emit('broadcast', {
+        channel: s.channel, event: 'terminal:cursor', payload: p, self: false,
+      })
     })
 
     socket.on('session:resize', ({ sessionId, rows, cols }) => {

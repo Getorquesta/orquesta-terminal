@@ -183,6 +183,70 @@ function HostedProjectPicker({
   )
 }
 
+// ── Live multiplayer cursors ─────────────────────────────────────────────
+// Every participant (this cockpit + each dashboard viewer) broadcasts its mouse
+// position over the shared channel as a fraction (0..1) of the terminal
+// viewport. Receivers map that fraction onto their own terminal. A fraction
+// outside [0,1] means the pointer is off the terminal for that person → we draw
+// a directional arrow on the nearest edge instead of a pointer.
+interface RemoteCursor { id: string; name: string; color: string; x: number; y: number; ts: number }
+
+function cursorColor(id: string): string {
+  let h = 0
+  for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) >>> 0
+  return `hsl(${h % 360} 85% 62%)`
+}
+
+// Stable per-browser identity for this cockpit's own cursor.
+function localParticipant(): { id: string; name: string; color: string } {
+  let id = ''
+  try {
+    id = localStorage.getItem('orq-term-participant-id') || ''
+    if (!id) { id = 'host-' + Math.random().toString(36).slice(2, 9); localStorage.setItem('orq-term-participant-id', id) }
+  } catch { id = 'host-local' }
+  return { id, name: 'Host', color: cursorColor(id) }
+}
+
+function CursorOverlay({ cursors }: { cursors: RemoteCursor[] }) {
+  return (
+    <div className="pointer-events-none absolute inset-0 z-20 overflow-hidden">
+      {cursors.map((c) => {
+        const inside = c.x >= 0 && c.x <= 1 && c.y >= 0 && c.y <= 1
+        if (inside) {
+          return (
+            <div
+              key={c.id}
+              className="absolute flex items-start gap-1"
+              style={{ left: `${c.x * 100}%`, top: `${c.y * 100}%`, color: c.color, transition: 'left 90ms linear, top 90ms linear' }}
+            >
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" style={{ filter: 'drop-shadow(0 1px 1px rgba(0,0,0,.6))' }}>
+                <path d="M1 1 L1 13 L4.6 9.6 L7 14.5 L9.2 13.5 L6.8 8.8 L12 8.6 Z" />
+              </svg>
+              <span className="rounded px-1 py-px text-[9px] font-medium leading-none text-black" style={{ background: c.color }}>{c.name}</span>
+            </div>
+          )
+        }
+        // Off-terminal → directional edge arrow pointing toward the real point.
+        const ex = Math.min(0.97, Math.max(0.03, c.x))
+        const ey = Math.min(0.97, Math.max(0.03, c.y))
+        const angle = (Math.atan2(c.y - ey, c.x - ex) * 180) / Math.PI
+        return (
+          <div
+            key={c.id}
+            className="absolute flex items-center gap-1"
+            style={{ left: `${ex * 100}%`, top: `${ey * 100}%`, transform: 'translate(-50%, -50%)', color: c.color, transition: 'left 90ms linear, top 90ms linear' }}
+          >
+            <svg width="15" height="15" viewBox="0 0 16 16" style={{ transform: `rotate(${angle}deg)`, filter: 'drop-shadow(0 1px 1px rgba(0,0,0,.6))' }}>
+              <path d="M2 8 L11 8 M11 8 L7 4.5 M11 8 L7 11.5" stroke="currentColor" strokeWidth="2.2" fill="none" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+            <span className="rounded px-1 py-px text-[9px] font-medium leading-none text-black" style={{ background: c.color }}>{c.name}</span>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
 interface TerminalCellProps {
   cellId: string
   socket: Socket | null
@@ -233,6 +297,11 @@ function TerminalCell({
   // Dashboard viewers currently watching this shared terminal (presence).
   const [viewers, setViewers] = useState<{ id: string; name: string }[]>([])
   const [copied, setCopied] = useState(false)
+  // Live cursors of the people watching this shared terminal.
+  const [remoteCursors, setRemoteCursors] = useState<RemoteCursor[]>([])
+  const cursorsRef = useRef<Map<string, RemoteCursor>>(new Map())
+  const sharedRef = useRef(false)
+  sharedRef.current = shared
 
   // Latest callbacks in refs so the (heavy) init effect never re-runs when a
   // parent handler's identity changes — only cellId/socket/cliType restart it.
@@ -484,6 +553,62 @@ function TerminalCell({
     return () => { socket?.off('session:ended', handleEnded) }
   }, [socket])
 
+  // ── Live cursors: broadcast this cockpit's own mouse over the shared PTY. ──
+  // Tracks on window so we still report a position (as an out-of-bounds
+  // fraction) when the pointer drifts just off the terminal → the far side
+  // draws an edge arrow. Throttled; only while the pane is actually shared.
+  useEffect(() => {
+    if (!socket || !shared) return
+    const me = localParticipant()
+    let last = 0
+    const onMove = (e: MouseEvent) => {
+      const el = containerRef.current
+      const sid = sessionIdRef.current
+      if (!el || !sid || !sharedRef.current) return
+      const now = Date.now()
+      if (now - last < 45) return
+      const r = el.getBoundingClientRect()
+      if (r.width < 4 || r.height < 4) return
+      const x = (e.clientX - r.left) / r.width
+      const y = (e.clientY - r.top) / r.height
+      // Ignore when the pointer is way off this pane (keeps other panes quiet).
+      if (x < -0.4 || x > 1.4 || y < -0.4 || y > 1.4) return
+      last = now
+      socket.emit('terminal:cursor', { sessionId: sid, id: me.id, name: me.name, color: me.color, x, y })
+    }
+    window.addEventListener('mousemove', onMove)
+    return () => window.removeEventListener('mousemove', onMove)
+  }, [socket, shared])
+
+  // ── Live cursors: receive the watchers' pointers (relayed by the server). ──
+  useEffect(() => {
+    if (!socket) return
+    const me = localParticipant()
+    const onCursor = (p: any) => {
+      if (!p || p.sessionId !== sessionIdRef.current || p.id === me.id) return
+      cursorsRef.current.set(p.id, {
+        id: p.id, name: p.name || 'Someone', color: p.color || cursorColor(p.id),
+        x: p.x, y: p.y, ts: Date.now(),
+      })
+      setRemoteCursors(Array.from(cursorsRef.current.values()))
+    }
+    socket.on('terminal:cursor', onCursor)
+    const sweep = setInterval(() => {
+      const now = Date.now()
+      let changed = false
+      for (const [id, c] of cursorsRef.current) {
+        if (now - c.ts > 4000) { cursorsRef.current.delete(id); changed = true }
+      }
+      if (changed) setRemoteCursors(Array.from(cursorsRef.current.values()))
+    }, 1500)
+    return () => { socket.off('terminal:cursor', onCursor); clearInterval(sweep) }
+  }, [socket])
+
+  // Drop everyone's cursor the moment this pane stops being shared.
+  useEffect(() => {
+    if (!shared) { cursorsRef.current.clear(); setRemoteCursors([]) }
+  }, [shared])
+
   const toggleShare = useCallback(() => {
     if (!socket || !sessionIdRef.current) return
     if (shared) {
@@ -689,7 +814,10 @@ function TerminalCell({
           <X className="h-3.5 w-3.5" />
         </button>
       </div>
-      <div ref={containerRef} className="flex-1 px-1 pt-1 pb-0 overflow-hidden" />
+      <div className="relative flex-1 overflow-hidden">
+        <div ref={containerRef} className="h-full px-1 pt-1 pb-0 overflow-hidden" />
+        {shared && remoteCursors.length > 0 && <CursorOverlay cursors={remoteCursors} />}
+      </div>
     </div>
   )
 }
