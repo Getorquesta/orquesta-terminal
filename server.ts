@@ -414,6 +414,68 @@ app.prepare().then(() => {
       }
     })
 
+    // Pop a NATIVE OS folder dialog and return the chosen absolute path. The
+    // cockpit runs on the user's own machine, so the server can drive the real
+    // desktop picker (zenity / macOS `choose folder` / Windows FolderBrowserDialog)
+    // — something the browser's showDirectoryPicker() can't do (it only yields a
+    // sandboxed handle, never a filesystem path we could spawn a PTY in).
+    // `available:false` lets the client fall back to the in-browser list browser.
+    socket.on('fs:native-pick', ({ startDir }: { startDir?: string } = {}) => {
+      const start = startDir && startDir.trim() ? startDir : HOME_DIR
+      const emit = (r: { ok: boolean; path?: string; error?: string; available?: boolean }) =>
+        socket.emit('fs:native-pick-result', r)
+
+      let cmd: string
+      let args: string[]
+      if (process.platform === 'darwin') {
+        cmd = 'osascript'
+        args = ['-e', `POSIX path of (choose folder with prompt "Select a working directory" default location POSIX file ${JSON.stringify(start)})`]
+      } else if (process.platform === 'win32') {
+        // FolderBrowserDialog via PowerShell; prints the selected path or nothing.
+        const ps = `Add-Type -AssemblyName System.Windows.Forms; $d = New-Object System.Windows.Forms.FolderBrowserDialog; $d.SelectedPath = ${JSON.stringify(start)}; if ($d.ShowDialog() -eq 'OK') { [Console]::Out.Write($d.SelectedPath) }`
+        cmd = 'powershell'
+        args = ['-NoProfile', '-STA', '-Command', ps]
+      } else {
+        // Linux: prefer zenity, then kdialog. spawn errors if neither exists.
+        cmd = 'zenity'
+        args = ['--file-selection', '--directory', `--filename=${start.endsWith(path.sep) ? start : start + path.sep}`, '--title=Select a working directory']
+      }
+
+      let out = ''
+      let child
+      try {
+        child = spawn(cmd, args)
+      } catch {
+        emit({ ok: false, available: false })
+        return
+      }
+      child.stdout?.on('data', (d) => { out += d.toString() })
+      child.on('error', () => {
+        // Binary missing (no zenity/osascript/powershell) — let the client fall
+        // back to the in-browser folder list rather than surfacing a hard error.
+        if (process.platform === 'linux') {
+          try {
+            const kd = spawn('kdialog', ['--getexistingdirectory', start])
+            let kout = ''
+            kd.stdout?.on('data', (d) => { kout += d.toString() })
+            kd.on('error', () => emit({ ok: false, available: false }))
+            kd.on('close', (code) => {
+              const p = kout.trim()
+              if (code === 0 && p) emit({ ok: true, path: p })
+              else emit({ ok: false, available: true }) // dialog ran, user cancelled
+            })
+            return
+          } catch { /* fall through */ }
+        }
+        emit({ ok: false, available: false })
+      })
+      child.on('close', (code) => {
+        const p = out.trim()
+        if (code === 0 && p) emit({ ok: true, path: p })
+        else emit({ ok: false, available: true }) // user cancelled the dialog
+      })
+    })
+
     // Spawn a PTY session
     socket.on('session:start', ({ sessionId, cliType = 'shell', rows = 24, cols = 80, cwd, resumeId }) => {
       if (!ptyModule) {

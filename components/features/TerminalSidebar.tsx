@@ -1,7 +1,7 @@
 'use client'
 
 import { useState, useEffect, useCallback, useMemo } from 'react'
-import { ListTodo, Clock, RefreshCw, Loader2, X, CornerDownLeft, ExternalLink, ClipboardList } from 'lucide-react'
+import { ListTodo, Clock, RefreshCw, Loader2, X, CornerDownLeft, ExternalLink, ClipboardList, Sparkles } from 'lucide-react'
 
 // Per-terminal left rail. Mirrors the hosted interactive-session sidebar: a
 // compact panel scoped to this pane's hosted project, reachable with the
@@ -45,6 +45,19 @@ async function proxyGet<T>(apiUrl: string, token: string, path: string): Promise
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ url: `${apiUrl}${path}`, token }),
+  })
+  if (!res.ok) {
+    const d = await res.json().catch(() => ({}))
+    throw new Error(d.error || `HTTP ${res.status}`)
+  }
+  return res.json() as Promise<T>
+}
+
+async function proxyPost<T>(apiUrl: string, token: string, path: string, payload: unknown): Promise<T> {
+  const res = await fetch('/api/hosted/proxy', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ url: `${apiUrl}${path}`, token, method: 'POST', body: payload }),
   })
   if (!res.ok) {
     const d = await res.json().catch(() => ({}))
@@ -121,6 +134,7 @@ function TasksPane({
   const [errors, setErrors] = useState<Record<string, string>>({})
   const [filter, setFilter] = useState<'all' | NormTask['source']>('all')
   const [seededId, setSeededId] = useState<string | null>(null)
+  const [genId, setGenId] = useState<string | null>(null)
 
   const load = useCallback(async () => {
     if (!projectId || !token) return
@@ -158,6 +172,27 @@ function TasksPane({
     onSeed(text)
     setSeededId(t.id)
     setTimeout(() => setSeededId((cur) => (cur === t.id ? null : cur)), 1600)
+  }
+
+  // Prompt Loop step 2: ask the server to turn this story into a concrete
+  // implementation prompt, then seed THAT (falls back to raw body on any error).
+  const generate = async (t: NormTask) => {
+    setGenId(t.id)
+    try {
+      const data = await proxyPost<{ prompt?: string }>(
+        apiUrl,
+        token,
+        `/api/orquesta-cli/projects/${projectId}/tasks/generate-prompt`,
+        { title: t.title, body: t.body || '', source: t.source, identifier: t.identifier },
+      )
+      onSeed((data.prompt || '').trim() || (t.body && t.body.trim()) || t.title)
+      setSeededId(t.id)
+      setTimeout(() => setSeededId((cur) => (cur === t.id ? null : cur)), 1600)
+    } catch {
+      onSeed((t.body && t.body.trim()) || t.title)
+    } finally {
+      setGenId((cur) => (cur === t.id ? null : cur))
+    }
   }
 
   return (
@@ -221,18 +256,30 @@ function TasksPane({
                   </div>
                   <p className="mb-1.5 line-clamp-2 text-[11px] leading-snug text-zinc-200">{t.title}</p>
                   {t.subtitle && <p className="mb-1.5 truncate text-[9px] text-zinc-500">{t.subtitle}</p>}
-                  <button
-                    onClick={() => seed(t)}
-                    className={`flex w-full items-center justify-center gap-1 rounded border px-2 py-1 text-[10px] transition-colors ${
-                      just
-                        ? 'border-emerald-500/40 bg-emerald-500/15 text-emerald-300'
-                        : 'border-green-500/25 bg-green-500/10 text-green-300 hover:bg-green-500/20'
-                    }`}
-                    title="Type this task into the terminal (review, then press Enter)"
-                  >
-                    <CornerDownLeft className="h-2.5 w-2.5" />
-                    {just ? 'Seeded — review & send' : 'Start prompt'}
-                  </button>
+                  <div className="flex gap-1">
+                    <button
+                      onClick={() => seed(t)}
+                      disabled={genId === t.id}
+                      className={`flex flex-1 items-center justify-center gap-1 rounded border px-2 py-1 text-[10px] transition-colors disabled:opacity-50 ${
+                        just
+                          ? 'border-emerald-500/40 bg-emerald-500/15 text-emerald-300'
+                          : 'border-green-500/25 bg-green-500/10 text-green-300 hover:bg-green-500/20'
+                      }`}
+                      title="Type this task into the terminal as-is (review, then press Enter)"
+                    >
+                      <CornerDownLeft className="h-2.5 w-2.5" />
+                      {just ? 'Seeded' : 'Start'}
+                    </button>
+                    <button
+                      onClick={() => generate(t)}
+                      disabled={genId === t.id}
+                      className="flex shrink-0 items-center justify-center gap-1 rounded border border-violet-500/25 bg-violet-500/10 px-2 py-1 text-[10px] text-violet-300 transition-colors hover:bg-violet-500/20 disabled:opacity-50"
+                      title="Generate a concrete implementation prompt from this story, then seed it"
+                    >
+                      {genId === t.id ? <Loader2 className="h-2.5 w-2.5 animate-spin" /> : <Sparkles className="h-2.5 w-2.5" />}
+                      {genId === t.id ? '' : 'Prompt'}
+                    </button>
+                  </div>
                 </div>
               )
             })}

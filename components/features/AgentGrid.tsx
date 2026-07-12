@@ -6,7 +6,7 @@ import type { LayoutItem, ResponsiveLayouts } from 'react-grid-layout'
 import { Socket } from 'socket.io-client'
 import { GeistMono } from 'geist/font/mono'
 import { Button } from '@/components/ui/button'
-import { Plus, X, Maximize2, GitBranch, LayoutGrid, Pencil, Cloud, Share2, Eye, Keyboard, Search, Check, ChevronDown, Link2, Users, Cpu, AlertTriangle, Folder, FolderOpen, Home, CornerLeftUp, PanelLeft } from 'lucide-react'
+import { Plus, X, Maximize2, GitBranch, LayoutGrid, Pencil, Cloud, Share2, Eye, Keyboard, Search, Check, ChevronDown, Link2, Users, Cpu, AlertTriangle, Folder, FolderOpen, Home, CornerLeftUp, PanelLeft, Loader2 } from 'lucide-react'
 import { TerminalSidebar } from './TerminalSidebar'
 import '@xterm/xterm/css/xterm.css'
 
@@ -973,6 +973,8 @@ function FolderPicker({
   const [entries, setEntries] = useState<{ name: string; path: string }[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [nativeBusy, setNativeBusy] = useState(false)
+  const [nativeGone, setNativeGone] = useState(false)
 
   useEffect(() => {
     if (!socket) return
@@ -985,10 +987,27 @@ function FolderPicker({
       if (r.home) setHome(r.home)
       setEntries(Array.isArray(r.entries) ? r.entries : [])
     }
+    const onNative = (r: any = {}) => {
+      setNativeBusy(false)
+      if (r.ok && r.path) { onChoose(r.path); return }
+      // available:false => no native dialog binary; keep the browser list and
+      // hide the button. A cancel (available:true) just closes the dialog.
+      if (r.available === false) setNativeGone(true)
+    }
     socket.on('fs:list-dir-result', onResult)
+    socket.on('fs:native-pick-result', onNative)
     socket.emit('fs:list-dir', { path: initialPath })
-    return () => { socket.off('fs:list-dir-result', onResult) }
-  }, [socket, initialPath])
+    return () => {
+      socket.off('fs:list-dir-result', onResult)
+      socket.off('fs:native-pick-result', onNative)
+    }
+  }, [socket, initialPath, onChoose])
+
+  const browseNative = () => {
+    if (!socket) return
+    setNativeBusy(true)
+    socket.emit('fs:native-pick', { startDir: path || home || undefined })
+  }
 
   const go = (p?: string | null) => {
     if (p === undefined || p === null) return
@@ -1026,9 +1045,15 @@ function FolderPicker({
           >
             <CornerLeftUp className="h-3 w-3" />
           </button>
-          <div className="min-w-0 flex-1 truncate rounded bg-zinc-800/60 px-2 py-1 font-mono text-[11px] text-zinc-400" title={path}>
-            {path || '…'}
-          </div>
+          <input
+            value={path}
+            onChange={(e) => setPath(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter' && path) go(path) }}
+            spellCheck={false}
+            placeholder="Type or paste a folder path…"
+            className="min-w-0 flex-1 rounded bg-zinc-800/60 px-2 py-1 font-mono text-[11px] text-zinc-300 outline-none focus:bg-zinc-800 focus:ring-1 focus:ring-amber-500/40"
+            title={path}
+          />
         </div>
         <div className="min-h-0 flex-1 overflow-y-auto py-1">
           {loading ? (
@@ -1056,6 +1081,12 @@ function FolderPicker({
           <span className="truncate font-mono text-[11px] text-zinc-500">Use: {path || '…'}</span>
           <div className="flex gap-2">
             <Button variant="outline" size="sm" onClick={onClose}>Cancel</Button>
+            {!nativeGone && (
+              <Button variant="outline" size="sm" onClick={browseNative} disabled={nativeBusy} title="Open your OS folder picker">
+                {nativeBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <FolderOpen className="h-3.5 w-3.5" />}
+                <span className="ml-1">Browse…</span>
+              </Button>
+            )}
             <Button size="sm" onClick={() => path && onChoose(path)} disabled={!path}>Open here</Button>
           </div>
         </div>
