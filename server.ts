@@ -8,8 +8,10 @@ import { parse } from 'url'
 import next from 'next'
 import { Server as SocketServer } from 'socket.io'
 import { io as ioClient, Socket as ClientSocket } from 'socket.io-client'
-import { spawn } from 'child_process'
+import { spawn, execSync } from 'child_process'
 import * as os from 'os'
+import * as path from 'path'
+import { promises as fsp } from 'fs'
 
 const dev = process.env.NODE_ENV !== 'production'
 const port = parseInt(process.env.PORT || '4000', 10)
@@ -25,6 +27,68 @@ try {
     ptyModule = require('node-pty')
   } catch {
     console.warn('[terminal] node-pty not available — install @homebridge/node-pty-prebuilt-multiarch for local terminals')
+  }
+}
+
+// ── Hosted hook enrollment ───────────────────────────────────────────────────
+//
+// When a terminal pane is bound to a hosted project, we enrol its working
+// directory so BOTH local CLIs self-report prompts to the hosted timeline:
+//   • claude  → via the .claude/settings.json UserPromptSubmit/PostToolUse/Stop
+//     hooks (they shell out to `orquesta-agent hook <event>`).
+//   • orquesta-cli → via its built-in prompt-reporter, which keys off
+//     .orquesta.json.
+// This is the handler the cockpit UI (AgentGrid `hook:init-project`) has always
+// emitted but the standalone server never implemented — so panes "connected" to
+// a project streamed as a viewer but logged NO prompts. That was the bug.
+
+const HOME_DIR = os.homedir()
+
+// The pane's working directory. Falls back to $HOME (where a default pane's PTY
+// actually spawns) — NEVER process.cwd(), which here is the cockpit repo dir.
+function hookTargetDir(cwd?: string): string {
+  return cwd || process.env.ORQUESTA_WORKDIR || HOME_DIR
+}
+
+// Refuse to enrol the home directory itself: writing hooks into ~/.claude/
+// settings.json would make EVERY claude session on the machine report to this
+// project, and a ~/.orquesta.json would capture every orquesta-cli run under
+// $HOME. Enrollment must target a real project folder.
+function isEnrollableDir(dir: string): boolean {
+  try {
+    return path.resolve(dir) !== path.resolve(HOME_DIR)
+  } catch {
+    return false
+  }
+}
+
+// Resolve the orquesta-agent binary (needed only for the claude hooks; the
+// orquesta-cli path works off .orquesta.json alone).
+function resolveOrquestaAgentBin(): string | null {
+  try {
+    const probe = process.platform === 'win32' ? 'where orquesta-agent' : 'command -v orquesta-agent'
+    const resolved = execSync(probe, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
+      .split(/\r?\n/)[0]
+      .trim()
+    return resolved || null
+  } catch {
+    return null
+  }
+}
+
+// Read the enrolled project (never the token) from an existing .orquesta.json.
+async function readHookStatus(dir: string): Promise<{ configured: boolean; projectId?: string | null; projectName?: string | null; apiUrl?: string | null }> {
+  try {
+    const raw = await fsp.readFile(path.join(dir, '.orquesta.json'), 'utf8')
+    const cfg = JSON.parse(raw)
+    return {
+      configured: true,
+      projectId: cfg.projectId || null,
+      projectName: cfg.projectName || null,
+      apiUrl: cfg.apiUrl || null,
+    }
+  } catch {
+    return { configured: false }
   }
 }
 
@@ -384,6 +448,103 @@ app.prepare().then(() => {
       if (term) { term.kill(); sessions.delete(sessionId) }
       if (sharedTerminals.has(sessionId)) stopShare(sessionId, { emitEnded: true })
     })
+
+    // ── Hosted hook enrollment (report local CLI prompts to the timeline) ─
+    //
+    // Dashboard/cockpit asks: is this dir already hooked, and to which project?
+    socket.on('hook:status', async ({ cwd }: { cwd?: string } = {}) => {
+      const dir = hookTargetDir(cwd)
+      const status = await readHookStatus(dir)
+      socket.emit('hook:status_result', { cwd: dir, ...status })
+    })
+
+    // Enrol the pane's working dir into a hosted project: write .orquesta.json
+    // (+ .gitignore it) and, when orquesta-agent is on PATH, the claude hooks.
+    socket.on(
+      'hook:init-project',
+      async ({ token, apiUrl, projectId, projectName, cwd }: {
+        token?: string; apiUrl?: string; projectId?: string; projectName?: string; cwd?: string
+      } = {}) => {
+        const dir = hookTargetDir(cwd)
+        const emitResult = (ok: boolean, message: string, extra: Record<string, unknown> = {}) =>
+          socket.emit('hook:result', { ok, cwd: dir, message, ...extra })
+
+        if (!token || !projectId) {
+          return emitResult(false, 'Token and projectId are required.')
+        }
+        if (!isEnrollableDir(dir)) {
+          return emitResult(
+            false,
+            'This terminal is running in your home directory. Open it in the project’s folder (set the pane’s working directory) to enable prompt logging — enrolling $HOME would hook every session on the machine.',
+          )
+        }
+
+        try {
+          const orquestaJson = path.join(dir, '.orquesta.json')
+          const config = {
+            projectId,
+            ...(projectName ? { projectName } : {}),
+            token,
+            apiUrl: apiUrl || 'https://getorquesta.com',
+          }
+          await fsp.writeFile(orquestaJson, JSON.stringify(config, null, 2) + '\n')
+
+          // .gitignore — the file holds a token, keep it out of git.
+          const gitignorePath = path.join(dir, '.gitignore')
+          try {
+            const existing = await fsp.readFile(gitignorePath, 'utf8').catch(() => '')
+            if (!existing.includes('.orquesta.json')) {
+              await fsp.appendFile(gitignorePath, '\n# Orquesta hook config (contains token)\n.orquesta.json\n')
+            }
+          } catch { /* .gitignore is best-effort */ }
+
+          // .claude/settings.json — add hooks only if orquesta-agent is present.
+          const bin = resolveOrquestaAgentBin()
+          let claudeHooked = false
+          if (bin) {
+            const claudeDir = path.join(dir, '.claude')
+            const settingsPath = path.join(claudeDir, 'settings.json')
+            await fsp.mkdir(claudeDir, { recursive: true })
+
+            let settings: any = {}
+            try { settings = JSON.parse(await fsp.readFile(settingsPath, 'utf8')) } catch { /* new file */ }
+            if (!settings.hooks) settings.hooks = {}
+
+            const hookCmd = (event: string) => `${bin} hook ${event}`
+            const hookEntries: Record<string, any> = {
+              UserPromptSubmit: [{ hooks: [{ type: 'command', command: hookCmd('prompt-submit') }] }],
+              PostToolUse: [{ matcher: 'Edit|Write|Bash|Read|Glob|Grep', hooks: [{ type: 'command', command: hookCmd('tool-use'), async: true }] }],
+              Stop: [{ hooks: [{ type: 'command', command: hookCmd('stop') }] }],
+            }
+
+            for (const [event, entry] of Object.entries(hookEntries)) {
+              if (!settings.hooks[event]) {
+                settings.hooks[event] = entry
+              } else if (Array.isArray(settings.hooks[event])) {
+                const has = settings.hooks[event].some((e: any) =>
+                  e.hooks?.some((h: any) => h.command?.includes('orquesta-agent hook')),
+                )
+                if (!has) settings.hooks[event] = [...settings.hooks[event], ...entry]
+              }
+            }
+
+            await fsp.writeFile(settingsPath, JSON.stringify(settings, null, 2) + '\n')
+            claudeHooked = true
+          }
+
+          emitResult(
+            true,
+            claudeHooked
+              ? `Hooked "${projectName || projectId}" — restart the CLI in this pane so prompts start logging.`
+              : `Enrolled "${projectName || projectId}" for orquesta-cli. Install orquesta-agent (npm i -g orquesta-agent) to also log claude prompts.`,
+            { configured: true, projectId, projectName, claudeHooked },
+          )
+          console.log(`[terminal] Hook configured for project "${projectName || projectId}" in ${dir}`)
+        } catch (err: any) {
+          emitResult(false, `Failed to write hook files: ${err.message}`)
+        }
+      },
+    )
 
     // ── Share terminal to Orquesta ──────────────────────────────────────
     socket.on('terminal:share', async (opts: {

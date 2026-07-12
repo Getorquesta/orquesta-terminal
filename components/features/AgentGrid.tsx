@@ -893,6 +893,23 @@ function AgentGridInner({
   const cellsRef = useRef<GridCell[]>([])
   cellsRef.current = cells
 
+  // Surface hook-enrollment outcome (success / home-dir guard / missing bin) —
+  // otherwise binding a pane to a project gives the user no feedback.
+  const [enrollMsg, setEnrollMsg] = useState<{ ok: boolean; message: string } | null>(null)
+  useEffect(() => {
+    if (!socket) return
+    const onResult = (r: { ok?: boolean; message?: string } = {}) => {
+      setEnrollMsg({ ok: !!r.ok, message: r.message || (r.ok ? 'Hook configured.' : 'Hook failed.') })
+    }
+    socket.on('hook:result', onResult)
+    return () => { socket.off('hook:result', onResult) }
+  }, [socket])
+  useEffect(() => {
+    if (!enrollMsg) return
+    const t = setTimeout(() => setEnrollMsg(null), 8000)
+    return () => clearTimeout(t)
+  }, [enrollMsg])
+
   // ── Load persisted state (per-project) + global font size. ──
   useEffect(() => {
     loadedRef.current = false
@@ -984,11 +1001,15 @@ function AgentGridInner({
     // the working directory has .orquesta.json pointing at that project.
     if (hostedProjectId && hostedToken && socket) {
       const project = hostedProjects?.find(p => p.id === hostedProjectId)
+      // Enrol the pane's OWN working directory (not the server cwd) so the hook
+      // files land where this terminal's CLI actually runs.
+      const cell = cellsRef.current.find(c => c.id === id)
       socket.emit('hook:init-project', {
         token: hostedToken,
         apiUrl: hostedApiUrl,
         projectId: hostedProjectId,
         projectName: project?.name,
+        cwd: cell?.cwd,
       })
     }
   }, [socket, hostedToken, hostedApiUrl, hostedProjects])
@@ -1073,6 +1094,22 @@ function AgentGridInner({
           <Plus className="h-4 w-4" /> Add Terminal
         </Button>
       </div>
+
+      {enrollMsg && (
+        <div
+          className={`mb-3 flex items-start gap-2 rounded-lg border px-3 py-2 text-xs ${
+            enrollMsg.ok
+              ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300'
+              : 'border-amber-500/30 bg-amber-500/10 text-amber-200'
+          }`}
+        >
+          {enrollMsg.ok ? <Check className="mt-0.5 h-3.5 w-3.5 shrink-0" /> : <Cloud className="mt-0.5 h-3.5 w-3.5 shrink-0" />}
+          <span className="flex-1">{enrollMsg.message}</span>
+          <button onClick={() => setEnrollMsg(null)} className="shrink-0 text-current/60 hover:text-current" title="Dismiss">
+            <X className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      )}
 
       <ResponsiveGridLayout
         width={containerWidth}
