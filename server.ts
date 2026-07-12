@@ -7,7 +7,9 @@ import { createServer } from 'http'
 import { parse } from 'url'
 import next from 'next'
 import { Server as SocketServer } from 'socket.io'
+import { io as ioClient, Socket as ClientSocket } from 'socket.io-client'
 import { spawn } from 'child_process'
+import * as os from 'os'
 
 const dev = process.env.NODE_ENV !== 'production'
 const port = parseInt(process.env.PORT || '4000', 10)
@@ -39,6 +41,165 @@ app.prepare().then(() => {
 
   // Track active PTY sessions
   const sessions = new Map<string, any>()
+
+  // ── Share-to-Orquesta bridge ─────────────────────────────────────────
+  // When a user clicks "Share terminal" on a pane, we stream that PTY over the
+  // Orquesta WS (ws.orquesta.live) onto channel agent:project-{id} as the same
+  // session:started/session:output events the getorquesta.com dashboard already
+  // consumes (InteractiveSession). Teammates open it from the "Shared Terminals"
+  // sub-tab. A DB row (via the oclt_-authed REST API) is the read-model so the
+  // list survives even if no one had the dashboard open at share time.
+  const WS_URL = process.env.ORQUESTA_WS_URL || 'https://ws.orquesta.live'
+  const MAX_SHARE_BUFFER = 200_000 // ~200 KB scrollback replayed to late joiners
+  const HOSTNAME = os.hostname()
+
+  interface SharedInfo {
+    sessionId: string
+    projectId: string
+    channel: string
+    apiUrl: string
+    cliToken: string
+    cliType: string
+    cwd?: string
+    allowControl: boolean
+    buffer: string
+    cloud: ClientSocket
+  }
+  const sharedTerminals = new Map<string, SharedInfo>()
+  // One cloud socket per (apiUrl+cliToken+projectId) — reference-counted by share.
+  const cloudConns = new Map<string, { socket: ClientSocket; refs: Set<string> }>()
+
+  function connKey(apiUrl: string, cliToken: string, projectId: string) {
+    return `${apiUrl}::${cliToken.slice(0, 12)}::${projectId}`
+  }
+
+  async function registerShare(s: SharedInfo, label: string) {
+    try {
+      await fetch(`${s.apiUrl}/api/orquesta-cli/projects/${s.projectId}/shared-terminals`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${s.cliToken}` },
+        body: JSON.stringify({
+          sessionId: s.sessionId,
+          cliType: s.cliType,
+          cwd: s.cwd,
+          host: HOSTNAME,
+          label,
+          allowControl: s.allowControl,
+        }),
+      })
+    } catch (err) {
+      console.error('[share] register failed:', err)
+    }
+  }
+
+  async function patchShare(s: SharedInfo, patch: Record<string, unknown>) {
+    try {
+      await fetch(`${s.apiUrl}/api/orquesta-cli/projects/${s.projectId}/shared-terminals`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${s.cliToken}` },
+        body: JSON.stringify({ sessionId: s.sessionId, ...patch }),
+      })
+    } catch (err) {
+      console.error('[share] patch failed:', err)
+    }
+  }
+
+  // Cloud → PTY: viewers with control send input/resize; late joiners request a
+  // buffer replay. All keyed by sessionId and gated on allow_control.
+  function wireCloudHandlers(cloud: ClientSocket) {
+    cloud.on('session:input', (p: any) => {
+      const s = sharedTerminals.get(p?.sessionId)
+      if (!s || !s.allowControl) return
+      const term = sessions.get(s.sessionId)
+      if (term) term.write(p.input ?? p.data ?? '')
+    })
+    cloud.on('session:resize', (p: any) => {
+      const s = sharedTerminals.get(p?.sessionId)
+      if (!s || !s.allowControl) return
+      const term = sessions.get(s.sessionId)
+      if (term) try { term.resize(p.cols, p.rows) } catch {}
+    })
+    cloud.on('session:sync_request', (p: any) => {
+      const s = sharedTerminals.get(p?.sessionId)
+      if (!s || !s.buffer) return
+      s.cloud.emit('broadcast', {
+        channel: s.channel, event: 'session:output',
+        payload: { sessionId: s.sessionId, data: s.buffer }, self: false,
+      })
+    })
+  }
+
+  async function startShare(opts: {
+    sessionId: string; projectId: string; apiUrl: string; cliToken: string
+    cliType: string; cwd?: string; label?: string; allowControl: boolean
+  }): Promise<{ ok: boolean; error?: string }> {
+    if (!sessions.has(opts.sessionId)) return { ok: false, error: 'Session not running' }
+    const apiUrl = (opts.apiUrl || 'https://getorquesta.com').replace(/\/$/, '')
+    const channel = `agent:project-${opts.projectId}`
+    const key = connKey(apiUrl, opts.cliToken, opts.projectId)
+
+    let conn = cloudConns.get(key)
+    if (!conn) {
+      const socket = ioClient(WS_URL, {
+        transports: ['websocket', 'polling'],
+        auth: { cliToken: opts.cliToken },
+        reconnection: true,
+      })
+      conn = { socket, refs: new Set() }
+      cloudConns.set(key, conn)
+      wireCloudHandlers(socket)
+      socket.on('connect', () => socket.emit('subscribe', { channel }))
+      if (socket.connected) socket.emit('subscribe', { channel })
+    }
+    conn.refs.add(opts.sessionId)
+
+    const label = opts.label || `${HOSTNAME} — ${opts.cliType}`
+    const info: SharedInfo = {
+      sessionId: opts.sessionId, projectId: opts.projectId, channel, apiUrl,
+      cliToken: opts.cliToken, cliType: opts.cliType, cwd: opts.cwd,
+      allowControl: opts.allowControl, buffer: '', cloud: conn.socket,
+    }
+    sharedTerminals.set(opts.sessionId, info)
+
+    await registerShare(info, label)
+    // Announce the live session on the channel (dashboard InteractiveSession +
+    // SharedTerminalViewer both key off session:started / session:output).
+    conn.socket.emit('broadcast', {
+      channel, event: 'session:started',
+      payload: { sessionId: opts.sessionId, cliType: opts.cliType, workingDirectory: opts.cwd || HOSTNAME },
+      self: false,
+    })
+    return { ok: true }
+  }
+
+  async function stopShare(sessionId: string, opts: { emitEnded?: boolean } = {}) {
+    const s = sharedTerminals.get(sessionId)
+    if (!s) return
+    sharedTerminals.delete(sessionId)
+    if (opts.emitEnded) {
+      s.cloud.emit('broadcast', {
+        channel: s.channel, event: 'session:ended',
+        payload: { sessionId, exitCode: 0 }, self: false,
+      })
+    }
+    await patchShare(s, { status: 'closed' })
+    const key = connKey(s.apiUrl, s.cliToken, s.projectId)
+    const conn = cloudConns.get(key)
+    if (conn) {
+      conn.refs.delete(sessionId)
+      if (conn.refs.size === 0) {
+        try { conn.socket.disconnect() } catch {}
+        cloudConns.delete(key)
+      }
+    }
+  }
+
+  // Heartbeat: keep last_active_at fresh so the dashboard read-model can dim/
+  // sweep stale shares.
+  const shareHeartbeat = setInterval(() => {
+    for (const s of sharedTerminals.values()) patchShare(s, {})
+  }, 60_000)
+  shareHeartbeat.unref?.()
 
   // ── Terminal Monitor (live activity log broadcast to all clients) ──
   const activityAt = new Map<string, number>()
@@ -103,12 +264,25 @@ app.prepare().then(() => {
         term.onData((data: string) => {
           socket.emit('session:output', { sessionId, data })
           logActivity(sessionId, cliType, data)
+          // Mirror to Orquesta if this pane is shared.
+          const shared = sharedTerminals.get(sessionId)
+          if (shared) {
+            shared.buffer += data
+            if (shared.buffer.length > MAX_SHARE_BUFFER) {
+              shared.buffer = shared.buffer.slice(-MAX_SHARE_BUFFER)
+            }
+            shared.cloud.emit('broadcast', {
+              channel: shared.channel, event: 'session:output',
+              payload: { sessionId, data }, self: false,
+            })
+          }
         })
 
         term.onExit(() => {
           sessions.delete(sessionId)
           activityAt.delete(sessionId)
           socket.emit('session:ended', { sessionId })
+          if (sharedTerminals.has(sessionId)) stopShare(sessionId, { emitEnded: true })
           logTerminal('warn', `■ ${cliType} session ended`, sessionId, { cli: cliType, event: 'ended' })
         })
 
@@ -133,6 +307,49 @@ app.prepare().then(() => {
     socket.on('session:end', ({ sessionId }) => {
       const term = sessions.get(sessionId)
       if (term) { term.kill(); sessions.delete(sessionId) }
+      if (sharedTerminals.has(sessionId)) stopShare(sessionId, { emitEnded: true })
+    })
+
+    // Emitted by the client on pane unmount — same as session:end (the previous
+    // omission leaked PTYs when a pane was closed via React teardown).
+    socket.on('session:force_end', ({ sessionId }) => {
+      const term = sessions.get(sessionId)
+      if (term) { term.kill(); sessions.delete(sessionId) }
+      if (sharedTerminals.has(sessionId)) stopShare(sessionId, { emitEnded: true })
+    })
+
+    // ── Share terminal to Orquesta ──────────────────────────────────────
+    socket.on('terminal:share', async (opts: {
+      sessionId: string; projectId: string; apiUrl: string; cliToken: string
+      cliType?: string; cwd?: string; label?: string; allowControl?: boolean
+    }, ack?: (r: { ok: boolean; error?: string }) => void) => {
+      if (!opts?.sessionId || !opts?.projectId || !opts?.cliToken) {
+        const r = { ok: false, error: 'sessionId, projectId and cliToken required' }
+        ack?.(r); socket.emit('terminal:share-status', { sessionId: opts?.sessionId, ...r }); return
+      }
+      const result = await startShare({
+        sessionId: opts.sessionId, projectId: opts.projectId, apiUrl: opts.apiUrl,
+        cliToken: opts.cliToken, cliType: opts.cliType || 'shell', cwd: opts.cwd,
+        label: opts.label, allowControl: opts.allowControl === true,
+      })
+      ack?.(result)
+      socket.emit('terminal:share-status', {
+        sessionId: opts.sessionId, shared: result.ok, error: result.error,
+        allowControl: opts.allowControl === true,
+      })
+    })
+
+    socket.on('terminal:unshare', async ({ sessionId }: { sessionId: string }) => {
+      await stopShare(sessionId, { emitEnded: true })
+      socket.emit('terminal:share-status', { sessionId, shared: false })
+    })
+
+    socket.on('terminal:share-control', async ({ sessionId, allowControl }: { sessionId: string; allowControl: boolean }) => {
+      const s = sharedTerminals.get(sessionId)
+      if (!s) return
+      s.allowControl = allowControl === true
+      await patchShare(s, { allowControl: s.allowControl })
+      socket.emit('terminal:share-status', { sessionId, shared: true, allowControl: s.allowControl })
     })
 
     // ── External Session Detection (import running CLIs) ──────────────

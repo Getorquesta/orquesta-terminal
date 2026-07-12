@@ -6,7 +6,7 @@ import type { LayoutItem, ResponsiveLayouts } from 'react-grid-layout'
 import { Socket } from 'socket.io-client'
 import { GeistMono } from 'geist/font/mono'
 import { Button } from '@/components/ui/button'
-import { Plus, X, Maximize2, GitBranch, LayoutGrid, Pencil, Cloud } from 'lucide-react'
+import { Plus, X, Maximize2, GitBranch, LayoutGrid, Pencil, Cloud, Share2, Eye, Keyboard } from 'lucide-react'
 import '@xterm/xterm/css/xterm.css'
 
 export interface HostedProject {
@@ -126,6 +126,10 @@ function TerminalCell({
   const [branch, setBranch] = useState<string | null>(null)
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState(name)
+  // Share-to-Orquesta state for this pane.
+  const [shared, setShared] = useState(false)
+  const [allowControl, setAllowControl] = useState(false)
+  const [sharing, setSharing] = useState(false)
 
   // Latest callbacks in refs so the (heavy) init effect never re-runs when a
   // parent handler's identity changes — only cellId/socket/cliType restart it.
@@ -340,19 +344,64 @@ function TerminalCell({
       if (data.sessionId !== sessionIdRef.current) return
       setBranch(data.branch)
     }
+    const handleShareStatus = (data: { sessionId: string; shared?: boolean; allowControl?: boolean }) => {
+      if (data.sessionId !== sessionIdRef.current) return
+      setSharing(false)
+      if (typeof data.shared === 'boolean') setShared(data.shared)
+      if (typeof data.allowControl === 'boolean') setAllowControl(data.allowControl)
+    }
 
     socket.on('session:output', handleOutput)
     socket.on('session:ended', handleEnded)
     socket.on('session:error', handleError)
     socket.on('session:meta', handleMeta)
+    socket.on('terminal:share-status', handleShareStatus)
 
     return () => {
       socket.off('session:output', handleOutput)
       socket.off('session:ended', handleEnded)
       socket.off('session:error', handleError)
       socket.off('session:meta', handleMeta)
+      socket.off('terminal:share-status', handleShareStatus)
     }
   }, [socket])
+
+  // Ended sessions can't stay shared.
+  useEffect(() => {
+    const handleEnded = (data: { sessionId: string }) => {
+      if (data.sessionId === sessionIdRef.current) { setShared(false); setAllowControl(false) }
+    }
+    socket?.on('session:ended', handleEnded)
+    return () => { socket?.off('session:ended', handleEnded) }
+  }, [socket])
+
+  const toggleShare = useCallback(() => {
+    if (!socket || !sessionIdRef.current) return
+    if (shared) {
+      socket.emit('terminal:unshare', { sessionId: sessionIdRef.current })
+      setShared(false)
+      setAllowControl(false)
+      return
+    }
+    if (!hostedProjectId || !hostedToken) return
+    setSharing(true)
+    socket.emit('terminal:share', {
+      sessionId: sessionIdRef.current,
+      projectId: hostedProjectId,
+      apiUrl: hostedApiUrl,
+      cliToken: hostedToken,
+      cliType,
+      cwd,
+      allowControl: false,
+    })
+  }, [socket, shared, hostedProjectId, hostedToken, hostedApiUrl, cliType, cwd])
+
+  const toggleControl = useCallback(() => {
+    if (!socket || !sessionIdRef.current || !shared) return
+    const next = !allowControl
+    setAllowControl(next)
+    socket.emit('terminal:share-control', { sessionId: sessionIdRef.current, allowControl: next })
+  }, [socket, shared, allowControl])
 
   const commitRename = () => {
     setEditing(false)
@@ -446,6 +495,39 @@ function TerminalCell({
             <span title="Reporting to hosted">
               <Cloud className="h-3 w-3 shrink-0 text-cyan-400" />
             </span>
+          )}
+          {/* Share terminal: stream this live PTY to the selected Orquesta
+              project so teammates can watch (and, if allowed, drive) it. */}
+          {hostedProjectId && (
+            <button
+              onClick={toggleShare}
+              onMouseDown={(e) => e.stopPropagation()}
+              disabled={sharing}
+              className={`flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-mono transition-colors disabled:opacity-50 ${
+                shared
+                  ? 'bg-cyan-500/20 text-cyan-300 hover:bg-cyan-500/30'
+                  : 'bg-zinc-800/70 text-zinc-400 hover:bg-zinc-700 hover:text-zinc-200'
+              }`}
+              title={shared ? 'Stop sharing this terminal' : 'Share this terminal to the team'}
+            >
+              <Share2 className="h-3 w-3 shrink-0" />
+              {sharing ? 'Sharing…' : shared ? 'Shared' : 'Share'}
+            </button>
+          )}
+          {shared && (
+            <button
+              onClick={toggleControl}
+              onMouseDown={(e) => e.stopPropagation()}
+              className={`flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-mono transition-colors ${
+                allowControl
+                  ? 'bg-emerald-500/20 text-emerald-300 hover:bg-emerald-500/30'
+                  : 'bg-zinc-800/70 text-zinc-400 hover:bg-zinc-700 hover:text-zinc-200'
+              }`}
+              title={allowControl ? 'Teammates can type — click for view-only' : 'View-only — click to let teammates type'}
+            >
+              {allowControl ? <Keyboard className="h-3 w-3" /> : <Eye className="h-3 w-3" />}
+              {allowControl ? 'Control' : 'View-only'}
+            </button>
           )}
         </div>
         <button
