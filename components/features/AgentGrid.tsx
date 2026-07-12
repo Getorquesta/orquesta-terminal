@@ -6,7 +6,7 @@ import type { LayoutItem, ResponsiveLayouts } from 'react-grid-layout'
 import { Socket } from 'socket.io-client'
 import { GeistMono } from 'geist/font/mono'
 import { Button } from '@/components/ui/button'
-import { Plus, X, Maximize2, GitBranch, LayoutGrid, Pencil, Cloud, Share2, Eye, Keyboard, Search, Check, ChevronDown } from 'lucide-react'
+import { Plus, X, Maximize2, GitBranch, LayoutGrid, Pencil, Cloud, Share2, Eye, Keyboard, Search, Check, ChevronDown, Link2, Users } from 'lucide-react'
 import '@xterm/xterm/css/xterm.css'
 
 export interface HostedProject {
@@ -230,6 +230,9 @@ function TerminalCell({
   const [shared, setShared] = useState(false)
   const [allowControl, setAllowControl] = useState(false)
   const [sharing, setSharing] = useState(false)
+  // Dashboard viewers currently watching this shared terminal (presence).
+  const [viewers, setViewers] = useState<{ id: string; name: string }[]>([])
+  const [copied, setCopied] = useState(false)
 
   // Latest callbacks in refs so the (heavy) init effect never re-runs when a
   // parent handler's identity changes — only cellId/socket/cliType restart it.
@@ -447,8 +450,12 @@ function TerminalCell({
     const handleShareStatus = (data: { sessionId: string; shared?: boolean; allowControl?: boolean }) => {
       if (data.sessionId !== sessionIdRef.current) return
       setSharing(false)
-      if (typeof data.shared === 'boolean') setShared(data.shared)
+      if (typeof data.shared === 'boolean') { setShared(data.shared); if (!data.shared) setViewers([]) }
       if (typeof data.allowControl === 'boolean') setAllowControl(data.allowControl)
+    }
+    const handleViewers = (data: { sessionId: string; viewers: { id: string; name: string }[] }) => {
+      if (data.sessionId !== sessionIdRef.current) return
+      setViewers(Array.isArray(data.viewers) ? data.viewers : [])
     }
 
     socket.on('session:output', handleOutput)
@@ -456,6 +463,7 @@ function TerminalCell({
     socket.on('session:error', handleError)
     socket.on('session:meta', handleMeta)
     socket.on('terminal:share-status', handleShareStatus)
+    socket.on('terminal:viewers', handleViewers)
 
     return () => {
       socket.off('session:output', handleOutput)
@@ -463,6 +471,7 @@ function TerminalCell({
       socket.off('session:error', handleError)
       socket.off('session:meta', handleMeta)
       socket.off('terminal:share-status', handleShareStatus)
+      socket.off('terminal:viewers', handleViewers)
     }
   }, [socket])
 
@@ -502,6 +511,26 @@ function TerminalCell({
     setAllowControl(next)
     socket.emit('terminal:share-control', { sessionId: sessionIdRef.current, allowControl: next })
   }, [socket, shared, allowControl])
+
+  // Copy a deep-link that opens THIS shared terminal in the Orquesta dashboard
+  // (Prompts view → Shared Terminals sub-tab → auto-opens the viewer). Paste it
+  // to a teammate; they land straight on the live terminal.
+  const copyShareLink = useCallback(async () => {
+    const sid = sessionIdRef.current
+    if (!sid || !hostedProjectId) return
+    let origin = ''
+    try { origin = hostedApiUrl ? new URL(hostedApiUrl).origin : window.location.origin }
+    catch { origin = typeof window !== 'undefined' ? window.location.origin : '' }
+    const link = `${origin}/dashboard/projects/${hostedProjectId}?view=cli-integration&sharedSession=${encodeURIComponent(sid)}`
+    try {
+      await navigator.clipboard.writeText(link)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1600)
+    } catch {
+      // Clipboard blocked (insecure context / permissions) — surface the link.
+      window.prompt('Copy this link to share the terminal:', link)
+    }
+  }, [hostedProjectId, hostedApiUrl])
 
   const commitRename = () => {
     setEditing(false)
@@ -621,6 +650,34 @@ function TerminalCell({
               {allowControl ? <Keyboard className="h-3 w-3" /> : <Eye className="h-3 w-3" />}
               {allowControl ? 'Control' : 'View-only'}
             </button>
+          )}
+          {shared && (
+            <button
+              onClick={copyShareLink}
+              onMouseDown={(e) => e.stopPropagation()}
+              className={`flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-mono transition-colors ${
+                copied ? 'bg-emerald-500/20 text-emerald-300' : 'bg-zinc-800/70 text-zinc-400 hover:bg-zinc-700 hover:text-zinc-200'
+              }`}
+              title="Copy a link to this shared terminal"
+            >
+              {copied ? <Check className="h-3 w-3" /> : <Link2 className="h-3 w-3" />}
+              {copied ? 'Copied' : 'Copy link'}
+            </button>
+          )}
+          {shared && (
+            <span
+              className={`flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-mono ${
+                viewers.length > 0 ? 'bg-cyan-500/15 text-cyan-300' : 'text-zinc-500'
+              }`}
+              title={
+                viewers.length > 0
+                  ? `Watching now: ${viewers.map((v) => v.name).join(', ')}`
+                  : 'No one is watching yet'
+              }
+            >
+              <Users className="h-3 w-3 shrink-0" />
+              {viewers.length}
+            </span>
           )}
         </div>
         <button

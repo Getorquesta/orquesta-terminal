@@ -68,9 +68,22 @@ app.prepare().then(() => {
   const sharedTerminals = new Map<string, SharedInfo>()
   // One cloud socket per (apiUrl+cliToken+projectId) — reference-counted by share.
   const cloudConns = new Map<string, { socket: ClientSocket; refs: Set<string> }>()
+  // Presence: who (dashboard viewers) is currently watching each shared session.
+  // sessionId → (viewerId → { name, lastSeen }). Viewers announce themselves with
+  // session:viewer_join over the WS channel and heartbeat it; we prune stale ones.
+  const sessionViewers = new Map<string, Map<string, { name: string; lastSeen: number }>>()
+  const VIEWER_STALE_MS = 70_000
 
   function connKey(apiUrl: string, cliToken: string, projectId: string) {
     return `${apiUrl}::${cliToken.slice(0, 12)}::${projectId}`
+  }
+
+  // Push the current viewer list for a session to the LOCAL cockpit UI (the pane
+  // that owns this PTY filters by sessionId). Broadcast to all local clients.
+  function emitViewers(sessionId: string) {
+    const m = sessionViewers.get(sessionId)
+    const viewers = m ? Array.from(m.entries()).map(([id, v]) => ({ id, name: v.name })) : []
+    io.emit('terminal:viewers', { sessionId, viewers })
   }
 
   async function registerShare(s: SharedInfo, label: string) {
@@ -127,6 +140,21 @@ app.prepare().then(() => {
         payload: { sessionId: s.sessionId, data: s.buffer }, self: false,
       })
     })
+    // Presence: a dashboard viewer opened / heartbeats this shared terminal.
+    cloud.on('session:viewer_join', (p: any) => {
+      const sid = p?.sessionId
+      if (!sid || !sharedTerminals.has(sid) || !p?.viewer?.id) return
+      let m = sessionViewers.get(sid)
+      if (!m) { m = new Map(); sessionViewers.set(sid, m) }
+      m.set(String(p.viewer.id), { name: String(p.viewer.name || 'Someone'), lastSeen: Date.now() })
+      emitViewers(sid)
+    })
+    cloud.on('session:viewer_leave', (p: any) => {
+      const sid = p?.sessionId
+      const m = sid ? sessionViewers.get(sid) : undefined
+      if (!m || !p?.viewerId) return
+      if (m.delete(String(p.viewerId))) emitViewers(sid)
+    })
   }
 
   async function startShare(opts: {
@@ -169,6 +197,11 @@ app.prepare().then(() => {
       payload: { sessionId: opts.sessionId, cliType: opts.cliType, workingDirectory: opts.cwd || HOSTNAME },
       self: false,
     })
+    // Ask any viewers already on the channel to re-announce their presence.
+    conn.socket.emit('broadcast', {
+      channel, event: 'session:viewer_ping', payload: { sessionId: opts.sessionId }, self: false,
+    })
+    emitViewers(opts.sessionId)
     return { ok: true }
   }
 
@@ -176,6 +209,8 @@ app.prepare().then(() => {
     const s = sharedTerminals.get(sessionId)
     if (!s) return
     sharedTerminals.delete(sessionId)
+    sessionViewers.delete(sessionId)
+    emitViewers(sessionId)
     if (opts.emitEnded) {
       s.cloud.emit('broadcast', {
         channel: s.channel, event: 'session:ended',
@@ -200,6 +235,19 @@ app.prepare().then(() => {
     for (const s of sharedTerminals.values()) patchShare(s, {})
   }, 60_000)
   shareHeartbeat.unref?.()
+
+  // Drop viewers who stopped heartbeating (closed the tab without a clean leave).
+  const viewerPrune = setInterval(() => {
+    const now = Date.now()
+    for (const [sid, m] of sessionViewers) {
+      let changed = false
+      for (const [vid, v] of m) {
+        if (now - v.lastSeen > VIEWER_STALE_MS) { m.delete(vid); changed = true }
+      }
+      if (changed) emitViewers(sid)
+    }
+  }, 30_000)
+  viewerPrune.unref?.()
 
   // ── Terminal Monitor (live activity log broadcast to all clients) ──
   const activityAt = new Map<string, number>()
