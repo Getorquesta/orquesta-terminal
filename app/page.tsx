@@ -56,6 +56,11 @@ interface BgSettings {
 }
 
 const BG_KEY = 'orquesta-terminal-bg'
+// Remember the selected project across reloads. Without this, projectId reset to
+// '' on every reload, flipping the grid's storageKey from `orquesta-grid-<id>`
+// to `orquesta-grid-standalone` — so the panes opened under a project silently
+// vanished after a refresh (they were still saved, just under the other key).
+const PROJECT_KEY = 'orquesta-active-project'
 const DEFAULT_BG: BgSettings = { wallpaper: 'aurora', url: '', opacity: 0.55, blur: 0, termOpacity: 1 }
 
 export default function TerminalWorkspacePage() {
@@ -86,7 +91,21 @@ export default function TerminalWorkspacePage() {
       const saved = localStorage.getItem(BG_KEY)
       if (saved) setBg({ ...DEFAULT_BG, ...JSON.parse(saved) })
     } catch {}
+    // Restore the last-selected project so the grid's storageKey stays stable
+    // across reloads and the panes come back.
+    try {
+      const savedProject = localStorage.getItem(PROJECT_KEY)
+      if (savedProject) setProjectId(savedProject)
+    } catch {}
   }, [router])
+
+  // Persist the selected project so a reload restores the same grid.
+  useEffect(() => {
+    try {
+      if (projectId) localStorage.setItem(PROJECT_KEY, projectId)
+      else localStorage.removeItem(PROJECT_KEY)
+    } catch {}
+  }, [projectId])
 
   const updateBg = useCallback((patch: Partial<BgSettings>) => {
     setBg(prev => {

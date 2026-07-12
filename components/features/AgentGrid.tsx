@@ -6,7 +6,7 @@ import type { LayoutItem, ResponsiveLayouts } from 'react-grid-layout'
 import { Socket } from 'socket.io-client'
 import { GeistMono } from 'geist/font/mono'
 import { Button } from '@/components/ui/button'
-import { Plus, X, Maximize2, GitBranch, LayoutGrid, Pencil, Cloud, Share2, Eye, Keyboard, Search, Check, ChevronDown, Link2, Users } from 'lucide-react'
+import { Plus, X, Maximize2, GitBranch, LayoutGrid, Pencil, Cloud, Share2, Eye, Keyboard, Search, Check, ChevronDown, Link2, Users, Cpu, AlertTriangle } from 'lucide-react'
 import '@xterm/xterm/css/xterm.css'
 
 export interface HostedProject {
@@ -266,10 +266,14 @@ interface TerminalCellProps {
   cwd?: string
   /** Imported panes: resume this CLI session id (e.g. claude --resume). */
   resumeId?: string
+  /** This pane's project already has a local daemon (this machine is its agent). */
+  daemonRunning?: boolean
   onClose: () => void
   onCliTypeChange: (v: CliType) => void
   onRename: (v: string) => void
   onHostedProjectChange: (projectId: string | undefined) => void
+  /** Open the "make this the project agent" (daemon takeover) confirm modal. */
+  onMakeAgent: () => void
   onFocusCell: () => void
   onNew: () => void
   onArrange: () => void
@@ -279,8 +283,8 @@ interface TerminalCellProps {
 
 function TerminalCell({
   cellId, socket, cliType, name, fontSize, opacity, hostedApiUrl, hostedToken,
-  hostedProjects, hostedProjectId, cwd, resumeId,
-  onClose, onCliTypeChange, onRename, onHostedProjectChange, onFocusCell, onNew, onArrange, onZoom, registerApi,
+  hostedProjects, hostedProjectId, cwd, resumeId, daemonRunning,
+  onClose, onCliTypeChange, onRename, onHostedProjectChange, onMakeAgent, onFocusCell, onNew, onArrange, onZoom, registerApi,
 }: TerminalCellProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const termRef = useRef<import('@xterm/xterm').Terminal | null>(null)
@@ -743,6 +747,23 @@ function TerminalCell({
               <Cloud className="h-3 w-3 shrink-0 text-cyan-400" />
             </span>
           )}
+          {/* Daemon takeover: promote this terminal into the project's agent so
+              it receives dispatched prompts from the dashboard. */}
+          {hostedProjectId && (
+            <button
+              onClick={onMakeAgent}
+              onMouseDown={(e) => e.stopPropagation()}
+              className={`flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-mono transition-colors ${
+                daemonRunning
+                  ? 'bg-emerald-500/20 text-emerald-300 hover:bg-emerald-500/30'
+                  : 'bg-zinc-800/70 text-zinc-400 hover:bg-zinc-700 hover:text-zinc-200'
+              }`}
+              title={daemonRunning ? 'This terminal is the project agent — click to manage/stop' : 'Make this terminal the project agent (receive dispatched prompts)'}
+            >
+              <Cpu className="h-3 w-3 shrink-0" />
+              {daemonRunning ? 'Agent ●' : 'Make agent'}
+            </button>
+          )}
           {/* Share terminal: stream this live PTY to the selected Orquesta
               project so teammates can watch (and, if allowed, drive) it. */}
           {hostedProjectId && (
@@ -878,6 +899,86 @@ function buildTidyLayout(cells: GridCell[]): LayoutItem[] {
   }))
 }
 
+/**
+ * Pre-flight confirmation for daemon takeover. Shows any agents already online
+ * for the project (so the user knows they'd add a second executor — untargeted
+ * dispatch would double-run) and confirms before spawning the local daemon. If a
+ * local daemon is already running for the project, offers to stop it instead.
+ */
+function DaemonTakeoverModal({
+  modal, busy, onConfirm, onStop, onClose,
+}: {
+  modal: { projectId: string; projectName?: string; cwd?: string; loading: boolean; online: { id: string; name: string; lastSeen: string | null }[]; localRunning: boolean; error?: string }
+  busy: boolean
+  onConfirm: () => void
+  onStop: () => void
+  onClose: () => void
+}) {
+  const label = modal.projectName || modal.projectId
+  return (
+    <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 p-4" onMouseDown={onClose}>
+      <div
+        className="w-full max-w-md rounded-lg border border-zinc-700 bg-zinc-900 shadow-2xl"
+        onMouseDown={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between border-b border-zinc-800 px-4 py-3">
+          <div className="flex items-center gap-2 text-sm font-medium text-zinc-100">
+            <Cpu className="h-4 w-4 text-emerald-400" />
+            {modal.localRunning ? 'Project agent (running)' : 'Make this the project agent'}
+          </div>
+          <button onClick={onClose} className="text-zinc-500 hover:text-zinc-300"><X className="h-4 w-4" /></button>
+        </div>
+        <div className="space-y-3 px-4 py-4 text-xs text-zinc-300">
+          <p>
+            This spawns <span className="font-mono text-zinc-100">orquesta-agent --daemon</span> on this machine for{' '}
+            <span className="font-mono text-cyan-300">{label}</span>. It will receive prompts dispatched from the dashboard and run them here.
+          </p>
+          <p className="text-zinc-500">
+            Working dir: <span className="font-mono">{modal.cwd || '$HOME'}</span>
+          </p>
+
+          {modal.loading ? (
+            <div className="text-zinc-500">Checking for agents already online…</div>
+          ) : modal.error ? (
+            <div className="rounded border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-amber-200">
+              Couldn’t check existing agents: {modal.error}. You can still proceed.
+            </div>
+          ) : modal.online.length > 0 ? (
+            <div className="rounded border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-amber-200">
+              <div className="mb-1 flex items-center gap-1.5 font-medium">
+                <AlertTriangle className="h-3.5 w-3.5" />
+                {modal.online.length} agent{modal.online.length > 1 ? 's' : ''} already online for this project
+              </div>
+              <ul className="ml-1 list-inside list-disc space-y-0.5 text-amber-200/90">
+                {modal.online.map((a) => <li key={a.id} className="font-mono">{a.name}</li>)}
+              </ul>
+              <p className="mt-1.5 text-amber-200/70">
+                Dispatched prompts go to every online agent, so adding this one means both would run each prompt. Stop the other agent first if you don’t want double execution.
+              </p>
+            </div>
+          ) : (
+            <div className="rounded border border-emerald-500/20 bg-emerald-500/5 px-3 py-2 text-emerald-300/90">
+              No other agent is online for this project — safe to take over.
+            </div>
+          )}
+        </div>
+        <div className="flex items-center justify-end gap-2 border-t border-zinc-800 px-4 py-3">
+          <Button variant="outline" size="sm" onClick={onClose} disabled={busy}>Cancel</Button>
+          {modal.localRunning ? (
+            <Button size="sm" variant="danger" onClick={onStop} disabled={busy}>
+              {busy ? 'Stopping…' : 'Stop agent'}
+            </Button>
+          ) : (
+            <Button size="sm" onClick={onConfirm} disabled={busy || modal.loading}>
+              {busy ? 'Starting…' : 'Start agent'}
+            </Button>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function AgentGridInner({
   socket, containerWidth, containerHeight, storageKey, terminalOpacity = 1, hostedApiUrl, hostedToken, hostedProjects,
   apiRef,
@@ -887,11 +988,117 @@ function AgentGridInner({
   const [layouts, setLayouts] = useState<ResponsiveLayouts>({ lg: [] })
   const [fontSize, setFontSize] = useState(DEFAULT_FONT)
   const loadedRef = useRef(false)
+  // The storageKey the persist effect last committed under. Lets it skip the one
+  // commit where `key` changes (stale cells closure) before re-persisting.
+  const persistKeyRef = useRef(key)
   const toolbarRef = useRef<HTMLDivElement>(null)
   const activeCellIdRef = useRef<string | null>(null)
   const cellApiRef = useRef<Map<string, CellApi>>(new Map())
   const cellsRef = useRef<GridCell[]>([])
   cellsRef.current = cells
+
+  // ── Daemon takeover state ──────────────────────────────────────────────
+  // Which projects currently have a local daemon running (this machine is their
+  // agent), keyed by projectId. Populated from daemon:status broadcasts.
+  const [daemonStatus, setDaemonStatus] = useState<Record<string, { running: boolean; pid?: number }>>({})
+  // The pre-flight confirmation modal (populated by daemon:preflight-result).
+  const [daemonModal, setDaemonModal] = useState<
+    | null
+    | {
+        projectId: string
+        projectName?: string
+        cwd?: string
+        loading: boolean
+        online: { id: string; name: string; lastSeen: string | null }[]
+        localRunning: boolean
+        error?: string
+      }
+  >(null)
+  const [daemonBusy, setDaemonBusy] = useState(false)
+  const [daemonMsg, setDaemonMsg] = useState<{ ok: boolean; message: string } | null>(null)
+
+  useEffect(() => {
+    if (!socket) return
+    const onStatus = (s: { projectId?: string; running?: boolean; pid?: number } = {}) => {
+      if (!s.projectId) return
+      setDaemonStatus((prev) => ({ ...prev, [s.projectId!]: { running: !!s.running, pid: s.pid } }))
+    }
+    const onStatusAll = (list: { projectId: string; running?: boolean; pid?: number }[] = []) => {
+      setDaemonStatus(() => {
+        const next: Record<string, { running: boolean; pid?: number }> = {}
+        for (const d of list) next[d.projectId] = { running: d.running !== false, pid: d.pid }
+        return next
+      })
+    }
+    const onPreflight = (r: any = {}) => {
+      setDaemonModal((m) =>
+        m && m.projectId === r.projectId
+          ? {
+              ...m,
+              loading: false,
+              online: Array.isArray(r.online) ? r.online : [],
+              localRunning: !!r.localDaemon?.running,
+              error: r.ok ? undefined : r.error || 'Pre-flight failed',
+            }
+          : m,
+      )
+    }
+    const onResult = (r: { ok?: boolean; message?: string } = {}) => {
+      setDaemonBusy(false)
+      setDaemonMsg({ ok: !!r.ok, message: r.message || (r.ok ? 'Done.' : 'Failed.') })
+      if (r.ok) setDaemonModal(null)
+    }
+    socket.on('daemon:status', onStatus)
+    socket.on('daemon:status-all', onStatusAll)
+    socket.on('daemon:preflight-result', onPreflight)
+    socket.on('daemon:result', onResult)
+    socket.emit('daemon:status-request', {})
+    return () => {
+      socket.off('daemon:status', onStatus)
+      socket.off('daemon:status-all', onStatusAll)
+      socket.off('daemon:preflight-result', onPreflight)
+      socket.off('daemon:result', onResult)
+    }
+  }, [socket])
+
+  useEffect(() => {
+    if (!daemonMsg) return
+    const t = setTimeout(() => setDaemonMsg(null), 8000)
+    return () => clearTimeout(t)
+  }, [daemonMsg])
+
+  // Open the takeover confirm modal for a pane: run pre-flight (list agents
+  // already online for the project) so the user sees what they'd compete with.
+  const openDaemonModal = useCallback((cellId: string) => {
+    const cell = cellsRef.current.find((c) => c.id === cellId)
+    if (!cell?.hostedProjectId || !hostedToken || !socket) return
+    const project = hostedProjects?.find((p) => p.id === cell.hostedProjectId)
+    setDaemonModal({
+      projectId: cell.hostedProjectId,
+      projectName: project?.name,
+      cwd: cell.cwd,
+      loading: true,
+      online: [],
+      localRunning: !!daemonStatus[cell.hostedProjectId]?.running,
+    })
+    socket.emit('daemon:preflight', { apiUrl: hostedApiUrl, cliToken: hostedToken, projectId: cell.hostedProjectId })
+  }, [socket, hostedToken, hostedApiUrl, hostedProjects, daemonStatus])
+
+  const confirmDaemonStart = useCallback(() => {
+    if (!daemonModal || !socket || !hostedToken) return
+    setDaemonBusy(true)
+    socket.emit('daemon:start', {
+      apiUrl: hostedApiUrl, cliToken: hostedToken,
+      projectId: daemonModal.projectId, projectName: daemonModal.projectName, cwd: daemonModal.cwd,
+    })
+  }, [daemonModal, socket, hostedToken, hostedApiUrl])
+
+  const stopDaemon = useCallback((projectId: string) => {
+    if (!socket) return
+    setDaemonBusy(true)
+    socket.emit('daemon:stop', { projectId })
+    setTimeout(() => setDaemonBusy(false), 500)
+  }, [socket])
 
   // Surface hook-enrollment outcome (success / home-dir guard / missing bin) —
   // otherwise binding a pane to a project gives the user no feedback.
@@ -911,27 +1118,34 @@ function AgentGridInner({
   }, [enrollMsg])
 
   // ── Load persisted state (per-project) + global font size. ──
+  // `key` can change AFTER mount (e.g. the page restores the last-selected
+  // project a tick after render), so this always fully reconciles cells+layouts
+  // for the new key — including resetting to empty when the new key has nothing
+  // saved, so a fresh project never shows the previous project's panes.
   useEffect(() => {
     loadedRef.current = false
+    let nextCells: GridCell[] = []
+    let nextLayouts: ResponsiveLayouts = { lg: [] }
     try {
       const saved = localStorage.getItem(key)
       if (saved) {
         const p = JSON.parse(saved)
         if (p && Array.isArray(p.cells)) {
-          const loadedCells: GridCell[] = p.cells
-          setCells(loadedCells)
+          nextCells = p.cells
           const lg = (p.layouts?.lg as LayoutItem[] | undefined) || []
           // Reconcile: every restored pane needs a layout item.
-          if (lg.length === loadedCells.length && loadedCells.every((c) => lg.some((l) => l.i === c.id))) {
-            setLayouts(p.layouts)
+          if (lg.length === nextCells.length && nextCells.every((c) => lg.some((l) => l.i === c.id))) {
+            nextLayouts = p.layouts
           } else {
-            setLayouts({ lg: buildTidyLayout(loadedCells) })
+            nextLayouts = { lg: buildTidyLayout(nextCells) }
           }
         } else if (p && (p.lg || p.md || p.sm)) {
-          setLayouts(p) // legacy layouts-only shape — no panes to restore
+          nextLayouts = p // legacy layouts-only shape — no panes to restore
         }
       }
     } catch {}
+    setCells(nextCells)
+    setLayouts(nextLayouts)
     try {
       const f = parseInt(localStorage.getItem(FONT_KEY) || '', 10)
       if (f >= MIN_FONT && f <= MAX_FONT) setFontSize(f)
@@ -939,9 +1153,12 @@ function AgentGridInner({
     loadedRef.current = true
   }, [key])
 
-  // Persist cells + layouts whenever they change (after initial load).
+  // Persist cells + layouts whenever they change (after initial load). Skips the
+  // render where `key` just changed so we never clobber the new key with the
+  // previous project's cells (stale closure) before the load effect reconciles.
   useEffect(() => {
     if (!loadedRef.current) return
+    if (persistKeyRef.current !== key) { persistKeyRef.current = key; return }
     try {
       const payload: PersistShape = { v: 3, cells, layouts }
       localStorage.setItem(key, JSON.stringify(payload))
@@ -1111,6 +1328,32 @@ function AgentGridInner({
         </div>
       )}
 
+      {daemonMsg && (
+        <div
+          className={`mb-3 flex items-start gap-2 rounded-lg border px-3 py-2 text-xs ${
+            daemonMsg.ok
+              ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300'
+              : 'border-amber-500/30 bg-amber-500/10 text-amber-200'
+          }`}
+        >
+          {daemonMsg.ok ? <Check className="mt-0.5 h-3.5 w-3.5 shrink-0" /> : <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />}
+          <span className="flex-1">{daemonMsg.message}</span>
+          <button onClick={() => setDaemonMsg(null)} className="shrink-0 text-current/60 hover:text-current" title="Dismiss">
+            <X className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      )}
+
+      {daemonModal && (
+        <DaemonTakeoverModal
+          modal={daemonModal}
+          busy={daemonBusy}
+          onConfirm={confirmDaemonStart}
+          onStop={() => stopDaemon(daemonModal.projectId)}
+          onClose={() => setDaemonModal(null)}
+        />
+      )}
+
       <ResponsiveGridLayout
         width={containerWidth}
         layouts={layouts}
@@ -1138,10 +1381,12 @@ function AgentGridInner({
               hostedProjectId={cell.hostedProjectId}
               cwd={cell.cwd}
               resumeId={cell.resumeId}
+              daemonRunning={!!(cell.hostedProjectId && daemonStatus[cell.hostedProjectId]?.running)}
               onClose={() => removeCell(cell.id)}
               onCliTypeChange={(v) => setCellCli(cell.id, v)}
               onRename={(v) => setCellName(cell.id, v)}
               onHostedProjectChange={(v) => setCellHostedProject(cell.id, v)}
+              onMakeAgent={() => openDaemonModal(cell.id)}
               onFocusCell={() => { activeCellIdRef.current = cell.id }}
               onNew={() => addCell()}
               onArrange={arrange}

@@ -92,6 +92,46 @@ async function readHookStatus(dir: string): Promise<{ configured: boolean; proje
   }
 }
 
+// ── Daemon takeover ──────────────────────────────────────────────────────────
+//
+// "Make this the project agent": promote a local terminal into the daemon that
+// receives dispatched prompts from getorquesta.com (channel agent:project-{id}).
+// We mint a project-scoped oat_ (via the oclt_-authed cockpit endpoint) and
+// spawn the canonical `orquesta-agent --daemon`, which speaks the hosted
+// protocol (validate/heartbeat + ws-client). NOTE: the legacy OSS agent/index.js
+// only talks to a local OSS backend, so it would NOT receive hosted dispatch —
+// the real hosted daemon is always orquesta-agent.
+//
+// Daemons are machine-level and keyed by projectId; they deliberately OUTLIVE
+// the socket that started them (closing the browser tab must not kill the
+// agent). Status is broadcast to every connected cockpit client.
+
+interface DaemonInfo {
+  projectId: string
+  projectName?: string
+  tokenName: string
+  tokenId?: string
+  cwd: string
+  pid?: number
+  startedAt: number
+  child: ReturnType<typeof spawn>
+  logTail: string[] // last N log lines for late status requests
+}
+const daemons = new Map<string, DaemonInfo>()
+const DAEMON_LOG_TAIL = 60
+
+function daemonPublic(d: DaemonInfo) {
+  return {
+    projectId: d.projectId,
+    projectName: d.projectName,
+    tokenName: d.tokenName,
+    pid: d.pid,
+    cwd: d.cwd,
+    startedAt: d.startedAt,
+    running: !!d.child && d.child.exitCode === null,
+  }
+}
+
 app.prepare().then(() => {
   const server = createServer((req, res) => {
     const parsedUrl = parse(req.url!, true)
@@ -545,6 +585,166 @@ app.prepare().then(() => {
         }
       },
     )
+
+    // ── Daemon takeover ─────────────────────────────────────────────────
+    // Pre-flight: list agents already online for this project so the UI can
+    // warn about a competing daemon before the user confirms takeover.
+    socket.on('daemon:preflight', async ({ apiUrl, cliToken, projectId }: {
+      apiUrl?: string; cliToken?: string; projectId?: string
+    } = {}) => {
+      const base = (apiUrl || 'https://getorquesta.com').replace(/\/$/, '')
+      if (!cliToken || !projectId) {
+        return socket.emit('daemon:preflight-result', { ok: false, error: 'Missing token or projectId', projectId })
+      }
+      try {
+        const res = await fetch(`${base}/api/v1/agents`, {
+          headers: { Authorization: `Bearer ${cliToken}` },
+        })
+        if (!res.ok) {
+          return socket.emit('daemon:preflight-result', { ok: false, error: `Agent list failed (${res.status})`, projectId })
+        }
+        const data = await res.json().catch(() => ({}))
+        const list: any[] = Array.isArray(data) ? data : (data.agents || data.data || [])
+        const forProject = list.filter((a) => (a.project_id || a.projectId) === projectId)
+        const online = forProject.filter((a) => {
+          if (a.status) return a.status === 'online'
+          const last = a.last_seen || a.last_used_at
+          return last ? Date.now() - new Date(last).getTime() < 3 * 60_000 : false
+        })
+        const existing = daemons.get(projectId)
+        socket.emit('daemon:preflight-result', {
+          ok: true,
+          projectId,
+          online: online.map((a) => ({
+            id: a.id,
+            name: a.name || 'Agent',
+            lastSeen: a.last_seen || a.last_used_at || null,
+          })),
+          totalTokens: forProject.length,
+          localDaemon: existing ? daemonPublic(existing) : null,
+        })
+      } catch (err: any) {
+        socket.emit('daemon:preflight-result', { ok: false, error: err.message || 'Pre-flight failed', projectId })
+      }
+    })
+
+    // Start (or report) the local daemon for a project.
+    socket.on('daemon:start', async ({ apiUrl, cliToken, projectId, projectName, cwd }: {
+      apiUrl?: string; cliToken?: string; projectId?: string; projectName?: string; cwd?: string
+    } = {}) => {
+      const base = (apiUrl || 'https://getorquesta.com').replace(/\/$/, '')
+      const emit = (ok: boolean, message: string, extra: Record<string, unknown> = {}) =>
+        socket.emit('daemon:result', { ok, projectId, message, ...extra })
+
+      if (!cliToken || !projectId) return emit(false, 'Missing token or projectId.')
+
+      // Idempotent: one daemon per project.
+      const running = daemons.get(projectId)
+      if (running && running.child.exitCode === null) {
+        return emit(true, `Already running as the project agent (pid ${running.pid}).`, { daemon: daemonPublic(running) })
+      }
+
+      const bin = resolveOrquestaAgentBin()
+      if (!bin) {
+        return emit(false, 'orquesta-agent is not installed on this machine. Install it with:  npm i -g orquesta-agent')
+      }
+
+      // Mint a fresh project-scoped oat_ via the oclt_-authed cockpit endpoint.
+      let oat: string
+      let tokenName = 'Cockpit daemon'
+      let tokenId: string | undefined
+      try {
+        const res = await fetch(`${base}/api/orquesta-cli/projects/${projectId}/agent-token`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${cliToken}` },
+          body: JSON.stringify({ name: `Cockpit daemon (${HOSTNAME})` }),
+        })
+        if (!res.ok) {
+          const body = await res.json().catch(() => ({}))
+          return emit(false, `Could not mint an agent token (${res.status}). ${body.error || ''}`.trim())
+        }
+        const minted = await res.json()
+        oat = minted.token
+        tokenName = minted.name || tokenName
+        tokenId = minted.id
+        if (!oat) return emit(false, 'Token endpoint returned no token.')
+      } catch (err: any) {
+        return emit(false, `Token minting failed: ${err.message}`)
+      }
+
+      const workDir = hookTargetDir(cwd)
+      let child
+      try {
+        child = spawn(bin, ['--token', oat, '--daemon', '--working-dir', workDir], {
+          cwd: workDir,
+          env: { ...process.env, ORQUESTA_API_URL: base },
+          stdio: ['ignore', 'pipe', 'pipe'],
+          detached: false,
+        })
+      } catch (err: any) {
+        return emit(false, `Failed to spawn orquesta-agent: ${err.message}`)
+      }
+
+      const info: DaemonInfo = {
+        projectId,
+        projectName,
+        tokenName,
+        tokenId,
+        cwd: workDir,
+        pid: child.pid,
+        startedAt: Date.now(),
+        child,
+        logTail: [],
+      }
+      daemons.set(projectId, info)
+
+      const pushLog = (line: string) => {
+        const clean = line.replace(/\r/g, '')
+        info.logTail.push(clean)
+        if (info.logTail.length > DAEMON_LOG_TAIL) info.logTail.shift()
+        io.emit('daemon:log', { projectId, line: clean })
+      }
+      child.stdout?.on('data', (d) => String(d).split('\n').filter(Boolean).forEach(pushLog))
+      child.stderr?.on('data', (d) => String(d).split('\n').filter(Boolean).forEach(pushLog))
+      child.on('exit', (code, signal) => {
+        io.emit('daemon:status', { projectId, running: false, exitCode: code, signal })
+        // Keep the record briefly so a status request can report the exit, then drop.
+        const cur = daemons.get(projectId)
+        if (cur && cur.child === child) daemons.delete(projectId)
+      })
+      child.on('error', (err) => pushLog(`[spawn error] ${err.message}`))
+
+      io.emit('daemon:status', daemonPublic(info))
+      emit(true, `This terminal is now the project agent for "${projectName || projectId}" (pid ${child.pid}). It will receive dispatched prompts.`, { daemon: daemonPublic(info) })
+      console.log(`[terminal] Daemon started for project "${projectName || projectId}" pid=${child.pid} cwd=${workDir}`)
+    })
+
+    // Stop the local daemon for a project.
+    socket.on('daemon:stop', ({ projectId }: { projectId?: string } = {}) => {
+      if (!projectId) return
+      const d = daemons.get(projectId)
+      if (!d) return socket.emit('daemon:result', { ok: false, projectId, message: 'No local daemon is running for this project.' })
+      try {
+        d.child.kill('SIGTERM')
+        // Escalate if it doesn't exit promptly.
+        const child = d.child
+        setTimeout(() => { if (child.exitCode === null) { try { child.kill('SIGKILL') } catch { /* gone */ } } }, 4000)
+      } catch { /* already gone */ }
+      daemons.delete(projectId)
+      io.emit('daemon:status', { projectId, running: false, stopped: true })
+      socket.emit('daemon:result', { ok: true, projectId, message: 'Stopped the local project agent.' })
+      console.log(`[terminal] Daemon stopped for project ${projectId}`)
+    })
+
+    // Report current daemon status (for a project, or all).
+    socket.on('daemon:status-request', ({ projectId }: { projectId?: string } = {}) => {
+      if (projectId) {
+        const d = daemons.get(projectId)
+        socket.emit('daemon:status', d ? { ...daemonPublic(d), logTail: d.logTail } : { projectId, running: false })
+      } else {
+        socket.emit('daemon:status-all', Array.from(daemons.values()).map(daemonPublic))
+      }
+    })
 
     // ── Share terminal to Orquesta ──────────────────────────────────────
     socket.on('terminal:share', async (opts: {
