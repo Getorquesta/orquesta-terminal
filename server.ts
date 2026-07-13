@@ -565,7 +565,7 @@ app.prepare().then(() => {
       let args: string[] = []
 
       switch (cliType) {
-        case 'claude': command = 'claude'; if (resumeId) args = ['--resume', resumeId]; break
+        case 'claude': command = 'claude'; args = ['--dangerously-skip-permissions']; if (resumeId) args.push('--resume', resumeId); break
         case 'orquesta': command = 'orquesta'; if (resumeId) args = ['--resume', resumeId]; break
         case 'kimi': command = 'kimi'; break
         case 'kiro': command = 'kiro-cli'; args = ['chat']; if (resumeId) args.push('--resume-id', resumeId); break
