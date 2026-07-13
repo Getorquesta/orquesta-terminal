@@ -7,7 +7,10 @@
 // risk. All hosted access goes through /api/hosted/proxy with the oclt_ token.
 
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { Loader2, Send, RefreshCw, Radio, ExternalLink } from 'lucide-react'
+import {
+  Loader2, Send, RefreshCw, Radio, ExternalLink,
+  Bell, CheckCheck, Upload, Trash2, Download, FileText, Paperclip,
+} from 'lucide-react'
 
 async function proxy<T>(apiUrl: string, token: string, path: string, method = 'GET', body?: unknown): Promise<T> {
   const res = await fetch('/api/hosted/proxy', {
@@ -20,6 +23,34 @@ async function proxy<T>(apiUrl: string, token: string, path: string, method = 'G
     throw new Error((d as { error?: string }).error || `HTTP ${res.status}`)
   }
   return res.json() as Promise<T>
+}
+
+// Multipart upload goes through the dedicated /api/hosted/upload proxy (the JSON
+// proxy above can't carry a file body).
+async function uploadFile<T>(apiUrl: string, token: string, path: string, file: File): Promise<T> {
+  const form = new FormData()
+  form.append('url', `${apiUrl}${path}`)
+  form.append('token', token)
+  form.append('file', file, file.name)
+  const res = await fetch('/api/hosted/upload', { method: 'POST', body: form })
+  const d = await res.json().catch(() => ({}))
+  if (!res.ok) throw new Error((d as { error?: string; message?: string }).message || (d as { error?: string }).error || `HTTP ${res.status}`)
+  return d as T
+}
+
+function relTime(iso: string): string {
+  const s = Math.max(0, (Date.now() - new Date(iso).getTime()) / 1000)
+  if (s < 60) return 'just now'
+  if (s < 3600) return `${Math.floor(s / 60)}m ago`
+  if (s < 86400) return `${Math.floor(s / 3600)}h ago`
+  return `${Math.floor(s / 86400)}d ago`
+}
+
+function humanSize(bytes: number): string {
+  if (!bytes) return '0 B'
+  const u = ['B', 'KB', 'MB', 'GB']
+  const i = Math.min(u.length - 1, Math.floor(Math.log(bytes) / Math.log(1024)))
+  return `${(bytes / Math.pow(1024, i)).toFixed(i === 0 ? 0 : 1)} ${u[i]}`
 }
 
 // ── Team chat ──────────────────────────────────────────────────────────────
@@ -300,6 +331,264 @@ export function RailCoordination({
           ))}
         </div>
       )}
+    </div>
+  )
+}
+
+// ── Inbox (mail) ─────────────────────────────────────────────────────────────
+
+interface Notification {
+  id: string
+  type: string
+  title: string
+  message: string | null
+  link: string | null
+  read_at: string | null
+  created_at: string
+}
+
+const NOTIF_ACCENT: Record<string, string> = {
+  team: 'text-sky-300 bg-sky-500/10',
+  billing: 'text-amber-300 bg-amber-500/10',
+  deployment: 'text-emerald-300 bg-emerald-500/10',
+  system: 'text-zinc-300 bg-zinc-500/10',
+}
+
+export function RailMail({ apiUrl, token }: { apiUrl: string; token: string }) {
+  const [items, setItems] = useState<Notification[]>([])
+  const [unread, setUnread] = useState(0)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+
+  const load = useCallback(async () => {
+    if (!token) return
+    try {
+      const data = await proxy<{ notifications?: Notification[]; unread_count?: number }>(
+        apiUrl, token, `/api/orquesta-cli/inbox?limit=40`,
+      )
+      setItems(data.notifications || [])
+      setUnread(data.unread_count || 0)
+      setError(null)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to load')
+    } finally {
+      setLoading(false)
+    }
+  }, [apiUrl, token])
+
+  useEffect(() => {
+    setLoading(true)
+    load()
+    const t = setInterval(load, 15000)
+    return () => clearInterval(t)
+  }, [load])
+
+  const markRead = async (id: string) => {
+    setItems(prev => prev.map(n => (n.id === id ? { ...n, read_at: new Date().toISOString() } : n)))
+    setUnread(u => Math.max(0, u - 1))
+    try { await proxy(apiUrl, token, `/api/orquesta-cli/inbox`, 'PATCH', { id }) } catch { load() }
+  }
+
+  const markAll = async () => {
+    setItems(prev => prev.map(n => ({ ...n, read_at: n.read_at || new Date().toISOString() })))
+    setUnread(0)
+    try { await proxy(apiUrl, token, `/api/orquesta-cli/inbox`, 'PATCH', { all: true }) } catch { load() }
+  }
+
+  return (
+    <div className="min-h-0 flex-1 overflow-y-auto p-1.5">
+      <div className="mb-1.5 flex items-center justify-between">
+        <span className="text-[10px] font-medium uppercase tracking-wider text-zinc-500">
+          Inbox{unread > 0 && <span className="ml-1 rounded-full bg-sky-500/20 px-1.5 py-px text-[9px] text-sky-300">{unread}</span>}
+        </span>
+        <div className="flex items-center gap-0.5">
+          {unread > 0 && (
+            <button onClick={markAll} className="rounded p-0.5 text-zinc-600 hover:bg-zinc-800 hover:text-zinc-300" title="Mark all read">
+              <CheckCheck className="h-3 w-3" />
+            </button>
+          )}
+          <button onClick={() => { setLoading(true); load() }} className="rounded p-0.5 text-zinc-600 hover:bg-zinc-800 hover:text-zinc-300" title="Refresh">
+            <RefreshCw className={`h-3 w-3 ${loading ? 'animate-spin' : ''}`} />
+          </button>
+        </div>
+      </div>
+      {loading && items.length === 0 ? (
+        <div className="flex items-center justify-center py-8 text-[11px] text-zinc-500">
+          <Loader2 className="mr-1.5 h-3 w-3 animate-spin" /> Loading…
+        </div>
+      ) : error ? (
+        <div className="py-6 text-center text-[11px] text-red-400">{error}</div>
+      ) : items.length === 0 ? (
+        <div className="flex flex-col items-center py-10 text-[11px] text-zinc-500">
+          <Bell className="mb-1.5 h-4 w-4 text-zinc-700" /> No notifications.
+        </div>
+      ) : (
+        <div className="space-y-1">
+          {items.map(n => {
+            const accent = NOTIF_ACCENT[n.type] || NOTIF_ACCENT.system
+            const body = (
+              <>
+                <div className="flex items-start gap-1.5">
+                  <span className={`mt-px shrink-0 rounded px-1 py-px text-[8px] ${accent}`}>{n.type}</span>
+                  <span className="min-w-0 flex-1 text-[11px] font-medium leading-snug text-zinc-200">{n.title}</span>
+                  {!n.read_at && <span className="mt-1 h-1.5 w-1.5 shrink-0 rounded-full bg-sky-400" />}
+                </div>
+                {n.message && <p className="mt-0.5 line-clamp-2 text-[10px] leading-snug text-zinc-400">{n.message}</p>}
+                <span className="mt-0.5 block text-[9px] text-zinc-600">{relTime(n.created_at)}</span>
+              </>
+            )
+            const cls = `block w-full rounded-lg border p-2 text-left transition-colors ${
+              n.read_at ? 'border-zinc-800/60 bg-zinc-900/30' : 'border-zinc-800 bg-zinc-800/40 hover:bg-zinc-800/70'
+            }`
+            return n.link ? (
+              <a
+                key={n.id}
+                href={`${apiUrl}${n.link}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                onClick={() => { if (!n.read_at) markRead(n.id) }}
+                className={cls}
+              >
+                {body}
+              </a>
+            ) : (
+              <button key={n.id} onClick={() => { if (!n.read_at) markRead(n.id) }} className={cls}>
+                {body}
+              </button>
+            )
+          })}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ── Files (project library) ──────────────────────────────────────────────────
+
+interface LibraryFile {
+  id: string
+  file_name: string
+  file_type: string
+  file_size: number
+  file_url: string
+  created_at: string
+}
+
+export function RailFiles({ apiUrl, token, projectId }: { apiUrl: string; token: string; projectId: string }) {
+  const [files, setFiles] = useState<LibraryFile[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+  const [uploading, setUploading] = useState(false)
+  const inputRef = useRef<HTMLInputElement>(null)
+
+  const load = useCallback(async () => {
+    if (!projectId || !token) return
+    try {
+      const data = await proxy<{ attachments?: LibraryFile[] }>(
+        apiUrl, token, `/api/orquesta-cli/projects/${projectId}/attachments`,
+      )
+      setFiles(data.attachments || [])
+      setError(null)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to load')
+    } finally {
+      setLoading(false)
+    }
+  }, [apiUrl, token, projectId])
+
+  useEffect(() => { setLoading(true); setFiles([]); load() }, [load])
+
+  const onPick = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (inputRef.current) inputRef.current.value = ''
+    if (!file) return
+    setUploading(true)
+    setError(null)
+    try {
+      const { attachment } = await uploadFile<{ attachment: LibraryFile }>(
+        apiUrl, token, `/api/orquesta-cli/projects/${projectId}/attachments`, file,
+      )
+      setFiles(prev => [attachment, ...prev])
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Upload failed')
+    } finally {
+      setUploading(false)
+    }
+  }
+
+  const remove = async (id: string) => {
+    const prev = files
+    setFiles(f => f.filter(x => x.id !== id))
+    try {
+      await proxy(apiUrl, token, `/api/orquesta-cli/projects/${projectId}/attachments?id=${encodeURIComponent(id)}`, 'DELETE')
+    } catch (e) {
+      setFiles(prev)
+      setError(e instanceof Error ? e.message : 'Delete failed')
+    }
+  }
+
+  return (
+    <div className="flex min-h-0 flex-1 flex-col">
+      <div className="min-h-0 flex-1 overflow-y-auto p-1.5">
+        <div className="mb-1.5 flex items-center justify-between">
+          <span className="text-[10px] font-medium uppercase tracking-wider text-zinc-500">Project files</span>
+          <button onClick={() => { setLoading(true); load() }} className="rounded p-0.5 text-zinc-600 hover:bg-zinc-800 hover:text-zinc-300" title="Refresh">
+            <RefreshCw className={`h-3 w-3 ${loading ? 'animate-spin' : ''}`} />
+          </button>
+        </div>
+        {loading && files.length === 0 ? (
+          <div className="flex items-center justify-center py-8 text-[11px] text-zinc-500">
+            <Loader2 className="mr-1.5 h-3 w-3 animate-spin" /> Loading…
+          </div>
+        ) : error && files.length === 0 ? (
+          <div className="py-6 text-center text-[11px] text-red-400">{error}</div>
+        ) : files.length === 0 ? (
+          <div className="flex flex-col items-center py-10 text-[11px] text-zinc-500">
+            <Paperclip className="mb-1.5 h-4 w-4 text-zinc-700" /> No files yet. Upload one below.
+          </div>
+        ) : (
+          <div className="space-y-1">
+            {files.map(f => (
+              <div key={f.id} className="group flex items-center gap-1.5 rounded-lg border border-zinc-800 bg-zinc-900/50 p-1.5">
+                <FileText className="h-3.5 w-3.5 shrink-0 text-zinc-500" />
+                <div className="min-w-0 flex-1">
+                  <p className="truncate text-[11px] text-zinc-200" title={f.file_name}>{f.file_name}</p>
+                  <p className="text-[9px] text-zinc-600">{humanSize(f.file_size)} · {relTime(f.created_at)}</p>
+                </div>
+                <a
+                  href={f.file_url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="shrink-0 rounded p-1 text-zinc-600 hover:bg-zinc-800 hover:text-zinc-300"
+                  title="Download"
+                >
+                  <Download className="h-3 w-3" />
+                </a>
+                <button
+                  onClick={() => remove(f.id)}
+                  className="shrink-0 rounded p-1 text-zinc-600 opacity-0 transition-opacity hover:bg-red-500/10 hover:text-red-400 group-hover:opacity-100"
+                  title="Delete"
+                >
+                  <Trash2 className="h-3 w-3" />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+      <div className="border-t border-zinc-800 p-1.5">
+        {error && files.length > 0 && <div className="mb-1 text-[9px] text-red-400">{error}</div>}
+        <input ref={inputRef} type="file" className="hidden" onChange={onPick} />
+        <button
+          onClick={() => inputRef.current?.click()}
+          disabled={uploading}
+          className="flex w-full items-center justify-center gap-1.5 rounded-lg border border-zinc-700 bg-zinc-800/60 px-2 py-1.5 text-[11px] text-zinc-200 transition-colors hover:bg-zinc-800 disabled:opacity-50"
+        >
+          {uploading ? <Loader2 className="h-3 w-3 animate-spin" /> : <Upload className="h-3 w-3" />}
+          {uploading ? 'Uploading…' : 'Upload file'}
+        </button>
+        <p className="mt-1 text-center text-[9px] text-zinc-600">Shared with the project · max 20 MB</p>
+      </div>
     </div>
   )
 }

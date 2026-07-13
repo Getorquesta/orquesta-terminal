@@ -1,8 +1,8 @@
 'use client'
 
 import { useState, useEffect, useCallback, useMemo } from 'react'
-import { ListTodo, Clock, RefreshCw, Loader2, X, CornerDownLeft, ExternalLink, ClipboardList, Sparkles, MessageSquare, Radio, FolderKanban, ChevronRight } from 'lucide-react'
-import { RailChat, RailCoordination } from './RailPanels'
+import { ListTodo, Clock, RefreshCw, Loader2, X, CornerDownLeft, ExternalLink, ClipboardList, Sparkles, MessageSquare, Radio, FolderKanban, ChevronRight, Mail, Paperclip } from 'lucide-react'
+import { RailChat, RailCoordination, RailMail, RailFiles } from './RailPanels'
 
 // Per-terminal left rail. Mirrors the hosted interactive-session sidebar: a
 // compact panel scoped to this pane's hosted project, reachable with the
@@ -32,7 +32,7 @@ interface TimelinePrompt {
   created_at?: string
 }
 
-type Tab = 'tasks' | 'timeline' | 'chat' | 'coord'
+type Tab = 'tasks' | 'timeline' | 'chat' | 'coord' | 'mail' | 'files'
 
 const SOURCE_STYLE: Record<NormTask['source'], { label: string; cls: string }> = {
   plan: { label: 'Plan', cls: 'bg-indigo-500/15 text-indigo-300 border-indigo-500/25' },
@@ -97,6 +97,8 @@ export function TerminalSidebar({
         <TabButton active={tab === 'timeline'} onClick={() => setTab('timeline')} icon={<Clock className="h-3 w-3" />} label="Runs" />
         <TabButton active={tab === 'chat'} onClick={() => setTab('chat')} icon={<MessageSquare className="h-3 w-3" />} label="Chat" />
         <TabButton active={tab === 'coord'} onClick={() => setTab('coord')} icon={<Radio className="h-3 w-3" />} label="Coord" />
+        <TabButton active={tab === 'mail'} onClick={() => setTab('mail')} icon={<Mail className="h-3 w-3" />} label="Mail" />
+        <TabButton active={tab === 'files'} onClick={() => setTab('files')} icon={<Paperclip className="h-3 w-3" />} label="Files" />
         <button
           onClick={onClose}
           className="ml-auto shrink-0 rounded p-1 text-zinc-600 hover:bg-zinc-800 hover:text-zinc-300"
@@ -129,7 +131,10 @@ export function TerminalSidebar({
         </div>
       )}
 
-      {needsProject ? (
+      {/* Mail is user-scoped (no project needed), so it works even before a project is pinned. */}
+      {tab === 'mail' ? (
+        <RailMail apiUrl={apiUrl} token={token} />
+      ) : needsProject ? (
         <ProjectChooser projects={projects} onPickProject={onPickProject} />
       ) : tab === 'tasks' ? (
         <TasksPane apiUrl={apiUrl} token={token} projectId={projectId!} onSeed={onSeed} />
@@ -137,6 +142,8 @@ export function TerminalSidebar({
         <TimelinePane apiUrl={apiUrl} token={token} projectId={projectId!} onSeed={onSeed} />
       ) : tab === 'chat' ? (
         <RailChat apiUrl={apiUrl} token={token} projectId={projectId!} />
+      ) : tab === 'files' ? (
+        <RailFiles apiUrl={apiUrl} token={token} projectId={projectId!} />
       ) : (
         <RailCoordination apiUrl={apiUrl} token={token} projectId={projectId!} />
       )}
