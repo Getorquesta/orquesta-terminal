@@ -461,6 +461,7 @@ export default function TerminalWorkspacePage() {
             terminalOpacity={bg.termOpacity}
             hostedApiUrl={hosted.auth?.apiUrl}
             hostedToken={hosted.auth?.token}
+            hostedUserId={hosted.auth?.userId}
             hostedProjects={hosted.auth?.projects}
           />
         </div>

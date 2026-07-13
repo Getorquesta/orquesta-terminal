@@ -65,15 +65,42 @@ function isEnrollableDir(dir: string): boolean {
 // Resolve the orquesta-agent binary (needed only for the claude hooks; the
 // orquesta-cli path works off .orquesta.json alone).
 function resolveOrquestaAgentBin(): string | null {
+  const isWin = process.platform === 'win32'
+  const exe = isWin ? 'orquesta-agent.cmd' : 'orquesta-agent'
+
+  // 1) Fast path: on PATH.
   try {
-    const probe = process.platform === 'win32' ? 'where orquesta-agent' : 'command -v orquesta-agent'
+    const probe = isWin ? 'where orquesta-agent' : 'command -v orquesta-agent'
     const resolved = execSync(probe, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
       .split(/\r?\n/)[0]
       .trim()
-    return resolved || null
-  } catch {
-    return null
+    if (resolved) return resolved
+  } catch { /* not on PATH — fall through */ }
+
+  // 2) The cockpit is often launched from a GUI / systemd with a minimal PATH
+  //    that omits nvm / npm-global bin, so `command -v` misses a perfectly good
+  //    `npm i -g orquesta-agent` — and claude prompts then never get logged
+  //    (the "demo3 has no logs" bug). Probe the usual global-install dirs and
+  //    return an ABSOLUTE path, so the hook command we write keeps working even
+  //    if PATH is still minimal when Claude Code later runs it.
+  const candidates: string[] = []
+  // An `npm i -g` under THIS node install lands next to node itself.
+  candidates.push(path.join(path.dirname(process.execPath), exe))
+  try {
+    const prefix = execSync('npm prefix -g', { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim()
+    if (prefix) candidates.push(path.join(prefix, isWin ? '' : 'bin', exe))
+  } catch { /* npm not on PATH either */ }
+  const home = process.env.HOME || process.env.USERPROFILE || ''
+  if (home) {
+    candidates.push(path.join(home, '.npm-global', 'bin', exe))
+    candidates.push(path.join(home, '.local', 'bin', exe))
   }
+  if (!isWin) candidates.push(`/usr/local/bin/${exe}`, `/usr/bin/${exe}`)
+
+  for (const c of candidates) {
+    try { if (c && require('fs').existsSync(c)) return c } catch { /* keep trying */ }
+  }
+  return null
 }
 
 // Read the enrolled project (never the token) from an existing .orquesta.json.
@@ -554,7 +581,7 @@ app.prepare().then(() => {
     })
 
     // Spawn a PTY session
-    socket.on('session:start', ({ sessionId, cliType = 'shell', rows = 24, cols = 80, cwd, resumeId }) => {
+    socket.on('session:start', ({ sessionId, cliType = 'shell', rows = 24, cols = 80, cwd, resumeId, hostedUserId, hostedToken, hostedApiUrl }) => {
       if (!ptyModule) {
         socket.emit('session:error', { sessionId, error: 'node-pty not installed' })
         return
@@ -578,13 +605,22 @@ app.prepare().then(() => {
         try { if (require('fs').statSync(cwd).isDirectory()) spawnCwd = cwd } catch {}
       }
 
+      // Attribute self-reported prompts (orquesta-cli / Claude Code hook) to the
+      // human logged into this cockpit, not the machine reporting-token's owner.
+      // ORQUESTA_TOKEN is only a FALLBACK — a machine ~/.orquesta-cli config
+      // token still wins — so it also enables reporting on an unconfigured box.
+      const reportEnv: Record<string, string> = {}
+      if (hostedUserId) reportEnv.ORQUESTA_REPORT_USER_ID = hostedUserId
+      if (hostedToken) reportEnv.ORQUESTA_TOKEN = hostedToken
+      if (hostedApiUrl) reportEnv.ORQUESTA_API_URL = hostedApiUrl
+
       try {
         const term = ptyModule.spawn(command, args, {
           name: 'xterm-256color',
           rows,
           cols,
           cwd: spawnCwd,
-          env: { ...process.env, TERM: 'xterm-256color', COLORTERM: 'truecolor' },
+          env: { ...process.env, ...reportEnv, TERM: 'xterm-256color', COLORTERM: 'truecolor' },
         })
 
         sessions.set(sessionId, term)

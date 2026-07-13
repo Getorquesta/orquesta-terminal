@@ -259,6 +259,8 @@ interface TerminalCellProps {
   /** When set, this pane's CLI is pointed at a hosted Orquesta project. */
   hostedApiUrl?: string
   hostedToken?: string
+  /** The logged-in user's id — attributes self-reported prompts to them. */
+  hostedUserId?: string
   /** Available hosted projects for the per-pane selector. */
   hostedProjects?: HostedProject[]
   /** This pane's selected hosted project. */
@@ -285,7 +287,7 @@ interface TerminalCellProps {
 }
 
 function TerminalCell({
-  cellId, socket, cliType, name, fontSize, opacity, hostedApiUrl, hostedToken,
+  cellId, socket, cliType, name, fontSize, opacity, hostedApiUrl, hostedToken, hostedUserId,
   hostedProjects, hostedProjectId, cwd, resumeId, daemonRunning,
   onClose, onCliTypeChange, onRename, onHostedProjectChange, onMakeAgent, onPickFolder, onFocusCell, onNew, onArrange, onZoom, registerApi,
 }: TerminalCellProps) {
@@ -331,8 +333,8 @@ function TerminalCell({
   fontRef.current = fontSize
   // Hosted-hook target read live at (re)connect time so toggling it from the
   // panel doesn't restart the terminal — the next session picks it up.
-  const hostedRef = useRef({ apiUrl: hostedApiUrl, token: hostedToken })
-  hostedRef.current = { apiUrl: hostedApiUrl, token: hostedToken }
+  const hostedRef = useRef({ apiUrl: hostedApiUrl, token: hostedToken, userId: hostedUserId })
+  hostedRef.current = { apiUrl: hostedApiUrl, token: hostedToken, userId: hostedUserId }
   const importRef = useRef({ cwd, resumeId })
   importRef.current = { cwd, resumeId }
 
@@ -470,6 +472,7 @@ function TerminalCell({
         socket?.emit('session:start', {
           sessionId, cellId, cliType, rows: term.rows, cols: term.cols,
           hostedApiUrl: hostedRef.current.apiUrl, hostedToken: hostedRef.current.token,
+          hostedUserId: hostedRef.current.userId,
           cwd: importRef.current.cwd, resumeId: importRef.current.resumeId,
         })
       }
@@ -930,6 +933,8 @@ interface AgentGridProps {
   /** When the hosted hook is enabled, point every pane's CLI at that backend. */
   hostedApiUrl?: string
   hostedToken?: string
+  /** The logged-in user's id — attributes self-reported prompts to them. */
+  hostedUserId?: string
   /** Available hosted projects (from useHostedAuth) for per-pane selector. */
   hostedProjects?: HostedProject[]
 }
@@ -1208,7 +1213,7 @@ function DaemonTakeoverModal({
 }
 
 function AgentGridInner({
-  socket, containerWidth, containerHeight, storageKey, terminalOpacity = 1, hostedApiUrl, hostedToken, hostedProjects,
+  socket, containerWidth, containerHeight, storageKey, terminalOpacity = 1, hostedApiUrl, hostedToken, hostedUserId, hostedProjects,
   apiRef,
 }: AgentGridProps & { containerWidth: number; containerHeight: number; apiRef: React.MutableRefObject<AgentGridHandle> }) {
   const key = storageKey || STORAGE_KEY
@@ -1644,6 +1649,7 @@ function AgentGridInner({
               opacity={terminalOpacity}
               hostedApiUrl={hostedApiUrl}
               hostedToken={hostedToken}
+              hostedUserId={hostedUserId}
               hostedProjects={hostedProjects}
               hostedProjectId={cell.hostedProjectId}
               cwd={cell.cwd}
@@ -1672,7 +1678,7 @@ function AgentGridInner({
 }
 
 export const AgentGrid = forwardRef<AgentGridHandle, AgentGridProps>(function AgentGrid(
-  { socket, storageKey, terminalOpacity, hostedApiUrl, hostedToken, hostedProjects }, ref,
+  { socket, storageKey, terminalOpacity, hostedApiUrl, hostedToken, hostedUserId, hostedProjects }, ref,
 ) {
   const { containerRef, width } = useContainerWidth()
   const [height, setHeight] = useState(0)
@@ -1714,6 +1720,7 @@ export const AgentGrid = forwardRef<AgentGridHandle, AgentGridProps>(function Ag
           terminalOpacity={terminalOpacity}
           hostedApiUrl={hostedApiUrl}
           hostedToken={hostedToken}
+          hostedUserId={hostedUserId}
           hostedProjects={hostedProjects}
           apiRef={apiRef}
         />

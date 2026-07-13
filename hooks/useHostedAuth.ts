@@ -15,6 +15,9 @@ export interface HostedAuth {
   apiUrl: string
   token: string
   organizationName?: string
+  /** The logged-in user's id — used to attribute self-reported prompts to the
+   *  actual person driving, not the machine reporting-token's owner. */
+  userId?: string
   projects: HostedProject[]
 }
 
@@ -87,6 +90,7 @@ export function useHostedAuth() {
 
       const data = await res.json() as {
         organization?: { id: string; name: string }
+        user?: { id: string }
         projects?: HostedProject[]
       }
 
@@ -107,6 +111,7 @@ export function useHostedAuth() {
         apiUrl: url,
         token,
         organizationName: data.organization.name,
+        userId: data.user?.id,
         projects,
       }
       persist(authData)
