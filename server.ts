@@ -340,6 +340,83 @@ app.prepare().then(() => {
     }
   }
 
+  // ── Remote interactive sessions (cockpit as CLOUD-agent client) ──────────
+  // The reverse of sharing: instead of exposing a LOCAL pty to the cloud, the
+  // cockpit starts an interactive PTY on the PROJECT'S remote agent (the daemon
+  // running on a customer VM / self-host) and streams it into a local terminal
+  // pane. Same agent:project-{id} channel + session:* protocol the dashboard's
+  // InteractiveSession speaks; the WS server authenticates our oclt_ cliToken.
+  interface RemoteSession {
+    sessionId: string
+    projectId: string
+    channel: string
+    key: string           // cloud-connection key
+    ownerSocketId: string // which local browser socket owns this pane
+  }
+  const remoteSessions = new Map<string, RemoteSession>()
+  // Separate connection pool from sharing so the viewer-side output handlers
+  // never tangle with the host-side input/resize handlers wireCloudHandlers adds.
+  const remoteConns = new Map<string, { socket: ClientSocket; refs: Set<string> }>()
+
+  function remoteConnKey(apiUrl: string, token: string, projectId: string) {
+    return `${apiUrl}::${token.slice(0, 12)}::${projectId}`
+  }
+
+  function releaseRemote(key: string, sessionId: string) {
+    const conn = remoteConns.get(key)
+    if (!conn) return
+    conn.refs.delete(sessionId)
+    if (conn.refs.size === 0) {
+      try { conn.socket.disconnect() } catch {}
+      remoteConns.delete(key)
+    }
+  }
+
+  function getRemoteConn(apiUrl: string, token: string, projectId: string) {
+    const channel = `agent:project-${projectId}`
+    const key = remoteConnKey(apiUrl, token, projectId)
+    let conn = remoteConns.get(key)
+    if (!conn) {
+      const socket = ioClient(WS_URL, {
+        transports: ['websocket', 'polling'],
+        auth: { cliToken: token },
+        reconnection: true,
+      })
+      conn = { socket, refs: new Set() }
+      remoteConns.set(key, conn)
+      // Relay cloud → owning browser pane. Fan out to the specific socket that
+      // owns each sessionId so foreign channel traffic never leaks between panes.
+      const relay = (kind: 'started' | 'output' | 'ended' | 'error') => (p: any) => {
+        const sid = p?.sessionId
+        if (!sid) return
+        const rs = remoteSessions.get(sid)
+        if (!rs || rs.key !== key) return
+        const target = io.sockets.sockets.get(rs.ownerSocketId)
+        if (!target) return
+        if (kind === 'output') {
+          target.emit('remote:output', { sessionId: sid, data: p.data ?? p.output ?? '' })
+        } else if (kind === 'started') {
+          target.emit('remote:started', {
+            sessionId: sid, cliType: p.cliType, model: p.model, workingDirectory: p.workingDirectory,
+          })
+        } else if (kind === 'ended') {
+          target.emit('remote:ended', { sessionId: sid, exitCode: p.exitCode })
+          remoteSessions.delete(sid)
+          releaseRemote(key, sid)
+        } else {
+          target.emit('remote:error', { sessionId: sid, error: p.error || p.message || 'Session error' })
+        }
+      }
+      socket.on('session:started', relay('started'))
+      socket.on('session:output', relay('output'))
+      socket.on('session:ended', relay('ended'))
+      socket.on('session:error', relay('error'))
+      socket.on('connect', () => socket.emit('subscribe', { channel }))
+      if (socket.connected) socket.emit('subscribe', { channel })
+    }
+    return { conn, key, channel }
+  }
+
   // Heartbeat: keep last_active_at fresh so the dashboard read-model can dim/
   // sweep stale shares.
   const shareHeartbeat = setInterval(() => {
@@ -977,10 +1054,127 @@ app.prepare().then(() => {
       if (tailer) { tailer.stop(); activeTailers.delete(sessionId) }
     })
 
+    // ── Remote interactive sessions: list agents + start / stream / stop ──
+    // List the project's cloud agents (online first) so the UI can offer to
+    // open an interactive session on one of them.
+    socket.on('remote:list-agents', async (
+      { apiUrl, token, projectId }: { apiUrl?: string; token?: string; projectId?: string } = {},
+      cb?: (r: unknown) => void,
+    ) => {
+      const respond = (r: unknown) => { if (typeof cb === 'function') cb(r) }
+      if (!token || !projectId) return respond({ ok: false, error: 'token and projectId required' })
+      const base = (apiUrl || 'https://getorquesta.com').replace(/\/$/, '')
+      try {
+        const res = await fetch(`${base}/api/v1/agents?projectId=${encodeURIComponent(projectId)}`, {
+          headers: { Authorization: `Bearer ${token}` },
+        })
+        if (!res.ok) return respond({ ok: false, error: `HTTP ${res.status}` })
+        const data: any = await res.json()
+        const now = Date.now()
+        const agents = (data.agents || []).map((a: any) => {
+          const lastSeen = a.lastSeen ? new Date(a.lastSeen).getTime() : 0
+          const fresh = lastSeen > 0 && now - lastSeen < 3 * 60_000
+          const info = a.agentInfo || {}
+          return {
+            id: a.id,
+            name: a.name || 'Agent',
+            online: a.status === 'online' || fresh,
+            lastSeen: a.lastSeen || null,
+            host: info.hostname || info.host || null,
+            cli: info.activeCli || info.effectiveConfig?.cli || null,
+            cwd: info.cwd || info.launchDir || info.workingDirectory || null,
+          }
+        })
+        respond({ ok: true, agents })
+      } catch (err: any) {
+        respond({ ok: false, error: err?.message || 'Failed to list agents' })
+      }
+    })
+
+    // Start a PTY on the project's cloud agent. Streams back as remote:output.
+    socket.on('remote:start', async (
+      { apiUrl, token, projectId, cols, rows, targetAgentTokenId, workingDirectory, resume }: {
+        apiUrl?: string; token?: string; projectId?: string; cols?: number; rows?: number
+        targetAgentTokenId?: string; workingDirectory?: string; resume?: boolean
+      } = {},
+      cb?: (r: unknown) => void,
+    ) => {
+      const respond = (r: unknown) => { if (typeof cb === 'function') cb(r) }
+      if (!token || !projectId) return respond({ ok: false, error: 'token and projectId required' })
+      const base = (apiUrl || 'https://getorquesta.com').replace(/\/$/, '')
+      const sessionId = `cockpit-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`
+      try {
+        const { conn, key, channel } = getRemoteConn(base, token, projectId)
+        conn.refs.add(sessionId)
+        remoteSessions.set(sessionId, { sessionId, projectId, channel, key, ownerSocketId: socket.id })
+        conn.socket.emit('broadcast', {
+          channel, event: 'session:start',
+          payload: {
+            sessionId,
+            cols: cols || 120,
+            rows: rows || 40,
+            ...(workingDirectory ? { workingDirectory } : {}),
+            ...(targetAgentTokenId ? { targetAgentTokenId } : {}),
+            ...(resume ? { resume: true } : {}),
+          },
+          self: false,
+        })
+        respond({ ok: true, sessionId })
+      } catch (err: any) {
+        remoteSessions.delete(sessionId)
+        respond({ ok: false, error: err?.message || 'Failed to start remote session' })
+      }
+    })
+
+    socket.on('remote:input', ({ sessionId, input }: { sessionId?: string; input?: string } = {}) => {
+      const rs = sessionId ? remoteSessions.get(sessionId) : undefined
+      if (!rs || rs.ownerSocketId !== socket.id) return
+      remoteConns.get(rs.key)?.socket.emit('broadcast', {
+        channel: rs.channel, event: 'session:input',
+        payload: { sessionId, input, raw: true }, self: false,
+      })
+    })
+
+    socket.on('remote:resize', ({ sessionId, cols, rows }: { sessionId?: string; cols?: number; rows?: number } = {}) => {
+      const rs = sessionId ? remoteSessions.get(sessionId) : undefined
+      if (!rs || rs.ownerSocketId !== socket.id) return
+      remoteConns.get(rs.key)?.socket.emit('broadcast', {
+        channel: rs.channel, event: 'session:resize',
+        payload: { sessionId, cols, rows }, self: false,
+      })
+    })
+
+    // Detach WITHOUT killing the remote PTY (like the dashboard "leave").
+    socket.on('remote:detach', ({ sessionId }: { sessionId?: string } = {}) => {
+      const rs = sessionId ? remoteSessions.get(sessionId) : undefined
+      if (!rs || rs.ownerSocketId !== socket.id) return
+      remoteSessions.delete(sessionId!)
+      releaseRemote(rs.key, sessionId!)
+    })
+
+    // End the remote PTY for good.
+    socket.on('remote:end', ({ sessionId }: { sessionId?: string } = {}) => {
+      const rs = sessionId ? remoteSessions.get(sessionId) : undefined
+      if (!rs || rs.ownerSocketId !== socket.id) return
+      remoteConns.get(rs.key)?.socket.emit('broadcast', {
+        channel: rs.channel, event: 'session:end',
+        payload: { sessionId }, self: false,
+      })
+      remoteSessions.delete(sessionId!)
+      releaseRemote(rs.key, sessionId!)
+    })
+
     socket.on('disconnect', () => {
       // Stop all tailers for this client
       activeTailers.forEach(t => t.stop())
       activeTailers.clear()
+      // Detach (don't kill) any remote sessions this browser socket owned.
+      for (const [sid, rs] of remoteSessions) {
+        if (rs.ownerSocketId === socket.id) {
+          remoteSessions.delete(sid)
+          releaseRemote(rs.key, sid)
+        }
+      }
     })
   })
 
