@@ -336,6 +336,17 @@ function TerminalCell({
   const importRef = useRef({ cwd, resumeId })
   importRef.current = { cwd, resumeId }
 
+  // The project the READ-ONLY rail (tasks/timeline/chat/coordination/files)
+  // targets. When exactly one hosted project exists, default to it so the rail
+  // is reachable without a manual per-pane cloud pick — the #1 "I'm logged in
+  // but see no left panel" confusion. Share / Make-agent still require an
+  // explicit pick (they have side effects), so they keep using hostedProjectId.
+  const soleHostedProjectId = hostedProjects && hostedProjects.length === 1 ? hostedProjects[0].id : undefined
+  const railProjectId = hostedProjectId || soleHostedProjectId
+  // Show the rail button whenever logged in with a resolvable project, or with
+  // multiple projects (the rail then shows a picker to choose one).
+  const canOpenRail = !!(hostedApiUrl && hostedToken && (railProjectId || (hostedProjects && hostedProjects.length > 1)))
+
   useEffect(() => { setDraft(name) }, [name])
 
   useEffect(() => {
@@ -744,17 +755,17 @@ function TerminalCell({
               <option key={opt.value} value={opt.value}>{opt.label}</option>
             ))}
           </select>
-          {hostedProjectId && hostedApiUrl && hostedToken && (
+          {canOpenRail && (
             <button
               onClick={() => setSidebarOpen((v) => !v)}
               onMouseDown={(e) => e.stopPropagation()}
               className={`flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-mono transition-colors ${
                 sidebarOpen ? 'bg-green-500/15 text-green-300 hover:bg-green-500/25' : 'bg-zinc-800/70 text-zinc-400 hover:bg-zinc-700 hover:text-zinc-200'
               }`}
-              title={sidebarOpen ? 'Hide task sidebar' : 'Tasks: pick a ticket/plan to start a prompt'}
+              title={sidebarOpen ? 'Hide panel' : 'Panel: tasks, timeline, chat, coordination, files'}
             >
               <PanelLeft className="h-3 w-3 shrink-0" />
-              Tasks
+              Panel
             </button>
           )}
           <button
@@ -878,11 +889,13 @@ function TerminalCell({
         </button>
       </div>
       <div className="flex min-h-0 flex-1 overflow-hidden">
-        {sidebarOpen && hostedProjectId && hostedApiUrl && hostedToken && (
+        {sidebarOpen && hostedApiUrl && hostedToken && (
           <TerminalSidebar
             apiUrl={hostedApiUrl}
             token={hostedToken}
-            projectId={hostedProjectId}
+            projectId={railProjectId}
+            projects={hostedProjects}
+            onPickProject={onHostedProjectChange}
             onSeed={seedInput}
             onClose={() => setSidebarOpen(false)}
           />

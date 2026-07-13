@@ -1,7 +1,8 @@
 'use client'
 
 import { useState, useEffect, useCallback, useMemo } from 'react'
-import { ListTodo, Clock, RefreshCw, Loader2, X, CornerDownLeft, ExternalLink, ClipboardList, Sparkles } from 'lucide-react'
+import { ListTodo, Clock, RefreshCw, Loader2, X, CornerDownLeft, ExternalLink, ClipboardList, Sparkles, MessageSquare, Radio, FolderKanban, ChevronRight } from 'lucide-react'
+import { RailChat, RailCoordination } from './RailPanels'
 
 // Per-terminal left rail. Mirrors the hosted interactive-session sidebar: a
 // compact panel scoped to this pane's hosted project, reachable with the
@@ -31,7 +32,7 @@ interface TimelinePrompt {
   created_at?: string
 }
 
-type Tab = 'tasks' | 'timeline'
+type Tab = 'tasks' | 'timeline' | 'chat' | 'coord'
 
 const SOURCE_STYLE: Record<NormTask['source'], { label: string; cls: string }> = {
   plan: { label: 'Plan', cls: 'bg-indigo-500/15 text-indigo-300 border-indigo-500/25' },
@@ -70,22 +71,32 @@ export function TerminalSidebar({
   apiUrl,
   token,
   projectId,
+  projects,
+  onPickProject,
   onSeed,
   onClose,
 }: {
   apiUrl: string
   token: string
-  projectId: string
+  projectId?: string
+  projects?: { id: string; name: string }[]
+  onPickProject?: (id: string) => void
   onSeed: (text: string) => void
   onClose: () => void
 }) {
   const [tab, setTab] = useState<Tab>('tasks')
 
+  const activeProject = projectId ? projects?.find((p) => p.id === projectId) : undefined
+  // No project pinned to this pane yet — offer a chooser instead of empty tabs.
+  const needsProject = !projectId
+
   return (
     <div className="flex h-full w-[268px] shrink-0 flex-col border-r border-zinc-800 bg-zinc-950/70">
-      <div className="flex items-center gap-1 border-b border-zinc-800 px-1.5 py-1.5">
+      <div className="flex items-center gap-0.5 overflow-x-auto border-b border-zinc-800 px-1.5 py-1.5">
         <TabButton active={tab === 'tasks'} onClick={() => setTab('tasks')} icon={<ListTodo className="h-3 w-3" />} label="Tasks" />
-        <TabButton active={tab === 'timeline'} onClick={() => setTab('timeline')} icon={<Clock className="h-3 w-3" />} label="Timeline" />
+        <TabButton active={tab === 'timeline'} onClick={() => setTab('timeline')} icon={<Clock className="h-3 w-3" />} label="Runs" />
+        <TabButton active={tab === 'chat'} onClick={() => setTab('chat')} icon={<MessageSquare className="h-3 w-3" />} label="Chat" />
+        <TabButton active={tab === 'coord'} onClick={() => setTab('coord')} icon={<Radio className="h-3 w-3" />} label="Coord" />
         <button
           onClick={onClose}
           className="ml-auto shrink-0 rounded p-1 text-zinc-600 hover:bg-zinc-800 hover:text-zinc-300"
@@ -94,10 +105,75 @@ export function TerminalSidebar({
           <X className="h-3.5 w-3.5" />
         </button>
       </div>
-      {tab === 'tasks' ? (
-        <TasksPane apiUrl={apiUrl} token={token} projectId={projectId} onSeed={onSeed} />
+
+      {/* Project context bar — lets a pane retarget which hosted project the rail follows */}
+      {projectId && onPickProject && projects && projects.length > 1 && (
+        <div className="flex items-center gap-1.5 border-b border-zinc-800/70 px-2 py-1">
+          <FolderKanban className="h-3 w-3 shrink-0 text-zinc-600" />
+          <select
+            value={projectId}
+            onChange={(e) => onPickProject(e.target.value)}
+            className="min-w-0 flex-1 truncate bg-transparent text-[10px] text-zinc-400 outline-none hover:text-zinc-200"
+            title="Which hosted project this panel follows"
+          >
+            {projects.map((p) => (
+              <option key={p.id} value={p.id} className="bg-zinc-900 text-zinc-200">{p.name}</option>
+            ))}
+          </select>
+        </div>
+      )}
+      {projectId && (!projects || projects.length <= 1) && activeProject && (
+        <div className="flex items-center gap-1.5 border-b border-zinc-800/70 px-2 py-1 text-[10px] text-zinc-500">
+          <FolderKanban className="h-3 w-3 shrink-0 text-zinc-600" />
+          <span className="truncate">{activeProject.name}</span>
+        </div>
+      )}
+
+      {needsProject ? (
+        <ProjectChooser projects={projects} onPickProject={onPickProject} />
+      ) : tab === 'tasks' ? (
+        <TasksPane apiUrl={apiUrl} token={token} projectId={projectId!} onSeed={onSeed} />
+      ) : tab === 'timeline' ? (
+        <TimelinePane apiUrl={apiUrl} token={token} projectId={projectId!} onSeed={onSeed} />
+      ) : tab === 'chat' ? (
+        <RailChat apiUrl={apiUrl} token={token} projectId={projectId!} />
       ) : (
-        <TimelinePane apiUrl={apiUrl} token={token} projectId={projectId} onSeed={onSeed} />
+        <RailCoordination apiUrl={apiUrl} token={token} projectId={projectId!} />
+      )}
+    </div>
+  )
+}
+
+function ProjectChooser({
+  projects,
+  onPickProject,
+}: {
+  projects?: { id: string; name: string }[]
+  onPickProject?: (id: string) => void
+}) {
+  return (
+    <div className="min-h-0 flex-1 overflow-y-auto p-2">
+      <p className="mb-2 px-1 text-[10px] uppercase tracking-wider text-zinc-500">Pick a project</p>
+      {!projects || projects.length === 0 ? (
+        <div className="py-8 text-center text-[11px] text-zinc-500">
+          No hosted projects available. Sign in from the header to connect.
+        </div>
+      ) : !onPickProject ? (
+        <div className="py-8 text-center text-[11px] text-zinc-500">This pane can’t be linked to a project.</div>
+      ) : (
+        <div className="space-y-1">
+          {projects.map((p) => (
+            <button
+              key={p.id}
+              onClick={() => onPickProject(p.id)}
+              className="group flex w-full items-center gap-1.5 rounded-lg border border-zinc-800 bg-zinc-900/50 px-2 py-2 text-left transition-colors hover:border-zinc-700 hover:bg-zinc-800/60"
+            >
+              <FolderKanban className="h-3.5 w-3.5 shrink-0 text-zinc-600 group-hover:text-zinc-400" />
+              <span className="min-w-0 flex-1 truncate text-[11px] text-zinc-200">{p.name}</span>
+              <ChevronRight className="h-3 w-3 shrink-0 text-zinc-600 group-hover:text-zinc-300" />
+            </button>
+          ))}
+        </div>
       )}
     </div>
   )
@@ -107,7 +183,7 @@ function TabButton({ active, onClick, icon, label }: { active: boolean; onClick:
   return (
     <button
       onClick={onClick}
-      className={`flex items-center gap-1 rounded px-2 py-1 text-[11px] font-medium transition-colors ${
+      className={`flex shrink-0 items-center gap-1 rounded px-1.5 py-1 text-[11px] font-medium transition-colors ${
         active ? 'bg-zinc-800 text-zinc-100' : 'text-zinc-500 hover:bg-zinc-800/60 hover:text-zinc-300'
       }`}
     >
