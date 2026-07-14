@@ -11,7 +11,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { X, Server, RefreshCw, Loader2, Play, Circle, Square, LogOut, Terminal as TerminalIcon, ChevronLeft } from 'lucide-react'
 import '@xterm/xterm/css/xterm.css'
-import type { Socket } from 'socket.io-client'
+import type { TauriHandle } from '@/hooks/useTauri'
 import type { HostedAuth } from '@/hooks/useHostedAuth'
 
 interface RemoteAgent {
@@ -53,7 +53,7 @@ export function RemoteSessionModal({
   auth,
   onClose,
 }: {
-  socket: Socket | null
+  socket: TauriHandle | null
   auth: HostedAuth
   onClose: () => void
 }) {
@@ -78,15 +78,17 @@ export function RemoteSessionModal({
     if (!socket || !pid) return
     setLoading(true)
     setError(null)
-    socket.emit('remote:list-agents', { apiUrl: auth.apiUrl, token: auth.token, projectId: pid }, (r: any) => {
-      setLoading(false)
-      if (!r?.ok) { setError(r?.error || 'Failed to list agents'); setAgents([]); return }
-      // Online first, then by most-recent heartbeat.
-      const sorted = [...(r.agents || [])].sort((a: RemoteAgent, b: RemoteAgent) => {
-        if (a.online !== b.online) return a.online ? -1 : 1
-        return (new Date(b.lastSeen || 0).getTime()) - (new Date(a.lastSeen || 0).getTime())
-      })
-      setAgents(sorted)
+    import('@tauri-apps/api/core').then(({ invoke }) => {
+      invoke('remote_list_agents', { apiUrl: auth.apiUrl, token: auth.token, projectId: pid }).then((r: any) => {
+        setLoading(false)
+        if (!r?.ok) { setError(r?.error || 'Failed to list agents'); setAgents([]); return }
+        // Online first, then by most-recent heartbeat.
+        const sorted = [...(r.agents || [])].sort((a: RemoteAgent, b: RemoteAgent) => {
+          if (a.online !== b.online) return a.online ? -1 : 1
+          return (new Date(b.lastSeen || 0).getTime()) - (new Date(a.lastSeen || 0).getTime())
+        })
+        setAgents(sorted)
+      }).catch(() => { setLoading(false); setError('Failed to list agents') })
     })
   }, [socket, auth.apiUrl, auth.token])
 
@@ -196,18 +198,20 @@ export function RemoteSessionModal({
     setActiveAgent(agent)
     setStatus('starting…')
     const cols = 120, rows = 34
-    socket.emit('remote:start', {
-      apiUrl: auth.apiUrl, token: auth.token, projectId, cols, rows, targetAgentTokenId: agent.id,
-    }, (r: any) => {
-      if (!r?.ok) { setError(r?.error || 'Failed to start'); setStarting(false); setActiveAgent(null); setStatus(''); return }
-      sessionIdRef.current = r.sessionId
-      setSessionId(r.sessionId)
-      // Safety: if no session:started within 15s, surface a hint.
-      setTimeout(() => {
-        if (sessionIdRef.current === r.sessionId && starting) {
-          termRef.current?.write(`\r\n\x1b[33m[waiting] agent hasn't responded — it may be offline or busy.\x1b[0m\r\n`)
-        }
-      }, 15000)
+    import('@tauri-apps/api/core').then(({ invoke }) => {
+      invoke('remote_start', {
+        apiUrl: auth.apiUrl, token: auth.token, projectId, cols, rows, targetAgentTokenId: agent.id,
+      }).then((r: any) => {
+        if (!r?.ok) { setError(r?.error || 'Failed to start'); setStarting(false); setActiveAgent(null); setStatus(''); return }
+        sessionIdRef.current = r.sessionId
+        setSessionId(r.sessionId)
+        // Safety: if no session:started within 15s, surface a hint.
+        setTimeout(() => {
+          if (sessionIdRef.current === r.sessionId && starting) {
+            termRef.current?.write(`\r\n\x1b[33m[waiting] agent hasn't responded — it may be offline or busy.\x1b[0m\r\n`)
+          }
+        }, 15000)
+      }).catch(() => { setError('Failed to start remote session'); setStarting(false); setActiveAgent(null) })
     })
   }
 

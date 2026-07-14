@@ -1,8 +1,16 @@
 import type { NextConfig } from 'next'
 
+const isProd = process.env.TAURI_ENV === 'prod'
+
 const nextConfig: NextConfig = {
-  // Socket.io path must not be treated as a Next.js API route at the HTTP level
-  // The custom server handles /api/socket before Next.js sees it
+  ...(isProd
+    ? {
+        output: 'export',
+        distDir: '../src-tauri/webview-dist',
+        trailingSlash: true,
+        images: { unoptimized: true },
+      }
+    : {}),
 }
 
 export default nextConfig

@@ -5,7 +5,7 @@ import { BACKEND_URL } from '@/lib/config'
 
 import Image from 'next/image'
 import { useRouter } from 'next/navigation'
-import { useSocket } from '@/hooks/useSocket'
+import { useTauri, type TauriHandle } from '@/hooks/useTauri'
 import { AgentGrid, type AgentGridHandle, type ImportSpec } from '@/components/features/AgentGrid'
 import { useHostedAuth, type HostedAuth } from '@/hooks/useHostedAuth'
 import { CommandPalette, type Command } from '@/components/features/CommandPalette'
@@ -79,7 +79,7 @@ export default function TerminalWorkspacePage() {
   const gridRef = useRef<AgentGridHandle>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
-  const { socket } = useSocket({ projectId, sessionToken })
+  const { socket } = useTauri({ projectId, sessionToken })
   const hosted = useHostedAuth()
 
   // Load projects from backend (optional — only if self-hosted OSS is running)
@@ -1699,7 +1699,7 @@ interface MonitorSession {
   lines: MonitorLog[]
 }
 
-function TerminalMonitorButton({ socket }: { socket: ReturnType<typeof useSocket>['socket'] }) {
+function TerminalMonitorButton({ socket }: { socket: TauriHandle | null }) {
   const [open, setOpen] = useState(false)
   // sessionId → session card state, in Map to preserve insertion order
   const [sessions, setSessions] = useState<Map<string, MonitorSession>>(new Map())
@@ -1862,7 +1862,7 @@ interface ExternalSession {
 }
 
 function ExternalSessionsButton({ socket, onImport }: {
-  socket: ReturnType<typeof useSocket>['socket']
+  socket: TauriHandle | null
   onImport?: (specs: ImportSpec[]) => void
 }) {
   const [open, setOpen] = useState(false)

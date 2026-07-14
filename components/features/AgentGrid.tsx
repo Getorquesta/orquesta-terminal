@@ -3,7 +3,7 @@
 import { useState, useEffect, useMemo, useRef, useCallback, forwardRef, useImperativeHandle } from 'react'
 import { ResponsiveGridLayout, useContainerWidth } from 'react-grid-layout'
 import type { LayoutItem, ResponsiveLayouts } from 'react-grid-layout'
-import { Socket } from 'socket.io-client'
+import type { TauriHandle } from '@/hooks/useTauri'
 import { GeistMono } from 'geist/font/mono'
 import { Button } from '@/components/ui/button'
 import { Plus, X, Maximize2, GitBranch, LayoutGrid, Pencil, Cloud, Share2, Eye, Keyboard, Search, Check, ChevronDown, Link2, Users, Cpu, AlertTriangle, Folder, FolderOpen, Home, CornerLeftUp, PanelLeft, Loader2 } from 'lucide-react'
@@ -250,7 +250,7 @@ function CursorOverlay({ cursors }: { cursors: RemoteCursor[] }) {
 
 interface TerminalCellProps {
   cellId: string
-  socket: Socket | null
+  socket: TauriHandle | null
   cliType: CliType
   name: string
   fontSize: number
@@ -925,7 +925,7 @@ export interface AgentGridHandle {
 }
 
 interface AgentGridProps {
-  socket: Socket | null
+  socket: TauriHandle | null
   /** Namespaced localStorage key so pane layouts persist per project. */
   storageKey?: string
   /** 0..1 pane translucency so the wallpaper shows through. Default 1 (opaque). */
@@ -979,7 +979,7 @@ function buildTidyLayout(cells: GridCell[]): LayoutItem[] {
 function FolderPicker({
   socket, initialPath, title, onChoose, onClose,
 }: {
-  socket: Socket | null
+  socket: TauriHandle | null
   initialPath?: string
   title: string
   onChoose: (dir: string) => void

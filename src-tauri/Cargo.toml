@@ -1,0 +1,62 @@
+[package]
+name = "orquesta-terminal"
+version = "0.1.9"
+edition = "2021"
+
+[lib]
+name = "orquesta_terminal_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "orquesta-terminal"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# Tauri core
+tauri = { version = "2", features = ["devtools"] }
+tauri-plugin-shell  = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-fs     = "2"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# PTY
+portable-pty = "0.8"
+
+# Serialization
+serde      = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Network
+reqwest = { version = "0.12", features = ["json", "rustls-tls", "multipart"], default-features = false }
+# rust_socketio added in Phase 5 (cloud WebSocket bridge)
+# rust_socketio = { version = "0.6", default-features = false, features = ["async"] }
+
+# Utilities
+thiserror  = "2"
+anyhow     = "1"
+once_cell  = "1"
+uuid       = { version = "1", features = ["v4"] }
+chrono     = { version = "0.4", features = ["serde"] }
+dirs       = "5"
+which      = "7"
+regex      = "1"
+log        = "0.4"
+env_logger = "0.11"
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
+
+[profile.release]
+panic         = "abort"
+lto           = true
+codegen-units = 1
+opt-level     = "s"
+
+[profile.dev]
+incremental = true

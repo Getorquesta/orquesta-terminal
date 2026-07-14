@@ -4,13 +4,14 @@
   "private": true,
   "description": "Standalone terminal workspace for AI-powered development",
   "scripts": {
-    "dev": "tsx server.ts",
-    "build": "next build",
-    "start": "NODE_ENV=production tsx server.ts",
+    "dev": "tauri dev",
+    "next-dev": "next dev --port 3001",
+    "next-build": "TAURI_ENV=prod next build",
+    "build": "tauri build",
     "tui": "tsx src/tui/index.ts"
   },
   "dependencies": {
-    "@homebridge/node-pty-prebuilt-multiarch": "^0.13.1",
+    "@tauri-apps/api": "^2.0",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/addon-web-links": "^0.11.0",
     "@xterm/xterm": "^6.0.0",
@@ -22,12 +23,11 @@
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "react-grid-layout": "^2.0.0",
-    "socket.io": "^4.8.1",
-    "socket.io-client": "^4.8.1",
     "tailwind-merge": "^3.0.2"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4.0.9",
+    "@tauri-apps/cli": "^2.0",
     "@types/node": "^22.13.5",
     "@types/react": "^19.0.6",
     "@types/react-dom": "^19.0.3",
