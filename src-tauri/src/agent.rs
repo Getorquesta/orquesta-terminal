@@ -62,7 +62,7 @@ pub async fn list_external_sessions() -> Result<Value, String> {
                 .unwrap_or(0);
 
             let session_id = name.trim_end_matches(".jsonl").to_string();
-            let is_active = now - modified < 30_000; // active if modified in last 30s
+            let is_active = now - modified < 600_000; // active if modified in last 10 min
 
             sessions.push(json!({
                 "id": session_id,
@@ -85,15 +85,47 @@ pub async fn list_external_sessions() -> Result<Value, String> {
     Ok(json!({ "sessions": sessions }))
 }
 
-/// Decode Claude's directory encoding scheme (replaces / with -)
+/// Decode Claude's directory encoding scheme.
+/// Claude encodes a path like /home/cl-kai/my.project as -home-cl-kai-my-project,
+/// replacing every '/' AND '.' with '-'. This is lossy.
+/// We recover by greedily matching segments against the real filesystem,
+/// trying all combinations of '-' and '.' as internal separators.
 fn decode_project_dir(encoded: &str) -> String {
-    // Claude encodes the cwd by replacing / with - (and leading / becomes -)
-    // e.g. "-home-user-projects-myapp" → "/home/user/projects/myapp"
-    if encoded.starts_with('-') {
-        format!("/{}", encoded[1..].replace('-', "/"))
-    } else {
-        encoded.replace('-', "/")
+    let raw = if encoded.starts_with('-') { &encoded[1..] } else { encoded };
+    let parts: Vec<&str> = raw.split('-').collect();
+
+    let mut path = String::from("/");
+    let mut i = 0;
+    while i < parts.len() {
+        let mut found = false;
+        let max_j = (parts.len() - i).min(6);
+        // Try longest candidates first; for each length try all '-'/'.'' combos
+        'outer: for j in (1..=max_j).rev() {
+            let chunk = &parts[i..i + j];
+            let seps = j - 1; // number of internal separators
+            let combos = 1u32 << seps;
+            for mask in 0..combos {
+                let mut candidate = chunk[0].to_string();
+                for k in 0..seps {
+                    candidate.push(if mask & (1 << k) != 0 { '.' } else { '-' });
+                    candidate.push_str(chunk[k + 1]);
+                }
+                let test = format!("{}{}", path, candidate);
+                if std::path::Path::new(&test).exists() {
+                    path = format!("{}/", test);
+                    i += j;
+                    found = true;
+                    break 'outer;
+                }
+            }
+        }
+        if !found {
+            path = format!("{}{}/", path, parts[i]);
+            i += 1;
+        }
     }
+
+    path.trim_end_matches('/').to_string()
 }
 
 /// Start tailing a JSONL session file, emitting 'sessions:external-data' events.

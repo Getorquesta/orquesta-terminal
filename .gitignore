@@ -4,3 +4,13 @@ dist/
 .env
 .env.local
 tsconfig.tsbuildinfo
+
+# Rust / Tauri build artifacts
+src-tauri/target/
+
+# Playwright
+test-results/
+playwright-report/
+
+# Claude Code worktrees
+.claude/worktrees/

@@ -1,5 +1,6 @@
 'use client'
 
+import { writeText as clipboardWrite, readText as clipboardRead } from '@tauri-apps/plugin-clipboard-manager'
 import { useState, useEffect, useMemo, useRef, useCallback, forwardRef, useImperativeHandle } from 'react'
 import { ResponsiveGridLayout, useContainerWidth } from 'react-grid-layout'
 import type { LayoutItem, ResponsiveLayouts } from 'react-grid-layout'
@@ -419,10 +420,43 @@ function TerminalCell({
       // ── Clipboard: xterm has no copy/paste by default in the browser. ──
       const copySelection = () => {
         const sel = term.getSelection()
-        if (sel) navigator.clipboard?.writeText(sel).catch(() => {})
+        if (!sel) return
+        // Try Tauri plugin first (most reliable in Tauri webview)
+        clipboardWrite(sel)
+          .then(() => { /* success */ })
+          .catch((err: unknown) => {
+            console.warn('[copy] tauri clipboard failed:', err)
+            // Fallback 1: navigator.clipboard (requires secure context + user gesture)
+            if (navigator.clipboard?.writeText) {
+              navigator.clipboard.writeText(sel).catch((err2: unknown) => {
+                console.warn('[copy] navigator.clipboard failed:', err2)
+                // Fallback 2: execCommand (works in WebKit even without HTTPS)
+                const ta = document.createElement('textarea')
+                ta.value = sel
+                ta.style.position = 'fixed'
+                ta.style.opacity = '0'
+                document.body.appendChild(ta)
+                ta.focus()
+                ta.select()
+                const ok = document.execCommand('copy')
+                document.body.removeChild(ta)
+                if (!ok) console.error('[copy] execCommand also failed')
+              })
+            } else {
+              const ta = document.createElement('textarea')
+              ta.value = sel
+              ta.style.position = 'fixed'
+              ta.style.opacity = '0'
+              document.body.appendChild(ta)
+              ta.focus()
+              ta.select()
+              document.execCommand('copy')
+              document.body.removeChild(ta)
+            }
+          })
       }
       const paste = () => {
-        navigator.clipboard?.readText()
+        clipboardRead()
           .then((t) => { if (t) socket?.emit('session:input', { sessionId: sessionIdRef.current, data: t }) })
           .catch(() => {})
       }
@@ -468,7 +502,10 @@ function TerminalCell({
         const sessionId = `sess-${cellId}-${Date.now()}`
         sessionIdRef.current = sessionId
         setBranch(null)
-        if (reconnect) term.writeln('\r\n\x1b[32m[reconnected — new session]\x1b[0m')
+        if (reconnect) {
+          importRef.current.resumeId = undefined  // don't retry a dead resume
+          term.writeln('\r\n\x1b[32m[new session]\x1b[0m')
+        }
         socket?.emit('session:start', {
           sessionId, cellId, cliType, rows: term.rows, cols: term.cols,
           hostedApiUrl: hostedRef.current.apiUrl, hostedToken: hostedRef.current.token,
@@ -484,6 +521,11 @@ function TerminalCell({
       }, 100)
 
       term.onData((data) => {
+        if (!sessionIdRef.current) {
+          // session ended — restart on any keypress
+          startSession(true)
+          return
+        }
         socket?.emit('session:input', { sessionId: sessionIdRef.current, data })
       })
 
@@ -542,7 +584,8 @@ function TerminalCell({
     }
     const handleEnded = (data: { sessionId: string }) => {
       if (data.sessionId !== sessionIdRef.current) return
-      termRef.current?.writeln('\r\n\x1b[90m[Session ended]\x1b[0m')
+      termRef.current?.writeln('\r\n\x1b[90m[session ended — press Enter to restart]\x1b[0m\r\n')
+      sessionIdRef.current = null
     }
     const handleError = (data: { sessionId: string; message: string }) => {
       if (data.sessionId !== sessionIdRef.current) return
@@ -684,11 +727,11 @@ function TerminalCell({
     catch { origin = typeof window !== 'undefined' ? window.location.origin : '' }
     const link = `${origin}/dashboard/projects/${hostedProjectId}?view=cli-integration&sharedSession=${encodeURIComponent(sid)}`
     try {
-      await navigator.clipboard.writeText(link)
+      await clipboardWrite(link)
       setCopied(true)
       setTimeout(() => setCopied(false), 1600)
     } catch {
-      // Clipboard blocked (insecure context / permissions) — surface the link.
+      // Fallback if clipboard unavailable.
       window.prompt('Copy this link to share the terminal:', link)
     }
   }, [hostedProjectId, hostedApiUrl])
@@ -891,19 +934,25 @@ function TerminalCell({
           <X className="h-3.5 w-3.5" />
         </button>
       </div>
-      <div className="flex min-h-0 flex-1 overflow-hidden">
+      <div className="relative min-h-0 flex-1 overflow-hidden">
         {sidebarOpen && hostedApiUrl && hostedToken && (
-          <TerminalSidebar
-            apiUrl={hostedApiUrl}
-            token={hostedToken}
-            projectId={railProjectId}
-            projects={hostedProjects}
-            onPickProject={onHostedProjectChange}
-            onSeed={seedInput}
-            onClose={() => setSidebarOpen(false)}
-          />
+          <>
+            {/* Transparent backdrop — click closes the panel */}
+            <div className="absolute inset-0 z-10" onClick={() => setSidebarOpen(false)} />
+            <div className="absolute left-0 top-0 h-full z-20 shadow-2xl">
+              <TerminalSidebar
+                apiUrl={hostedApiUrl}
+                token={hostedToken}
+                projectId={railProjectId}
+                projects={hostedProjects}
+                onPickProject={onHostedProjectChange}
+                onSeed={seedInput}
+                onClose={() => setSidebarOpen(false)}
+              />
+            </div>
+          </>
         )}
-        <div className="relative min-w-0 flex-1 overflow-hidden">
+        <div className="absolute inset-0 overflow-hidden">
           <div ref={containerRef} className="h-full px-1 pt-1 pb-0 overflow-hidden" />
           {shared && remoteCursors.length > 0 && <CursorOverlay cursors={remoteCursors} />}
         </div>
@@ -1404,13 +1453,11 @@ function AgentGridInner({
 
   const addCell = useCallback((init?: Partial<Omit<GridCell, 'id'>>) => {
     const id = `cell-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
-    setCells((prev) => [...prev, { id, cliType: 'shell', name: '', ...init }])
-    setLayouts((prev) => {
-      const lg = (prev.lg || []) as LayoutItem[]
-      const col = lg.length % 2
-      const newItem: LayoutItem = { i: id, x: col * 6, y: Infinity, w: 6, h: 6, minW: 2, minH: 2 }
-      return { ...prev, lg: [...lg, newItem] }
-    })
+    const newCell: GridCell = { id, cliType: 'shell', name: '', ...init }
+    const newCells = [...cellsRef.current, newCell]
+    setCells(newCells)
+    setLayouts((prev) => ({ ...prev, lg: buildTidyLayout(newCells) }))
+    setTimeout(() => cellApiRef.current.forEach((a) => a?.fit()), 80)
     return id
   }, [])
 

@@ -3,10 +3,11 @@
 import { useState, useEffect, useCallback, useMemo } from 'react'
 import { ListTodo, Clock, RefreshCw, Loader2, X, CornerDownLeft, ExternalLink, ClipboardList, Sparkles, MessageSquare, Radio, FolderKanban, ChevronRight, Mail, Paperclip } from 'lucide-react'
 import { RailChat, RailCoordination, RailMail, RailFiles } from './RailPanels'
+import { hostedFetch } from '@/lib/tauri-proxy'
 
 // Per-terminal left rail. Mirrors the hosted interactive-session sidebar: a
 // compact panel scoped to this pane's hosted project, reachable with the
-// cockpit's oclt_ token through /api/hosted/proxy.
+// cockpit's oclt_ token through hostedFetch (Tauri invoke).
 //
 // Its hero tab is "Tasks": Plans / Linear / Scheduled / Assigned pulled from
 // the aggregator (GET /api/orquesta-cli/projects/:id/tasks). Picking a task
@@ -42,29 +43,11 @@ const SOURCE_STYLE: Record<NormTask['source'], { label: string; cls: string }> =
 }
 
 async function proxyGet<T>(apiUrl: string, token: string, path: string): Promise<T> {
-  const res = await fetch('/api/hosted/proxy', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ url: `${apiUrl}${path}`, token }),
-  })
-  if (!res.ok) {
-    const d = await res.json().catch(() => ({}))
-    throw new Error(d.error || `HTTP ${res.status}`)
-  }
-  return res.json() as Promise<T>
+  return hostedFetch<T>({ url: `${apiUrl}${path}`, token })
 }
 
 async function proxyPost<T>(apiUrl: string, token: string, path: string, payload: unknown): Promise<T> {
-  const res = await fetch('/api/hosted/proxy', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ url: `${apiUrl}${path}`, token, method: 'POST', body: payload }),
-  })
-  if (!res.ok) {
-    const d = await res.json().catch(() => ({}))
-    throw new Error(d.error || `HTTP ${res.status}`)
-  }
-  return res.json() as Promise<T>
+  return hostedFetch<T>({ url: `${apiUrl}${path}`, token, method: 'POST', body: payload })
 }
 
 export function TerminalSidebar({
@@ -91,7 +74,7 @@ export function TerminalSidebar({
   const needsProject = !projectId
 
   return (
-    <div className="flex h-full w-[268px] shrink-0 flex-col border-r border-zinc-800 bg-zinc-950/70">
+    <div className="flex h-full w-[268px] flex-col border-r border-zinc-800 bg-zinc-950">
       <div className="flex items-center gap-0.5 overflow-x-auto border-b border-zinc-800 px-1.5 py-1.5">
         <TabButton active={tab === 'tasks'} onClick={() => setTab('tasks')} icon={<ListTodo className="h-3 w-3" />} label="Tasks" />
         <TabButton active={tab === 'timeline'} onClick={() => setTab('timeline')} icon={<Clock className="h-3 w-3" />} label="Runs" />

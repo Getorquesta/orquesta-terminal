@@ -6,8 +6,20 @@ use tauri::Emitter;
 
 use crate::state::{AppState, PtySession};
 
+/// If `bin` is in PATH, return it directly; otherwise return a shell that
+/// prints a friendly "not installed" message and then stays open.
+fn cli_or_shell(bin: &str, install_hint: &str, env_extras: Vec<(String, String)>) -> (String, Vec<String>, Vec<(String, String)>) {
+    if which::which(bin).is_ok() {
+        return (bin.to_string(), vec![], env_extras);
+    }
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".into());
+    let msg = format!(
+        r#"printf '\r\n\033[1;33m  {bin} is not installed.\033[0m\r\n  {install_hint}\r\n\r\n'; exec {shell}"#
+    );
+    (shell, vec!["-c".to_string(), msg], env_extras)
+}
+
 /// Resolve CLI command + args from a cliType string.
-/// Mirrors the switch block in server.ts around line 594.
 fn resolve_command(
     cli_type: &str,
     resume_id: Option<&str>,
@@ -36,15 +48,15 @@ fn resolve_command(
             }
             ("claude".into(), args, env_extras)
         }
-        "orquesta" => ("orquesta".into(), vec![], env_extras),
-        "kiro" => ("kiro".into(), vec![], env_extras),
-        "opencode" => ("opencode".into(), vec![], env_extras),
-        "gemini" => ("gemini".into(), vec![], env_extras),
-        "codex" => ("codex".into(), vec![], env_extras),
-        "aider" => ("aider".into(), vec![], env_extras),
-        "continue" => ("continue".into(), vec![], env_extras),
+        "orquesta" => cli_or_shell("orquesta", "npm i -g @getorquesta/cli", env_extras),
+        "kimi"     => cli_or_shell("kimi",     "npm i -g @moonshot-ai/kimi-cli", env_extras),
+        "kiro"     => cli_or_shell("kiro",     "Download Kiro at https://kiro.dev", env_extras),
+        "opencode" => cli_or_shell("opencode", "npm i -g opencode", env_extras),
+        "gemini"   => cli_or_shell("gemini",   "npm i -g @google/gemini-cli", env_extras),
+        "codex"    => cli_or_shell("codex",    "npm i -g @openai/codex", env_extras),
+        "aider"    => cli_or_shell("aider",    "pip install aider-chat", env_extras),
+        "continue" => cli_or_shell("continue", "npm i -g continue", env_extras),
         _ => {
-            // default: shell
             let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".into());
             (shell, vec![], env_extras)
         }

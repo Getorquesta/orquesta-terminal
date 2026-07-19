@@ -2,6 +2,7 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, State};
 
+use crate::cloud;
 use crate::state::AppState;
 
 // ── PTY Commands ──────────────────────────────────────────────────────────────
@@ -277,6 +278,7 @@ pub async fn terminal_share(
 ) -> Result<Value, String> {
     use crate::state::SharedTerminalInfo;
 
+    let cli_type_str = cli_type.unwrap_or_else(|| "shell".into());
     let channel = format!("agent:project-{project_id}");
 
     let info = SharedTerminalInfo {
@@ -285,8 +287,8 @@ pub async fn terminal_share(
         channel: channel.clone(),
         api_url: api_url.clone(),
         cli_token: cli_token.clone(),
-        cli_type: cli_type.unwrap_or_else(|| "shell".into()),
-        cwd,
+        cli_type: cli_type_str.clone(),
+        cwd: cwd.clone(),
         label: label.clone(),
         allow_control: allow_control.unwrap_or(false),
         buffer: String::new(),
@@ -297,17 +299,61 @@ pub async fn terminal_share(
         shared.insert(session_id.clone(), info);
     }
 
+    // Phase 5: Connect to cloud WebSocket and subscribe to the project channel
+    let state_arc = Arc::clone(&state);
+    let conn_result = crate::cloud::get_or_create_share_conn(
+        &api_url,
+        &cli_token,
+        &project_id,
+        &session_id,
+        &state_arc,
+    )
+    .await;
+
+    // Phase 5: Register the share via REST API (best-effort; don't fail the whole call)
+    let _ = crate::cloud::register_share(
+        &api_url,
+        &cli_token,
+        &project_id,
+        &session_id,
+        label.as_deref(),
+        &cli_type_str,
+        cwd.as_deref(),
+    )
+    .await;
+
+    // Phase 5: Emit session:started on the cloud channel
+    {
+        let key = crate::cloud::conn_key(&api_url, &cli_token, &project_id);
+        let frame = format!(
+            r#"42["broadcast",{{"channel":"{channel}","event":"session:started","payload":{{"sessionId":"{session_id}","label":{},"cliType":"{cli_type_str}"}},"self":false}}]"#,
+            label
+                .as_deref()
+                .map(|l| format!(r#""{l}""#))
+                .unwrap_or_else(|| "null".into()),
+        );
+        let tx_opt = {
+            let conns = state.cloud_conns.lock().unwrap();
+            conns.get(&key).map(|c| c.tx.clone())
+        };
+        if let Some(tx) = tx_opt {
+            let _ = tx.send(frame).await;
+        }
+    }
+
     // Emit share-status to frontend
     state
         .app_handle
         .emit(
             "terminal:share-status",
-            json!({ "sessionId": session_id, "shared": true, "projectId": project_id }),
+            json!({
+                "sessionId": session_id,
+                "shared": true,
+                "projectId": project_id,
+                "connected": conn_result.is_ok(),
+            }),
         )
         .ok();
-
-    // TODO Phase 5: connect to ws.orquesta.live and register share via REST
-    // For now, store locally and return success
 
     Ok(json!({
         "ok": true,
@@ -322,10 +368,8 @@ pub async fn terminal_unshare(
     session_id: String,
     state: State<'_, Arc<AppState>>,
 ) -> Result<(), String> {
-    {
-        let mut shared = state.shared_terminals.lock().unwrap();
-        shared.remove(&session_id);
-    }
+    // Phase 5: broadcast ended + REST PATCH + cleanup
+    crate::cloud::stop_share(&session_id, &Arc::clone(&state)).await?;
 
     state
         .app_handle
@@ -489,52 +533,137 @@ pub async fn remote_start(
     resume: Option<bool>,
     state: State<'_, Arc<AppState>>,
 ) -> Result<Value, String> {
-    // TODO Phase 7: full remote session relay via cloud WebSocket
-    // Placeholder that returns a session ID
+    let base = api_url.unwrap_or_else(|| "https://getorquesta.com".into());
     let session_id = format!("remote-{}", uuid::Uuid::new_v4());
-    Ok(json!({
-        "ok": true,
-        "sessionId": session_id,
-        "message": "Remote sessions coming in Phase 7",
-    }))
+
+    // Connect (or reuse) the cloud WebSocket for the viewer side
+    let conn_key = cloud::get_or_create_remote_conn(
+        &base, &token, &project_id, &session_id, &state,
+    )
+    .await?;
+
+    // Ask the remote agent to start a session
+    cloud::remote_send(
+        &conn_key,
+        "session:start",
+        json!({
+            "sessionId": session_id,
+            "projectId": project_id,
+            "cols": cols.unwrap_or(220),
+            "rows": rows.unwrap_or(50),
+            "targetAgentTokenId": target_agent_token_id,
+            "workingDirectory": working_directory,
+            "resume": resume.unwrap_or(false),
+        }),
+        &state,
+    )
+    .await?;
+
+    // Store the remote session
+    {
+        let mut remote_sessions = state.remote_sessions.lock().unwrap();
+        remote_sessions.insert(
+            session_id.clone(),
+            crate::state::RemoteSession {
+                session_id: session_id.clone(),
+                project_id: project_id.clone(),
+                channel: format!("cockpit:project-{project_id}"),
+                conn_key,
+            },
+        );
+    }
+
+    Ok(json!({ "ok": true, "sessionId": session_id }))
 }
 
 #[tauri::command]
-pub fn remote_input(
+pub async fn remote_input(
     session_id: String,
     input: String,
     state: State<'_, Arc<AppState>>,
 ) -> Result<(), String> {
-    // TODO Phase 7
+    let conn_key = {
+        let remote_sessions = state.remote_sessions.lock().unwrap();
+        remote_sessions.get(&session_id).map(|s| s.conn_key.clone())
+    };
+    if let Some(key) = conn_key {
+        cloud::remote_send(
+            &key,
+            "session:input",
+            json!({ "sessionId": session_id, "data": input }),
+            &state,
+        )
+        .await?;
+    }
     Ok(())
 }
 
 #[tauri::command]
-pub fn remote_resize(
+pub async fn remote_resize(
     session_id: String,
     cols: u16,
     rows: u16,
     state: State<'_, Arc<AppState>>,
 ) -> Result<(), String> {
-    // TODO Phase 7
+    let conn_key = {
+        let remote_sessions = state.remote_sessions.lock().unwrap();
+        remote_sessions.get(&session_id).map(|s| s.conn_key.clone())
+    };
+    if let Some(key) = conn_key {
+        cloud::remote_send(
+            &key,
+            "session:resize",
+            json!({ "sessionId": session_id, "cols": cols, "rows": rows }),
+            &state,
+        )
+        .await?;
+    }
     Ok(())
 }
 
 #[tauri::command]
-pub fn remote_detach(
+pub async fn remote_detach(
     session_id: String,
     state: State<'_, Arc<AppState>>,
 ) -> Result<(), String> {
-    // TODO Phase 7
+    let conn_key = {
+        let remote_sessions = state.remote_sessions.lock().unwrap();
+        remote_sessions.get(&session_id).map(|s| s.conn_key.clone())
+    };
+    if let Some(key) = conn_key {
+        // Notify the agent we are detaching
+        let _ = cloud::remote_send(
+            &key,
+            "session:detach",
+            json!({ "sessionId": session_id }),
+            &state,
+        )
+        .await;
+        cloud::remote_cleanup(&session_id, &key, &state);
+    }
     Ok(())
 }
 
 #[tauri::command]
-pub fn remote_end(
+pub async fn remote_end(
     session_id: String,
     state: State<'_, Arc<AppState>>,
 ) -> Result<(), String> {
-    // TODO Phase 7
+    let conn_key = {
+        let remote_sessions = state.remote_sessions.lock().unwrap();
+        remote_sessions.get(&session_id).map(|s| s.conn_key.clone())
+    };
+    if let Some(key) = conn_key {
+        // Ask the agent to terminate the session
+        let _ = cloud::remote_send(
+            &key,
+            "session:end",
+            json!({ "sessionId": session_id }),
+            &state,
+        )
+        .await;
+        cloud::remote_cleanup(&session_id, &key, &state);
+    }
     Ok(())
 }
 

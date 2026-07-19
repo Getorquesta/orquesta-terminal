@@ -4,38 +4,32 @@
 // and cross-project coordination. These are intentionally self-contained (not
 // shared with the wider global-sidebar versions in app/page.tsx) so the rail
 // can stay lean at ~268px and the proven global sidebar carries zero regression
-// risk. All hosted access goes through /api/hosted/proxy with the oclt_ token.
+// risk. All hosted access goes through hostedFetch (Tauri invoke) with the oclt_ token.
 
 import { useState, useEffect, useCallback, useRef } from 'react'
 import {
   Loader2, Send, RefreshCw, Radio, ExternalLink,
   Bell, CheckCheck, Upload, Trash2, Download, FileText, Paperclip,
 } from 'lucide-react'
+import { hostedFetch } from '@/lib/tauri-proxy'
+import { invoke } from '@tauri-apps/api/core'
 
 async function proxy<T>(apiUrl: string, token: string, path: string, method = 'GET', body?: unknown): Promise<T> {
-  const res = await fetch('/api/hosted/proxy', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ url: `${apiUrl}${path}`, token, method, body }),
-  })
-  if (!res.ok) {
-    const d = await res.json().catch(() => ({}))
-    throw new Error((d as { error?: string }).error || `HTTP ${res.status}`)
-  }
-  return res.json() as Promise<T>
+  return hostedFetch<T>({ url: `${apiUrl}${path}`, token, method: method as 'GET' | 'POST' | 'PATCH' | 'DELETE' | 'PUT', body })
 }
 
-// Multipart upload goes through the dedicated /api/hosted/upload proxy (the JSON
+// Multipart upload goes through the Tauri hosted_upload command (the JSON
 // proxy above can't carry a file body).
 async function uploadFile<T>(apiUrl: string, token: string, path: string, file: File): Promise<T> {
-  const form = new FormData()
-  form.append('url', `${apiUrl}${path}`)
-  form.append('token', token)
-  form.append('file', file, file.name)
-  const res = await fetch('/api/hosted/upload', { method: 'POST', body: form })
-  const d = await res.json().catch(() => ({}))
-  if (!res.ok) throw new Error((d as { error?: string; message?: string }).message || (d as { error?: string }).error || `HTTP ${res.status}`)
-  return d as T
+  const arrayBuffer = await file.arrayBuffer()
+  const bytes = Array.from(new Uint8Array(arrayBuffer))
+  return invoke<T>('hosted_upload', {
+    url: `${apiUrl}${path}`,
+    token,
+    fileName: file.name,
+    fileType: file.type,
+    fileBytes: bytes,
+  })
 }
 
 function relTime(iso: string): string {

@@ -17,9 +17,10 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 # Tauri core
 tauri = { version = "2", features = ["devtools"] }
-tauri-plugin-shell  = "2"
-tauri-plugin-dialog = "2"
-tauri-plugin-fs     = "2"
+tauri-plugin-shell              = "2"
+tauri-plugin-dialog             = "2"
+tauri-plugin-fs                 = "2"
+tauri-plugin-clipboard-manager  = "2"
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
@@ -33,8 +34,8 @@ serde_json = "1"
 
 # Network
 reqwest = { version = "0.12", features = ["json", "rustls-tls", "multipart"], default-features = false }
-# rust_socketio added in Phase 5 (cloud WebSocket bridge)
-# rust_socketio = { version = "0.6", default-features = false, features = ["async"] }
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-native-roots"] }
+futures-util = "0.3"
 
 # Utilities
 thiserror  = "2"

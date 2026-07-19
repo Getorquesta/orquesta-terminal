@@ -1,6 +1,7 @@
 'use client'
 
 import { useState, useEffect, useCallback } from 'react'
+import { hostedFetch } from '@/lib/tauri-proxy'
 
 const STORAGE_KEY = 'orquesta-hosted-auth'
 
@@ -74,25 +75,12 @@ export function useHostedAuth() {
     setError(null)
 
     try {
-      // Use local proxy to avoid CORS (browser → OSS backend → hosted)
-      const res = await fetch('/api/hosted/proxy', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url: `${url}/api/orquesta-cli/projects`, token }),
-      })
-
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}))
-        const msg = data.error || `Authentication failed (${res.status})`
-        setError(msg)
-        throw new Error(msg)
-      }
-
-      const data = await res.json() as {
+      // Use Tauri invoke to avoid CORS (Rust makes the HTTP request directly)
+      const data = await hostedFetch<{
         organization?: { id: string; name: string }
         user?: { id: string }
         projects?: HostedProject[]
-      }
+      }>({ url: `${url}/api/orquesta-cli/projects`, token })
 
       if (!data.organization) {
         const msg = 'Invalid token — no organization found'
@@ -159,24 +147,17 @@ export function useHostedAuth() {
         await new Promise(r => setTimeout(r, POLL_INTERVAL_MS))
 
         try {
-          // Poll through local proxy to avoid CORS with ws.orquesta.live
-          const res = await fetch('/api/hosted/proxy', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              url: `${WS_URL}/auth/result/${sessionId}`,
-              token: 'poll', // token is required by proxy but not used by this endpoint
-            }),
+          // Poll through Tauri invoke to avoid CORS with ws.orquesta.live
+          const data = await hostedFetch<{ token?: string; organizationId?: string; organizationName?: string }>({
+            url: `${WS_URL}/auth/result/${sessionId}`,
+            token: 'poll', // token is required by invoke but not used by this endpoint
           })
-          if (res.status === 200) {
-            const data = await res.json() as { token?: string; organizationId?: string; organizationName?: string }
-            if (data.token) {
-              token = data.token
-              break
-            }
+          if (data.token) {
+            token = data.token
+            break
           }
         } catch {
-          // Network hiccup — retry
+          // Network hiccup or 404 (not ready yet) — retry
         }
 
         // Check if popup was closed without authorizing

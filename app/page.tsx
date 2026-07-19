@@ -1,11 +1,11 @@
 'use client'
 
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
-import { BACKEND_URL } from '@/lib/config'
 
 import Image from 'next/image'
 import { useRouter } from 'next/navigation'
-import { useTauri, type TauriHandle } from '@/hooks/useTauri'
+import { useTauri } from '@/hooks/useTauri'
+import { hostedFetch } from '@/lib/tauri-proxy'
 import { AgentGrid, type AgentGridHandle, type ImportSpec } from '@/components/features/AgentGrid'
 import { useHostedAuth, type HostedAuth } from '@/hooks/useHostedAuth'
 import { CommandPalette, type Command } from '@/components/features/CommandPalette'
@@ -84,11 +84,6 @@ export default function TerminalWorkspacePage() {
 
   // Load projects from backend (optional — only if self-hosted OSS is running)
   useEffect(() => {
-    // Try to connect to self-hosted backend, but don't block if unavailable
-    fetch(BACKEND_URL + '/api/projects', { mode: 'no-cors' })
-      .catch(() => {}) // silently fail — terminal works without backend
-    fetch(BACKEND_URL + '/api/auth/get-session', { mode: 'no-cors' })
-      .catch(() => {}) // silently fail
     try {
       const saved = localStorage.getItem(BG_KEY)
       if (saved) setBg({ ...DEFAULT_BG, ...JSON.parse(saved) })
@@ -160,22 +155,20 @@ export default function TerminalWorkspacePage() {
   const commands: Command[] = useMemo(() => {
     const list: Command[] = []
 
-    if (online) {
-      list.push(
-        {
-          id: 'term-new', group: 'Terminal', label: 'New terminal', hint: 'Alt+T',
-          icon: Plus, run: () => gridRef.current?.addTerminal(),
-        },
-        {
-          id: 'term-arrange', group: 'Terminal', label: 'Arrange & fit all panes', hint: 'Ctrl+P',
-          icon: LayoutGrid, run: () => gridRef.current?.arrange(),
-        },
-        {
-          id: 'term-close', group: 'Terminal', label: 'Close active terminal', hint: 'Alt+W',
-          icon: X, run: () => gridRef.current?.closeActive(),
-        },
-      )
-    }
+    list.push(
+      {
+        id: 'term-new', group: 'Terminal', label: 'New terminal', hint: 'Alt+T',
+        icon: Plus, run: () => gridRef.current?.addTerminal(),
+      },
+      {
+        id: 'term-arrange', group: 'Terminal', label: 'Arrange & fit all panes', hint: 'Ctrl+P',
+        icon: LayoutGrid, run: () => gridRef.current?.arrange(),
+      },
+      {
+        id: 'term-close', group: 'Terminal', label: 'Close active terminal', hint: 'Alt+W',
+        icon: X, run: () => gridRef.current?.closeActive(),
+      },
+    )
 
     projects.forEach((p, i) => {
       list.push({
@@ -246,7 +239,7 @@ export default function TerminalWorkspacePage() {
       <header className="glass relative z-20 flex items-center justify-between gap-3 px-4 py-2.5">
         <div className="flex items-center gap-3">
           <div className="flex items-center gap-2">
-            <Image src="/logo-mark.png" alt="Orquesta" width={20} height={20} className="invert" priority />
+            <Image src="/logo-mark.png" alt="Orquesta" width={512} height={498} className="h-5 w-5 invert" unoptimized priority />
             <span className="font-semibold tracking-tight text-white">
               Terminal
             </span>
@@ -339,6 +332,30 @@ export default function TerminalWorkspacePage() {
                   </div>
 
                   <p className="mb-1.5 mt-3 font-mono text-[10px] uppercase tracking-wider text-zinc-500">Custom image</p>
+
+                  {/* Preset photo thumbnails */}
+                  <div className="mb-2 grid grid-cols-5 gap-1.5">
+                    {[
+                      { label: 'Mist',    url: 'https://images.unsplash.com/photo-1519681393784-d120267933ba?w=1600&q=80' },
+                      { label: 'Neon',    url: 'https://images.unsplash.com/photo-1550745165-9bc0b252726f?w=1600&q=80' },
+                      { label: 'Forest',  url: 'https://images.unsplash.com/photo-1448375240586-882707db888b?w=1600&q=80' },
+                      { label: 'Ocean',   url: 'https://images.unsplash.com/photo-1507525428034-b723cf961d3e?w=1600&q=80' },
+                      { label: 'Galaxy',  url: 'https://images.unsplash.com/photo-1462331940025-496dfbfc7564?w=1600&q=80' },
+                    ].map(p => (
+                      <button
+                        key={p.url}
+                        onClick={() => updateBg({ url: p.url })}
+                        title={p.label}
+                        className={`h-9 rounded-lg ring-1 bg-cover bg-center transition-all ${
+                          bg.url === p.url
+                            ? 'ring-2 ring-green-400'
+                            : 'ring-white/10 hover:ring-white/30'
+                        }`}
+                        style={{ backgroundImage: `url(${p.url})` }}
+                      />
+                    ))}
+                  </div>
+
                   <input
                     value={bg.url.startsWith('data:') ? '' : bg.url}
                     onChange={e => updateBg({ url: e.target.value })}
@@ -453,7 +470,7 @@ export default function TerminalWorkspacePage() {
 
       {/* ── Workspace ── */}
       <main className="relative z-10 flex flex-1 overflow-hidden">
-        <div className="flex-1 overflow-auto p-4">
+        <div className="flex-1 overflow-hidden p-4">
           <AgentGrid
             ref={gridRef}
             socket={socket}
@@ -466,14 +483,24 @@ export default function TerminalWorkspacePage() {
           />
         </div>
 
-        {/* Timeline sidebar (hosted prompts) */}
+        {/* Timeline sidebar — fixed overlay, doesn't affect grid layout */}
         {timelineOpen && hosted.isLoggedIn && (
-          <HostedTimeline auth={hosted.auth!} />
+          <>
+            <div className="fixed inset-0 z-40" onClick={() => setTimelineOpen(false)} />
+            <div className="fixed right-0 top-0 h-screen z-50 shadow-2xl">
+              <HostedTimeline auth={hosted.auth!} />
+            </div>
+          </>
         )}
 
-        {/* Plugins panel */}
+        {/* Plugins panel — fixed overlay, doesn't affect grid layout */}
         {pluginsOpen && (
-          <PluginsPanel />
+          <>
+            <div className="fixed inset-0 z-40" onClick={() => setPluginsOpen(false)} />
+            <div className="fixed right-0 top-0 h-screen z-50 shadow-2xl">
+              <PluginsPanel />
+            </div>
+          </>
         )}
       </main>
 
@@ -590,15 +617,11 @@ function PromptCard({
 
   const patchPrompt = async (updates: Record<string, unknown>) => {
     try {
-      await fetch('/api/hosted/proxy', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          url: `${auth.apiUrl}/api/v1/prompts/${p.id}`,
-          token: auth.token,
-          method: 'PATCH',
-          body: updates,
-        }),
+      await hostedFetch({
+        url: `${auth.apiUrl}/api/v1/prompts/${p.id}`,
+        token: auth.token,
+        method: 'PATCH',
+        body: updates,
       })
     } catch {}
   }
@@ -736,7 +759,7 @@ function HostedTimeline({ auth }: { auth: HostedAuth }) {
   ] as const
 
   return (
-    <aside className="relative z-10 flex w-80 shrink-0 flex-col border-l border-white/10 bg-zinc-900/80 backdrop-blur-sm">
+    <aside className="flex h-full w-80 flex-col border-l border-white/10 bg-zinc-900">
       {/* Header: project selector on its own row, then a full-width segmented tab bar */}
       <div className="space-y-2 border-b border-white/10 p-2">
         {auth.projects.length > 1 && (
@@ -839,19 +862,10 @@ function TeamChatTab({ auth, selectedProjectId }: { auth: HostedAuth; selectedPr
   const fetchMessages = useCallback(async () => {
     if (!projectId || !auth.token) return
     try {
-      const res = await fetch('/api/hosted/proxy', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          url: `${auth.apiUrl}/api/orquesta-cli/projects/${projectId}/chat?limit=50`,
-          token: auth.token,
-        }),
+      const data = await hostedFetch<{ messages?: TeamChatMessage[]; currentUserId?: string }>({
+        url: `${auth.apiUrl}/api/orquesta-cli/projects/${projectId}/chat?limit=50`,
+        token: auth.token,
       })
-      if (!res.ok) {
-        const d = await res.json().catch(() => ({}))
-        throw new Error(d.error || `HTTP ${res.status}`)
-      }
-      const data = await res.json() as { messages?: TeamChatMessage[]; currentUserId?: string }
       const fetched = data.messages || []
       const fetchedIds = new Set(fetched.map(m => m.id))
       // Drop pending optimistic messages the server now returns; keep the rest.
@@ -881,16 +895,10 @@ function TeamChatTab({ auth, selectedProjectId }: { auth: HostedAuth; selectedPr
     let cancelled = false
     ;(async () => {
       try {
-        const res = await fetch('/api/hosted/proxy', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            url: `${auth.apiUrl}/api/orquesta-cli/projects/${projectId}/members`,
-            token: auth.token,
-          }),
+        const data = await hostedFetch<TeamChatMember[]>({
+          url: `${auth.apiUrl}/api/orquesta-cli/projects/${projectId}/members`,
+          token: auth.token,
         })
-        if (!res.ok) return
-        const data = await res.json() as TeamChatMember[]
         if (!cancelled) setMembers(Array.isArray(data) ? data : [])
       } catch { /* non-fatal: mentions just won't autocomplete */ }
     })()
@@ -963,21 +971,12 @@ function TeamChatTab({ auth, selectedProjectId }: { auth: HostedAuth; selectedPr
       .filter(m => content.includes(`@${memberName(m)}`))
       .map(m => m.user_id)
     try {
-      const res = await fetch('/api/hosted/proxy', {
+      const created = await hostedFetch<TeamChatMessage>({
+        url: `${auth.apiUrl}/api/orquesta-cli/projects/${projectId}/chat`,
+        token: auth.token,
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          url: `${auth.apiUrl}/api/orquesta-cli/projects/${projectId}/chat`,
-          token: auth.token,
-          method: 'POST',
-          body: mentions.length ? { content, mentions } : { content },
-        }),
+        body: mentions.length ? { content, mentions } : { content },
       })
-      if (!res.ok) {
-        const d = await res.json().catch(() => ({}))
-        throw new Error(d.error || `HTTP ${res.status}`)
-      }
-      const created = await res.json() as TeamChatMessage
       setInput('')
       setMentionQuery(null)
       // Track as pending until the poll echoes it back, then show immediately.
@@ -1136,16 +1135,10 @@ function TimelineTab({ auth, selectedProjectId }: { auth: HostedAuth; selectedPr
     targetUrl.searchParams.set('limit', '25')
 
     try {
-      const res = await fetch('/api/hosted/proxy', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url: targetUrl.toString(), token: auth.token }),
+      const data = await hostedFetch<{ prompts?: TimelinePrompt[] }>({
+        url: targetUrl.toString(),
+        token: auth.token,
       })
-      if (!res.ok) {
-        const d = await res.json().catch(() => ({}))
-        throw new Error(d.error || `HTTP ${res.status}`)
-      }
-      const data = await res.json() as { prompts?: TimelinePrompt[] }
       setPrompts(data.prompts || [])
       setError(null)
     } catch (e) {
@@ -1217,20 +1210,13 @@ function CoordinationTab({ auth, selectedProjectId }: { auth: HostedAuth; select
   const fetchChannels = useCallback(async () => {
     if (!projectId || !auth.token) return
     try {
-      const res = await fetch('/api/hosted/proxy', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          url: `${auth.apiUrl}/api/projects/${projectId}/coordination/channels`,
-          token: auth.token,
-        }),
+      const data = await hostedFetch<{ channels?: CoordChannel[] }>({
+        url: `${auth.apiUrl}/api/projects/${projectId}/coordination/channels`,
+        token: auth.token,
       })
-      if (res.ok) {
-        const data = await res.json()
-        if (Array.isArray(data.channels)) {
-          setChannels(data.channels)
-          setError(null)
-        }
+      if (Array.isArray(data.channels)) {
+        setChannels(data.channels)
+        setError(null)
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed')
@@ -1243,17 +1229,11 @@ function CoordinationTab({ auth, selectedProjectId }: { auth: HostedAuth; select
     setPinging(channelId)
     setPingStatus(null)
     try {
-      const res = await fetch('/api/hosted/proxy', {
+      const data = await hostedFetch<{ dispatched?: unknown[] }>({
+        url: `${auth.apiUrl}/api/projects/${projectId}/coordination/channels/${channelId}/ping`,
+        token: auth.token,
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          url: `${auth.apiUrl}/api/projects/${projectId}/coordination/channels/${channelId}/ping`,
-          token: auth.token,
-          method: 'POST',
-        }),
       })
-      const data = await res.json()
-      if (!res.ok) throw new Error(data.error || 'Ping failed')
       const n = Array.isArray(data.dispatched) ? data.dispatched.length : 0
       setPingStatus({ id: channelId, msg: `Pinged ${n} peer${n === 1 ? '' : 's'}`, ok: true })
     } catch (e) {
@@ -1361,22 +1341,15 @@ function ChannelChat({ auth, projectId, channelId }: { auth: HostedAuth; project
     let cancelled = false
     const join = async () => {
       try {
-        const res = await fetch('/api/hosted/proxy', {
+        const data = await hostedFetch<{ session_id?: string; history?: CoordMessage[] }>({
+          url: `${auth.apiUrl}/api/projects/${projectId}/coordination/channels/${channelId}/join`,
+          token: auth.token,
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            url: `${auth.apiUrl}/api/projects/${projectId}/coordination/channels/${channelId}/join`,
-            token: auth.token,
-            method: 'POST',
-            body: {},
-          }),
+          body: {},
         })
         if (cancelled) return
-        if (res.ok) {
-          const data = await res.json()
-          setSessionId(data.session_id || null)
-          setMessages(Array.isArray(data.history) ? data.history : [])
-        }
+        setSessionId(data.session_id || null)
+        setMessages(Array.isArray(data.history) ? data.history : [])
       } catch {}
       if (!cancelled) setJoining(false)
     }
@@ -1393,22 +1366,15 @@ function ChannelChat({ auth, projectId, channelId }: { auth: HostedAuth; project
     const poll = async () => {
       while (!cancelled) {
         try {
-          const res = await fetch('/api/hosted/proxy', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              url: `${auth.apiUrl}/api/projects/${projectId}/coordination/channels/${channelId}/listen?session_id=${sessionId}&since=${sinceRef.current}&timeout=15`,
-              token: auth.token,
-            }),
+          const data = await hostedFetch<{ messages?: CoordMessage[] }>({
+            url: `${auth.apiUrl}/api/projects/${projectId}/coordination/channels/${channelId}/listen?session_id=${sessionId}&since=${sinceRef.current}&timeout=15`,
+            token: auth.token,
           })
           if (cancelled) return
-          if (res.ok) {
-            const data = await res.json()
-            const incoming: CoordMessage[] = Array.isArray(data.messages) ? data.messages : []
-            if (incoming.length > 0) {
-              setMessages(prev => [...prev, ...incoming.filter(m => m.kind !== 'status')])
-              sinceRef.current = incoming[incoming.length - 1].id
-            }
+          const incoming: CoordMessage[] = Array.isArray(data.messages) ? data.messages : []
+          if (incoming.length > 0) {
+            setMessages(prev => [...prev, ...incoming.filter(m => m.kind !== 'status')])
+            sinceRef.current = incoming[incoming.length - 1].id
           }
         } catch {
           if (cancelled) return
@@ -1429,15 +1395,11 @@ function ChannelChat({ auth, projectId, channelId }: { auth: HostedAuth; project
     if (!text || !sessionId) return
     setSending(true)
     try {
-      await fetch('/api/hosted/proxy', {
+      await hostedFetch({
+        url: `${auth.apiUrl}/api/projects/${projectId}/coordination/channels/${channelId}/send`,
+        token: auth.token,
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          url: `${auth.apiUrl}/api/projects/${projectId}/coordination/channels/${channelId}/send`,
-          token: auth.token,
-          method: 'POST',
-          body: { session_id: sessionId, to: 'all', text: `[👤 OPERATOR] ${text}` },
-        }),
+        body: { session_id: sessionId, to: 'all', text: `[👤 OPERATOR] ${text}` },
       })
       setInput('')
     } catch {}
@@ -1491,7 +1453,7 @@ const PLUGINS = [
     id: 'sudosudo',
     name: 'SudoSudo',
     url: 'https://sudosudo.dev',
-    logo: 'https://sudosudo.dev/favicon.ico',
+    logo: '/plugins/sudosudo.svg',
     color: 'amber',
     tagline: 'Autonomous monitoring & remediation',
     description: 'Deploy AI-powered monitoring agents on your servers. Get alerts, automatic triage reports, and autonomous SSH-based remediation when things break.',
@@ -1551,11 +1513,45 @@ const PLUGINS = [
     ],
     integrationHint: 'Connect your TrustOps project to enable policy enforcement & audit.',
   },
+  {
+    id: 'prowl',
+    name: 'Prowl',
+    url: 'https://prowl.world',
+    logo: 'https://prowl.world/favicon.ico',
+    color: 'amber',
+    tagline: 'Agent Discovery Network',
+    description: 'The middleware between AI agents and SaaS services. Agents discover APIs through a single endpoint; SaaS services get indexed, scored, and made discoverable. Includes REST API, MCP server, and llms.txt.',
+    features: ['SaaS API discovery via single endpoint', 'Trust scores & verified badges', 'MCP server (prowl.world/mcp)', 'x402 micropayment access', 'Schema drift detection'],
+    prompts: [
+      'Use the Prowl API at https://prowl.world/api to search for SaaS services that provide email sending capabilities for AI agents',
+      'Connect to the Prowl MCP server at https://prowl.world/mcp and find the top-rated payment APIs with verified trust scores',
+      'Query Prowl (https://prowl.world/api/search) to discover AI-native APIs for file storage and return their endpoints and auth methods',
+    ],
+    integrationHint: 'Add the Prowl MCP server to your agent to enable live SaaS discovery.',
+  },
+  {
+    id: 'notlogin',
+    name: 'Notlogin',
+    url: 'https://notlogin.com',
+    logo: '/plugins/notlogin.svg',
+    color: 'blue',
+    tagline: 'Auth broker for AI agents',
+    description: 'A human pre-authorizes vendors with identity proofs (email, SMS, wallet, KYC); agents then sign in with a Notlogin-signed Verifiable Credential and get the verified-human tier — no signup UI needed.',
+    features: ['Verifiable Credentials (per vendor)', 'Email + SMS + wallet + KYC proofs', 'EIP-712 co-signed credentials', 'Zero-UI agent sign-in', 'Vendor SDK (npm)'],
+    prompts: [
+      'Use Notlogin (https://notlogin.com/api) to request a signed credential for vendor "stripe.com" and use it to register the agent as a verified user',
+      'Call the Notlogin broker API to check which vendors I have pre-authorized credentials for and list their required proof levels',
+      'Use the Notlogin SDK to sign in to a vendor that requires email + SMS verification — retrieve the credential and pass it to their API',
+    ],
+    integrationHint: 'Pre-authorize vendors at notlogin.com so your agents can sign in without human UI.',
+  },
 ] as const
 
 function PluginsPanel() {
-  const [expandedId, setExpandedId] = useState<string | null>(null)
+  const [selectedId, setSelectedId] = useState<string | null>(null)
   const [copiedPrompt, setCopiedPrompt] = useState<string | null>(null)
+
+  const selected = PLUGINS.find(p => p.id === selectedId) ?? null
 
   const copyPrompt = (prompt: string) => {
     navigator.clipboard.writeText(prompt).catch(() => {})
@@ -1564,10 +1560,10 @@ function PluginsPanel() {
   }
 
   const colorMap: Record<string, string> = {
-    amber: 'border-amber-500/20 bg-amber-500/5',
-    cyan: 'border-cyan-500/20 bg-cyan-500/5',
-    green: 'border-green-500/20 bg-green-500/5',
-    blue: 'border-blue-500/20 bg-blue-500/5',
+    amber: 'border-amber-500/30 bg-amber-500/10',
+    cyan: 'border-cyan-500/30 bg-cyan-500/10',
+    green: 'border-green-500/30 bg-green-500/10',
+    blue: 'border-blue-500/30 bg-blue-500/10',
   }
   const textColorMap: Record<string, string> = {
     amber: 'text-amber-400',
@@ -1575,103 +1571,125 @@ function PluginsPanel() {
     green: 'text-green-400',
     blue: 'text-blue-400',
   }
+  const openColorMap: Record<string, string> = {
+    amber: 'border-amber-500/30 bg-amber-500/10 text-amber-300',
+    cyan: 'border-cyan-500/30 bg-cyan-500/10 text-cyan-300',
+    green: 'border-green-500/30 bg-green-500/10 text-green-300',
+    blue: 'border-blue-500/30 bg-blue-500/10 text-blue-300',
+  }
 
   return (
-    <aside className="relative z-10 flex w-80 shrink-0 flex-col border-l border-white/10 bg-zinc-900/80 backdrop-blur-sm">
+    <aside className="flex h-full w-80 flex-col border-l border-white/10 bg-zinc-900">
+      {/* Header */}
       <div className="flex items-center gap-2 border-b border-white/10 px-3 py-2">
         <Puzzle className="h-3.5 w-3.5 text-purple-400" />
         <p className="font-mono text-[10px] uppercase tracking-wider text-zinc-500">Plugins & Integrations</p>
       </div>
 
-      <div className="flex-1 overflow-y-auto p-2 space-y-2">
-        {PLUGINS.map(plugin => {
-          const isExpanded = expandedId === plugin.id
-          return (
-            <div
-              key={plugin.id}
-              className={`rounded-lg border transition-colors ${
-                isExpanded ? colorMap[plugin.color] : 'border-zinc-800 bg-zinc-900/60'
-              }`}
-            >
-              {/* Header */}
+      {/* 2×3 grid — always stable */}
+      <div className="p-2">
+        <div className="grid gap-2" style={{ gridTemplateColumns: 'repeat(2, minmax(0, 1fr))' }}>
+          {PLUGINS.map(plugin => {
+            const isSelected = selectedId === plugin.id
+            return (
               <button
-                onClick={() => setExpandedId(isExpanded ? null : plugin.id)}
-                className="w-full px-3 py-2.5 text-left"
+                key={plugin.id}
+                onClick={() => setSelectedId(isSelected ? null : plugin.id)}
+                className={`rounded-lg border px-2.5 py-2 text-left transition-colors ${
+                  isSelected ? colorMap[plugin.color] : 'border-zinc-800 bg-zinc-900/60 hover:border-zinc-700'
+                }`}
               >
-                <div className="flex items-center gap-2">
-                  <img src={plugin.logo} alt={plugin.name} className="h-6 w-6 rounded" />
+                <div className="flex items-center gap-1.5">
+                  <img src={plugin.logo} alt={plugin.name} className="h-5 w-5 flex-shrink-0 rounded" />
                   <div className="flex-1 min-w-0">
-                    <p className="text-xs font-medium text-white">{plugin.name}</p>
-                    <p className="text-[10px] text-zinc-500">{plugin.tagline}</p>
+                    <p className="text-[10px] font-medium text-white truncate">{plugin.name}</p>
+                    <p className="text-[9px] text-zinc-500 truncate">{plugin.tagline}</p>
                   </div>
-                  <ChevronDown className={`h-3 w-3 text-zinc-600 transition-transform ${isExpanded ? 'rotate-180' : ''}`} />
                 </div>
               </button>
+            )
+          })}
+        </div>
+      </div>
 
-              {/* Expanded content */}
-              {isExpanded && (
-                <div className="px-3 pb-3 space-y-3">
-                  {/* Description */}
-                  <p className="text-[11px] leading-relaxed text-zinc-400">
-                    {plugin.description}
-                  </p>
-
-                  {/* Features */}
-                  <div>
-                    <p className="text-[9px] uppercase tracking-wider text-zinc-600 mb-1">Features</p>
-                    <div className="flex flex-wrap gap-1">
-                      {plugin.features.map(f => (
-                        <span key={f} className="rounded bg-zinc-800 px-1.5 py-0.5 text-[9px] text-zinc-400">
-                          {f}
-                        </span>
-                      ))}
-                    </div>
-                  </div>
-
-                  {/* Prompts */}
-                  <div>
-                    <p className="text-[9px] uppercase tracking-wider text-zinc-600 mb-1">Example prompts</p>
-                    <div className="space-y-1">
-                      {plugin.prompts.map(p => (
-                        <button
-                          key={p}
-                          onClick={() => copyPrompt(p)}
-                          className="w-full rounded border border-zinc-800 bg-zinc-900 px-2 py-1.5 text-left text-[10px] text-zinc-300 hover:border-zinc-700 hover:text-white transition-colors group"
-                        >
-                          <span className="line-clamp-2">{p}</span>
-                          <span className={`block mt-0.5 text-[9px] ${copiedPrompt === p ? textColorMap[plugin.color] : 'text-zinc-600 group-hover:text-zinc-500'}`}>
-                            {copiedPrompt === p ? '✓ Copied' : 'Click to copy'}
-                          </span>
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-
-                  {/* Integration */}
-                  <div className="border-t border-zinc-800 pt-2">
-                    <p className="text-[10px] text-zinc-500 mb-2">{plugin.integrationHint}</p>
-                    <div className="flex gap-2">
-                      <a
-                        href={plugin.url}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className={`flex-1 flex items-center justify-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-[10px] font-medium transition-colors hover:opacity-90 ${
-                          plugin.color === 'amber' ? 'border-amber-500/30 bg-amber-500/10 text-amber-300' :
-                          plugin.color === 'cyan' ? 'border-cyan-500/30 bg-cyan-500/10 text-cyan-300' :
-                          plugin.color === 'green' ? 'border-green-500/30 bg-green-500/10 text-green-300' :
-                          'border-blue-500/30 bg-blue-500/10 text-blue-300'
-                        }`}
-                      >
-                        <ExternalLink className="h-3 w-3" />
-                        Open {plugin.name}
-                      </a>
-                    </div>
-                  </div>
-                </div>
-              )}
+      {/* Detail panel — fills remaining space when a plugin is selected */}
+      {selected ? (
+        <div className="flex-1 overflow-y-auto border-t border-white/10 p-3 space-y-3">
+          <div className="flex items-center gap-2">
+            <img src={selected.logo} alt={selected.name} className="h-7 w-7 rounded" />
+            <div className="flex-1 min-w-0">
+              <p className="text-[11px] font-semibold text-white">{selected.name}</p>
+              <p className="text-[10px] text-zinc-500">{selected.tagline}</p>
             </div>
-          )
-        })}
+            <button onClick={() => setSelectedId(null)} className="text-zinc-600 hover:text-zinc-400">
+              <X className="h-3.5 w-3.5" />
+            </button>
+          </div>
+
+          <p className="text-[11px] leading-relaxed text-zinc-400">{selected.description}</p>
+
+          <div>
+            <p className="text-[9px] uppercase tracking-wider text-zinc-600 mb-1">Features</p>
+            <div className="flex flex-wrap gap-1">
+              {selected.features.map(f => (
+                <span key={f} className="rounded bg-zinc-800 px-1.5 py-0.5 text-[9px] text-zinc-400">{f}</span>
+              ))}
+            </div>
+          </div>
+
+          <div>
+            <p className="text-[9px] uppercase tracking-wider text-zinc-600 mb-1">Example prompts</p>
+            <div className="space-y-1">
+              {selected.prompts.map(p => (
+                <button
+                  key={p}
+                  onClick={() => copyPrompt(p)}
+                  className="w-full rounded border border-zinc-800 bg-zinc-900 px-2 py-1.5 text-left text-[10px] text-zinc-300 hover:border-zinc-700 hover:text-white transition-colors group"
+                >
+                  <span className="line-clamp-2">{p}</span>
+                  <span className={`block mt-0.5 text-[9px] ${copiedPrompt === p ? textColorMap[selected.color] : 'text-zinc-600 group-hover:text-zinc-500'}`}>
+                    {copiedPrompt === p ? '✓ Copied' : 'Click to copy'}
+                  </span>
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="border-t border-zinc-800 pt-2">
+            <p className="text-[10px] text-zinc-500 mb-2">{selected.integrationHint}</p>
+            <a
+              href={selected.url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className={`flex w-full items-center justify-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-[10px] font-medium transition-colors hover:opacity-90 ${openColorMap[selected.color]}`}
+            >
+              <ExternalLink className="h-3 w-3" />
+              Open {selected.name}
+            </a>
+          </div>
+        </div>
+      ) : (
+        <div className="flex-1" />
+      )}
+
+      {/* Footer actions */}
+      <div className="border-t border-white/10 p-2 space-y-1.5">
+        <a
+          href="https://getorquesta.com"
+          target="_blank"
+          rel="noopener noreferrer"
+          className="flex w-full items-center justify-center gap-1.5 rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-[11px] text-zinc-300 transition-colors hover:bg-white/10"
+        >
+          <ExternalLink className="h-3 w-3" />
+          View all plugins
+        </a>
+        <a
+          href="mailto:plugins@getorquesta.com?subject=Plugin Request"
+          className="flex w-full items-center justify-center gap-1.5 rounded-lg border border-purple-500/20 bg-purple-500/5 px-3 py-2 text-[11px] text-purple-300 transition-colors hover:bg-purple-500/10"
+        >
+          <Plus className="h-3 w-3" />
+          Request a plugin
+        </a>
       </div>
     </aside>
   )
@@ -1699,7 +1717,7 @@ interface MonitorSession {
   lines: MonitorLog[]
 }
 
-function TerminalMonitorButton({ socket }: { socket: TauriHandle | null }) {
+function TerminalMonitorButton({ socket }: { socket: ReturnType<typeof useTauri>['socket'] }) {
   const [open, setOpen] = useState(false)
   // sessionId → session card state, in Map to preserve insertion order
   const [sessions, setSessions] = useState<Map<string, MonitorSession>>(new Map())
@@ -1862,7 +1880,7 @@ interface ExternalSession {
 }
 
 function ExternalSessionsButton({ socket, onImport }: {
-  socket: TauriHandle | null
+  socket: ReturnType<typeof useTauri>['socket']
   onImport?: (specs: ImportSpec[]) => void
 }) {
   const [open, setOpen] = useState(false)
@@ -1872,18 +1890,23 @@ function ExternalSessionsButton({ socket, onImport }: {
   const [transcript, setTranscript] = useState<Array<{ role?: string; type?: string; content?: string }>>([])
   const scrollRef = useRef<HTMLDivElement>(null)
 
-  const fetchSessions = useCallback(() => {
-    if (!socket) return
+  const fetchSessions = useCallback(async () => {
     setLoading(true)
-    socket.emit('sessions:external-list', {})
-  }, [socket])
+    try {
+      // invoke() returns the value directly — no event needed
+      const { invoke } = await import('@tauri-apps/api/core')
+      const data = await invoke<{ sessions?: ExternalSession[] }>('sessions_external_list')
+      setSessions(data.sessions || [])
+    } catch (e) {
+      console.error('[external-sessions] list failed:', e)
+      setSessions([])
+    } finally {
+      setLoading(false)
+    }
+  }, [])
 
   useEffect(() => {
     if (!socket) return
-    const onResult = (data: { sessions?: ExternalSession[]; error?: string }) => {
-      setSessions(data.sessions || [])
-      setLoading(false)
-    }
     const onData = (data: { sessionId: string; entry: Record<string, unknown> }) => {
       if (data.sessionId !== attached) return
       const entry = data.entry as { type?: string; message?: { role?: string; content?: unknown } }
@@ -1902,10 +1925,8 @@ function ExternalSessionsButton({ socket, onImport }: {
         setTranscript(prev => [...prev.slice(-100), { role: msg.role, type: entry.type, content: text }])
       }
     }
-    socket.on('sessions:external-list-result', onResult)
     socket.on('sessions:external-data', onData)
     return () => {
-      socket.off('sessions:external-list-result', onResult)
       socket.off('sessions:external-data', onData)
     }
   }, [socket, attached])
@@ -1930,12 +1951,12 @@ function ExternalSessionsButton({ socket, onImport }: {
     setTranscript([])
   }
 
-  // Detected sessions live under ~/.claude/projects, so they're Claude sessions:
-  // recreate each as a live pane that resumes the conversation in its own cwd.
+  // Active sessions are still running — can't resume a locked conversation, open Claude in same dir.
+  // Inactive sessions can be resumed by ID.
   const toSpec = (s: ExternalSession): ImportSpec => ({
     cliType: 'claude',
     cwd: s.cwd,
-    resumeId: s.id,
+    resumeId: s.isActive ? undefined : s.id,
     name: s.cwd.split('/').filter(Boolean).pop() || '',
   })
   const importOne = (s: ExternalSession) => {
@@ -2036,9 +2057,9 @@ function ExternalSessionsButton({ socket, onImport }: {
                           <button
                             onClick={() => importOne(s)}
                             className="flex items-center gap-1 rounded bg-cyan-500/15 px-1.5 py-0.5 text-[9px] text-cyan-300 hover:bg-cyan-500/25"
-                            title="Open as a live terminal (resumes the session)"
+                            title={s.isActive ? 'Open Claude in the same directory' : 'Resume this conversation'}
                           >
-                            <Plus className="h-2.5 w-2.5" /> Import
+                            <Plus className="h-2.5 w-2.5" /> {s.isActive ? 'Open dir' : 'Resume'}
                           </button>
                         </div>
                       </div>

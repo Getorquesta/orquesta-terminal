@@ -4,7 +4,7 @@
   "version": "0.1.9",
   "identifier": "com.orquesta.terminal",
   "build": {
-    "beforeDevCommand": "npm run next-dev",
+    "beforeDevCommand": "fuser -k 3001/tcp 2>/dev/null; npm run next-dev",
     "beforeBuildCommand": "npm run next-build",
     "devUrl": "http://localhost:3001",
     "frontendDist": "../src-tauri/webview-dist"
@@ -23,8 +23,7 @@
         "decorations": true,
         "transparent": false,
         "center": true,
-        "label": "main",
-        "url": "index.html"
+        "label": "main"
       }
     ],
     "security": {
@@ -48,20 +47,8 @@
   },
   "plugins": {
     "shell": {
-      "open": true,
-      "scope": [
-        { "name": "open-url-mac", "cmd": "open", "args": true },
-        { "name": "open-url-linux", "cmd": "xdg-open", "args": true }
-      ]
+      "open": true
     },
-    "dialog": {
-      "open": true,
-      "save": false
-    },
-    "fs": {
-      "scope": {
-        "allow": ["$HOME/**", "$APPDATA/**"]
-      }
-    }
+    "fs": {}
   }
 }
