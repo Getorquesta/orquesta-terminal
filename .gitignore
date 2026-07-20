@@ -8,6 +8,10 @@ tsconfig.tsbuildinfo
 # Rust / Tauri build artifacts
 src-tauri/target/
 
+# Next.js static export bundled into the Tauri app (keep the dir via .gitkeep)
+src-tauri/webview-dist/*
+!src-tauri/webview-dist/.gitkeep
+
 # Local-only cargo config (personal target-dir override, machine-specific)
 src-tauri/.cargo/config.toml
 

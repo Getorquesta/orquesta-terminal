@@ -6,7 +6,7 @@ const nextConfig: NextConfig = {
   ...(isProd
     ? {
         output: 'export',
-        distDir: '../src-tauri/webview-dist',
+        distDir: 'src-tauri/webview-dist',
         trailingSlash: true,
         images: { unoptimized: true },
       }
