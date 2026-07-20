@@ -8,6 +8,9 @@ tsconfig.tsbuildinfo
 # Rust / Tauri build artifacts
 src-tauri/target/
 
+# Local-only cargo config (personal target-dir override, machine-specific)
+src-tauri/.cargo/config.toml
+
 # Playwright
 test-results/
 playwright-report/
