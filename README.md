@@ -11,6 +11,7 @@
 </p>
 
 <p align="center">
+  <a href="#download">Download</a> ·
   <a href="https://getorquesta.com">Orquesta Cloud</a> ·
   <a href="https://github.com/Getorquesta/orquesta-oss">Self-Hosted Backend</a> ·
   <a href="#quick-start">Quick Start</a> ·
@@ -27,7 +28,28 @@ It connects to either:
 - **Orquesta Self-Hosted** — your own backend on your machine/VM ([orquesta-oss](https://github.com/Getorquesta/orquesta-oss))
 - **Orquesta Cloud** — the hosted platform at [getorquesta.com](https://getorquesta.com)
 
+## Download
+
+Orquesta Terminal ships as a **native desktop app** (built with [Tauri](https://tauri.app/) v2) — or just run it in your browser via [Orquesta Cloud](https://getorquesta.com).
+
+| Platform | Download |
+|----------|----------|
+| **Linux** · AppImage | [Orquesta.Terminal_0.1.9_amd64.AppImage](https://github.com/Getorquesta/orquesta-terminal/releases/download/v0.1.9/Orquesta.Terminal_0.1.9_amd64.AppImage) |
+| **Linux** · Debian/Ubuntu `.deb` | [Orquesta.Terminal_0.1.9_amd64.deb](https://github.com/Getorquesta/orquesta-terminal/releases/download/v0.1.9/Orquesta.Terminal_0.1.9_amd64.deb) |
+| **Windows / macOS** | Use the [web version](https://getorquesta.com) for now — native installers coming soon |
+
+Latest builds are always on the [Releases page](https://github.com/Getorquesta/orquesta-terminal/releases/latest).
+
+Running the AppImage:
+
+```bash
+chmod +x Orquesta.Terminal_0.1.9_amd64.AppImage
+./Orquesta.Terminal_0.1.9_amd64.AppImage
+```
+
 ## Quick Start
+
+> Prefer a prebuilt binary? See [Download](#download) above. To run from source:
 
 ```bash
 git clone https://github.com/Getorquesta/orquesta-terminal.git
@@ -114,7 +136,8 @@ Integrations with companion tools:
 
 | Mode | Status | How |
 |------|--------|-----|
-| **Web** | ✅ Ready | `npm run dev` → browser |
+| **Desktop** | ✅ Linux | [Download](#download) the AppImage/`.deb` (Tauri native app); Windows/macOS via web for now |
+| **Web** | ✅ Ready | `npm run dev` → browser, or [getorquesta.com](https://getorquesta.com) |
 | **TUI** | 🚧 Coming | `npm run tui` → terminal-native UI |
 
 ## Related
