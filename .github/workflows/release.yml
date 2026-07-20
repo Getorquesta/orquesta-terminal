@@ -1,8 +1,9 @@
 name: release
 
 # Publishes the Linux installer to the GitHub Releases page.
-# Windows/macOS users use the web version (cloud mode) for now —
-# native installers there need paid code-signing, deferred.
+# Uses ONLY first-party actions/* + the preinstalled `gh` CLI, so it runs
+# even if the org restricts third-party GitHub Actions.
+# Windows/macOS users use the web version (cloud mode) for now.
 #
 # Trigger by pushing a version tag, e.g.:  git tag v0.1.9 && git push origin v0.1.9
 on:
@@ -19,7 +20,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Linux system dependencies
+      - name: Install system dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -39,26 +40,31 @@ jobs:
           node-version: 20
           cache: npm
 
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: src-tauri
-
       - name: Install JS dependencies
         run: npm ci
 
-      # tauri-action runs `tauri build` (which runs next-build via
-      # beforeBuildCommand), then creates/updates the GitHub Release
-      # for this tag and uploads the Linux installers (.AppImage + .deb).
-      - uses: tauri-apps/tauri-action@v0
+      # Build the full Tauri bundle (.AppImage + .deb). `npm run build`
+      # runs `tauri build`, which runs next-build via beforeBuildCommand.
+      - name: Build Tauri bundle
+        run: npm run build
+
+      - name: Collect installers
+        run: |
+          mkdir -p dist-release
+          find src-tauri/target/release/bundle -type f \
+            \( -name '*.AppImage' -o -name '*.deb' \) -exec cp {} dist-release/ \;
+          ls -la dist-release
+
+      # Create/replace a draft GitHub Release for this tag and upload the
+      # Linux installers. `gh` is preinstalled on the runner.
+      - name: Publish draft release
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tagName: ${{ github.ref_name }}
-          releaseName: 'Orquesta Terminal ${{ github.ref_name }}'
-          releaseBody: 'Linux installers below (.AppImage / .deb). Windows & macOS: use the web version for now.'
-          releaseDraft: true
-          prerelease: false
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          gh release delete "$TAG" --yes --cleanup-tag=false 2>/dev/null || true
+          gh release create "$TAG" \
+            --draft \
+            --title "Orquesta Terminal $TAG" \
+            --notes "Linux installers below (.AppImage / .deb). Windows & macOS: use the web version for now." \
+            dist-release/*

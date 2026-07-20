@@ -1,5 +1,8 @@
 name: build
 
+# Uses ONLY first-party actions/* (checkout, setup-node) + shell, so it runs
+# even if the org restricts third-party GitHub Actions. Rust is preinstalled
+# on the ubuntu runner image.
 on:
   push:
     branches: [main, prod]
@@ -14,7 +17,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # System libraries required by Tauri v2 / WebKitGTK on Linux.
       - name: Install system dependencies
         run: |
           sudo apt-get update
@@ -35,27 +37,19 @@ jobs:
           node-version: 20
           cache: npm
 
+      - name: Rust toolchain info
+        run: rustup show && cargo --version
+
       - name: Install JS dependencies
         run: npm ci
 
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: src-tauri
-
-      # Static export of the Next.js frontend into src-tauri/webview-dist.
       - name: Build frontend (static export)
         run: npm run next-build
 
-      # Type-check + compile the Rust backend (fails the job on any error).
       - name: Check Rust backend
         working-directory: src-tauri
         run: cargo check --all-targets --locked
 
-      # Full bundle — proves the whole migration builds end to end.
       - name: Build Tauri bundle
         run: npm run build
 
