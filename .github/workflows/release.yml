@@ -1,0 +1,79 @@
+name: release
+
+# Publishes installers to the GitHub Releases page.
+# Trigger by pushing a version tag, e.g.:  git tag v0.1.9 && git push origin v0.1.9
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-latest       # Apple Silicon (arm64)
+            args: '--target aarch64-apple-darwin'
+          - platform: macos-latest       # Intel (x86_64)
+            args: '--target x86_64-apple-darwin'
+          - platform: ubuntu-24.04       # Linux (AppImage + deb)
+            args: ''
+          - platform: windows-latest     # Windows (msi + nsis)
+            args: ''
+
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux system dependencies
+        if: matrix.platform == 'ubuntu-24.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libglib2.0-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libssl-dev \
+            build-essential \
+            pkg-config \
+            patchelf \
+            file wget curl
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          # Both macOS targets so a single macos-latest runner can cross-build.
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install JS dependencies
+        run: npm ci
+
+      # tauri-action runs `tauri build` (which runs next-build via
+      # beforeBuildCommand), then creates/updates the GitHub Release
+      # for this tag and uploads the platform installers to it.
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: 'Orquesta Terminal ${{ github.ref_name }}'
+          releaseBody: 'See the assets below to download and install.'
+          releaseDraft: true
+          prerelease: false
+          args: ${{ matrix.args }}
