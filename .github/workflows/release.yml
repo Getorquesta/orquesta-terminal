@@ -1,6 +1,9 @@
 name: release
 
-# Publishes installers to the GitHub Releases page.
+# Publishes the Linux installer to the GitHub Releases page.
+# Windows/macOS users use the web version (cloud mode) for now —
+# native installers there need paid code-signing, deferred.
+#
 # Trigger by pushing a version tag, e.g.:  git tag v0.1.9 && git push origin v0.1.9
 on:
   push:
@@ -11,26 +14,12 @@ permissions:
   contents: write
 
 jobs:
-  release:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - platform: macos-latest       # Apple Silicon (arm64)
-            args: '--target aarch64-apple-darwin'
-          - platform: macos-latest       # Intel (x86_64)
-            args: '--target x86_64-apple-darwin'
-          - platform: ubuntu-24.04       # Linux (AppImage + deb)
-            args: ''
-          - platform: windows-latest     # Windows (msi + nsis)
-            args: ''
-
-    runs-on: ${{ matrix.platform }}
+  release-linux:
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
       - name: Install Linux system dependencies
-        if: matrix.platform == 'ubuntu-24.04'
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -52,9 +41,6 @@ jobs:
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
-        with:
-          # Both macOS targets so a single macos-latest runner can cross-build.
-          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
@@ -66,14 +52,13 @@ jobs:
 
       # tauri-action runs `tauri build` (which runs next-build via
       # beforeBuildCommand), then creates/updates the GitHub Release
-      # for this tag and uploads the platform installers to it.
+      # for this tag and uploads the Linux installers (.AppImage + .deb).
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tagName: ${{ github.ref_name }}
           releaseName: 'Orquesta Terminal ${{ github.ref_name }}'
-          releaseBody: 'See the assets below to download and install.'
+          releaseBody: 'Linux installers below (.AppImage / .deb). Windows & macOS: use the web version for now.'
           releaseDraft: true
           prerelease: false
-          args: ${{ matrix.args }}
