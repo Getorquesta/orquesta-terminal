@@ -6,6 +6,9 @@ use tauri::AppHandle;
 
 pub struct PtySession {
     pub writer: Box<dyn std::io::Write + Send>,
+    // Kept so the PTY can be resized after spawn (TUI apps like orquesta-cli
+    // redraw based on the reported terminal size; a stale size garbles output).
+    pub master: Box<dyn portable_pty::MasterPty + Send>,
     pub cli_type: String,
     pub cwd: String,
     pub pid: Option<u32>,

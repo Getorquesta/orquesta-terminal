@@ -248,6 +248,7 @@ pub async fn spawn_session(
             session_id.clone(),
             PtySession {
                 writer,
+                master: pair.master,
                 cli_type: cli_type.clone(),
                 cwd: work_dir.clone(),
                 pid,
@@ -360,13 +361,21 @@ pub fn resize_session(
     state: &AppState,
 ) -> Result<(), String> {
     let sessions = state.sessions.lock().unwrap();
-    let _session = sessions
+    let session = sessions
         .get(session_id)
         .ok_or_else(|| format!("Session not found: {session_id}"))?;
 
-    // Note: portable-pty resize is on the master handle which we don't keep separately.
-    // We use a workaround: send TIOCSWINSZ via the writer's underlying fd.
-    // For now emit a no-op acknowledgment — resize via escape sequences still works.
+    // Actually resize the PTY (TIOCSWINSZ) so TUI apps see the real terminal size
+    // and redraw correctly — otherwise their frames don't clear and output doubles.
+    session
+        .master
+        .resize(PtySize {
+            rows,
+            cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .map_err(|e| format!("Failed to resize PTY: {e}"))?;
     drop(sessions);
 
     state
