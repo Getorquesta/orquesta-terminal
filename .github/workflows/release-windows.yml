@@ -1,0 +1,59 @@
+name: release-windows
+
+# Builds the Windows installer (NSIS .exe) on a GitHub-hosted windows-latest
+# runner and uploads it to the GitHub Release for the tag. Runs automatically on
+# a version tag, and can be dispatched manually against an existing tag to
+# backfill a release that was cut before this workflow existed.
+#
+# Uses only first-party actions/* + the preinstalled `gh` CLI, so it runs even
+# if the org restricts third-party GitHub Actions.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing release tag to build & upload the Windows installer for (e.g. v0.1.14)'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Build the exact tagged source (so the bundled version matches).
+          ref: ${{ github.event.inputs.tag || github.ref_name }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install JS dependencies
+        run: npm ci
+
+      # Rust (stable + MSVC) is preinstalled on windows-latest; WebView2 is
+      # present. Build only the NSIS installer (.exe) — it needs no extra
+      # tooling (Tauri fetches NSIS itself), unlike MSI which needs WiX.
+      # `tauri build` runs next-build first via beforeBuildCommand.
+      - name: Build Tauri bundle (NSIS)
+        run: npx tauri build --bundles nsis
+
+      - name: Collect installer
+        shell: bash
+        run: |
+          mkdir -p dist-release
+          find src-tauri/target/release/bundle/nsis -name '*-setup.exe' -exec cp {} dist-release/ \;
+          ls -la dist-release
+
+      - name: Upload to the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          gh release upload "$TAG" dist-release/* --clobber
