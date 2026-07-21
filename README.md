@@ -34,8 +34,8 @@ Orquesta Terminal ships as a **native desktop app** (built with [Tauri](https://
 
 | Platform | Download |
 |----------|----------|
-| **Linux** · AppImage | [Orquesta.Terminal_0.1.12_amd64.AppImage](https://github.com/Getorquesta/orquesta-terminal/releases/download/v0.1.12/Orquesta.Terminal_0.1.12_amd64.AppImage) |
-| **Linux** · Debian/Ubuntu `.deb` | [Orquesta.Terminal_0.1.12_amd64.deb](https://github.com/Getorquesta/orquesta-terminal/releases/download/v0.1.12/Orquesta.Terminal_0.1.12_amd64.deb) |
+| **Linux** · AppImage | [Orquesta.Terminal_0.1.13_amd64.AppImage](https://github.com/Getorquesta/orquesta-terminal/releases/download/v0.1.13/Orquesta.Terminal_0.1.13_amd64.AppImage) |
+| **Linux** · Debian/Ubuntu `.deb` | [Orquesta.Terminal_0.1.13_amd64.deb](https://github.com/Getorquesta/orquesta-terminal/releases/download/v0.1.13/Orquesta.Terminal_0.1.13_amd64.deb) |
 | **Windows / macOS** | Use the [web version](https://getorquesta.com) for now — native installers coming soon |
 
 Latest builds are always on the [Releases page](https://github.com/Getorquesta/orquesta-terminal/releases/latest).
@@ -43,8 +43,8 @@ Latest builds are always on the [Releases page](https://github.com/Getorquesta/o
 Running the AppImage:
 
 ```bash
-chmod +x Orquesta.Terminal_0.1.12_amd64.AppImage
-./Orquesta.Terminal_0.1.12_amd64.AppImage
+chmod +x Orquesta.Terminal_0.1.13_amd64.AppImage
+./Orquesta.Terminal_0.1.13_amd64.AppImage
 ```
 
 ## Quick Start
