@@ -13,8 +13,11 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Existing release tag to build & upload the Windows installer for (e.g. v0.1.14)'
+        description: 'Existing release tag to upload the Windows installer to (e.g. v0.1.14)'
         required: true
+      ref:
+        description: 'Git ref to build from (branch/tag/sha). Defaults to the tag. Use a branch to backfill a fix not yet in the tag.'
+        required: false
 
 permissions:
   contents: write
@@ -25,8 +28,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          # Build the exact tagged source (so the bundled version matches).
-          ref: ${{ github.event.inputs.tag || github.ref_name }}
+          # Build the tagged source by default; an explicit `ref` lets us backfill
+          # from a branch that carries a build fix not yet in the tag.
+          ref: ${{ github.event.inputs.ref || github.event.inputs.tag || github.ref_name }}
 
       - uses: actions/setup-node@v4
         with:
