@@ -44,9 +44,9 @@ fn resolve_bin(bin: &str) -> Option<String> {
 
 /// If `bin` is installed, return its absolute path directly; otherwise return a
 /// shell that prints a friendly "not installed" message and then stays open.
-fn cli_or_shell(bin: &str, install_hint: &str, env_extras: Vec<(String, String)>) -> (String, Vec<String>, Vec<(String, String)>) {
+fn cli_or_shell(bin: &str, install_hint: &str, args: Vec<String>, env_extras: Vec<(String, String)>) -> (String, Vec<String>, Vec<(String, String)>) {
     if let Some(abs) = resolve_bin(bin) {
-        return (abs, vec![], env_extras);
+        return (abs, args, env_extras);
     }
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".into());
     let msg = format!(
@@ -124,10 +124,28 @@ fn build_pty_env(env_extras: &[(String, String)]) -> Vec<(String, String)> {
     result
 }
 
+/// The "skip every permission prompt" flag for a CLI, where the CLI documents one.
+/// Only wired for CLIs whose flag is real & documented — everything else relies on
+/// the free-form Extra arguments in Settings instead of a guessed flag.
+fn yolo_flag(cli: &str) -> Option<&'static str> {
+    match cli {
+        "claude" => Some("--dangerously-skip-permissions"),
+        "gemini" => Some("--yolo"),
+        "codex"  => Some("--dangerously-bypass-approvals-and-sandbox"),
+        _ => None,
+    }
+}
+
 /// Resolve CLI command + args from a cliType string.
+///
+/// `skip_permissions` toggles the CLI's documented "skip all prompts" flag (see
+/// `yolo_flag`); `extra_args` are user-configured flags appended verbatim. Both
+/// come from the Settings panel, per CLI.
 fn resolve_command(
     cli_type: &str,
     resume_id: Option<&str>,
+    skip_permissions: bool,
+    extra_args: &[String],
     hosted_user_id: Option<&str>,
     hosted_token: Option<&str>,
     hosted_api_url: Option<&str>,
@@ -144,9 +162,18 @@ fn resolve_command(
         env_extras.push(("ORQUESTA_HOSTED_API_URL".into(), url.into()));
     }
 
+    // Common arg prefix: the yolo flag (if enabled & supported) then user extras.
+    let mut base: Vec<String> = Vec::new();
+    if skip_permissions {
+        if let Some(flag) = yolo_flag(cli_type) {
+            base.push(flag.to_string());
+        }
+    }
+    base.extend(extra_args.iter().cloned());
+
     match cli_type {
         "claude" => {
-            let mut args = vec!["--dangerously-skip-permissions".to_string()];
+            let mut args = base;
             if let Some(rid) = resume_id {
                 args.push("--resume".into());
                 args.push(rid.into());
@@ -154,17 +181,17 @@ fn resolve_command(
             let cmd = resolve_bin("claude").unwrap_or_else(|| "claude".into());
             (cmd, args, env_extras)
         }
-        "orquesta" => cli_or_shell("orquesta", "npm i -g orquesta-cli", env_extras),
-        "kimi"     => cli_or_shell("kimi",     "npm i -g @moonshot-ai/kimi-cli", env_extras),
-        "kiro"     => cli_or_shell("kiro",     "Download Kiro at https://kiro.dev", env_extras),
-        "opencode" => cli_or_shell("opencode", "npm i -g opencode", env_extras),
-        "gemini"   => cli_or_shell("gemini",   "npm i -g @google/gemini-cli", env_extras),
-        "codex"    => cli_or_shell("codex",    "npm i -g @openai/codex", env_extras),
-        "aider"    => cli_or_shell("aider",    "pip install aider-chat", env_extras),
-        "continue" => cli_or_shell("continue", "npm i -g continue", env_extras),
+        "orquesta" => cli_or_shell("orquesta", "npm i -g orquesta-cli", base, env_extras),
+        "kimi"     => cli_or_shell("kimi",     "npm i -g @moonshot-ai/kimi-cli", base, env_extras),
+        "kiro"     => cli_or_shell("kiro",     "Download Kiro at https://kiro.dev", base, env_extras),
+        "opencode" => cli_or_shell("opencode", "npm i -g opencode", base, env_extras),
+        "gemini"   => cli_or_shell("gemini",   "npm i -g @google/gemini-cli", base, env_extras),
+        "codex"    => cli_or_shell("codex",    "npm i -g @openai/codex", base, env_extras),
+        "aider"    => cli_or_shell("aider",    "pip install aider-chat", base, env_extras),
+        "continue" => cli_or_shell("continue", "npm i -g continue", base, env_extras),
         _ => {
             let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".into());
-            (shell, vec![], env_extras)
+            (shell, base, env_extras)
         }
     }
 }
@@ -177,6 +204,8 @@ pub async fn spawn_session(
     cols: u16,
     cwd: Option<String>,
     resume_id: Option<String>,
+    skip_permissions: bool,
+    extra_args: Vec<String>,
     hosted_user_id: Option<String>,
     hosted_token: Option<String>,
     hosted_api_url: Option<String>,
@@ -185,6 +214,8 @@ pub async fn spawn_session(
     let (cmd, args, env_extras) = resolve_command(
         &cli_type,
         resume_id.as_deref(),
+        skip_permissions,
+        &extra_args,
         hosted_user_id.as_deref(),
         hosted_token.as_deref(),
         hosted_api_url.as_deref(),

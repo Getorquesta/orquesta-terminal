@@ -15,6 +15,8 @@ pub async fn session_start(
     cols: Option<u16>,
     cwd: Option<String>,
     resume_id: Option<String>,
+    skip_permissions: Option<bool>,
+    extra_args: Option<Vec<String>>,
     hosted_user_id: Option<String>,
     hosted_token: Option<String>,
     hosted_api_url: Option<String>,
@@ -27,6 +29,10 @@ pub async fn session_start(
         cols.unwrap_or(80),
         cwd,
         resume_id,
+        // Default to skipping permission prompts (the app's long-standing behaviour)
+        // when Settings hasn't said otherwise.
+        skip_permissions.unwrap_or(true),
+        extra_args.unwrap_or_default(),
         hosted_user_id,
         hosted_token,
         hosted_api_url,

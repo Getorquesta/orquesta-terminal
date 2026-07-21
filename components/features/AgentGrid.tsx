@@ -57,7 +57,9 @@ import { Plus, X, Maximize2, GitBranch, LayoutGrid, Pencil, Cloud, Share2, Eye, 
 import { TerminalSidebar } from './TerminalSidebar'
 import { TerminalListSidebar, PluginDock, TerminalSwitcherDock } from './TerminalDock'
 import type { CellStatus, DockItem, PluginDockItem } from './TerminalDock'
-import { PanelLeftOpen, Layers, Zap, Mail, MonitorSmartphone, Video, Radar, Mic, Dices, Shuffle, Skull } from 'lucide-react'
+import { PanelLeftOpen, Layers, Zap, Mail, MonitorSmartphone, Video, Radar, Mic, Dices, Shuffle, Skull, Settings } from 'lucide-react'
+import { SettingsPanel } from './SettingsPanel'
+import { launchConfigFor, loadSettings } from '@/lib/cliSettings'
 import '@xterm/xterm/css/xterm.css'
 
 export interface HostedProject {
@@ -353,6 +355,9 @@ interface TerminalCellProps {
   /** Fired when the user types into this pane (real keyboard input). Lighting
    *  mode reads this as "engaged" so it won't auto-advance away from it. */
   onUserInput: () => void
+  /** Fired when the user presses Enter (i.e. actually SENDS a prompt/line).
+   *  Sudden-death reads this — you defuse by sending a prompt, not by typing. */
+  onSubmit: () => void
   /** Highlight this pane (lighting mode just surfaced it). */
   attention?: boolean
 }
@@ -361,7 +366,7 @@ function TerminalCell({
   cellId, socket, cliType, name, fontSize, opacity, hostedApiUrl, hostedToken, hostedUserId,
   hostedProjects, hostedProjectId, cwd, resumeId, daemonRunning,
   onClose, onCliTypeChange, onRename, onHostedProjectChange, onMakeAgent, onPickFolder, onFocusCell, onNew, onArrange, onZoom, registerApi,
-  onActivity, onFinished, onUserInput, attention,
+  onActivity, onFinished, onUserInput, onSubmit, attention,
 }: TerminalCellProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const termRef = useRef<import('@xterm/xterm').Terminal | null>(null)
@@ -402,8 +407,8 @@ function TerminalCell({
 
   // Latest callbacks in refs so the (heavy) init effect never re-runs when a
   // parent handler's identity changes — only cellId/socket/cliType restart it.
-  const cbRef = useRef({ onClose, onFocusCell, onNew, onArrange, onZoom, registerApi, onActivity, onFinished, onUserInput })
-  cbRef.current = { onClose, onFocusCell, onNew, onArrange, onZoom, registerApi, onActivity, onFinished, onUserInput }
+  const cbRef = useRef({ onClose, onFocusCell, onNew, onArrange, onZoom, registerApi, onActivity, onFinished, onUserInput, onSubmit })
+  cbRef.current = { onClose, onFocusCell, onNew, onArrange, onZoom, registerApi, onActivity, onFinished, onUserInput, onSubmit }
   const fontRef = useRef(fontSize)
   fontRef.current = fontSize
   // Hosted-hook target read live at (re)connect time so toggling it from the
@@ -587,6 +592,8 @@ function TerminalCell({
         // which also fires for the terminal's own auto-replies to CLI queries).
         // Skip bare modifier presses.
         if (k !== 'shift' && k !== 'control' && k !== 'alt' && k !== 'meta') cbRef.current.onUserInput()
+        // Enter = the prompt is actually SENT → this is what defuses sudden-death.
+        if (k === 'enter') cbRef.current.onSubmit()
         return true
       })
 
@@ -602,8 +609,11 @@ function TerminalCell({
           importRef.current.resumeId = undefined  // don't retry a dead resume
           term.writeln('\r\n\x1b[32m[new session]\x1b[0m')
         }
+        // Per-CLI launch config from Settings (skip-permissions flag + extra args).
+        const launch = launchConfigFor(cliType)
         socket?.emit('session:start', {
           sessionId, cellId, cliType, rows: term.rows, cols: term.cols,
+          skipPermissions: launch.skipPermissions, extraArgs: launch.extraArgs,
           hostedApiUrl: hostedRef.current.apiUrl, hostedToken: hostedRef.current.token,
           hostedUserId: hostedRef.current.userId,
           cwd: importRef.current.cwd, resumeId: importRef.current.resumeId,
@@ -1751,6 +1761,7 @@ function AgentGridInner({
   // a click-away backdrop closes them.
   const [viewMenuOpen, setViewMenuOpen] = useState(false)
   const [addMenuOpen, setAddMenuOpen] = useState(false)
+  const [settingsOpen, setSettingsOpen] = useState(false)
 
   useEffect(() => {
     if (!socket) return
@@ -1921,7 +1932,9 @@ function AgentGridInner({
 
   const addCell = useCallback((init?: Partial<Omit<GridCell, 'id'>>) => {
     const id = `cell-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
-    const newCell: GridCell = { id, cliType: 'shell', name: '', ...init }
+    // New terminals open with the CLI chosen in Settings (falls back to Shell).
+    const defaultCli = (loadSettings().defaultCli ?? 'shell') as CliType
+    const newCell: GridCell = { id, cliType: defaultCli, name: '', ...init }
     const newCells = [...cellsRef.current, newCell]
     setCells(newCells)
     setLayouts((prev) => ({ ...prev, lg: buildTidyLayout(newCells) }))
@@ -2232,12 +2245,16 @@ function AgentGridInner({
   // User typed into a pane → in Lighting, if it's the spotlight, mark it engaged
   // so the dwell hand-off never pulls it out from under you ("seguir = escribir").
   const markUserInput = useCallback((id: string) => {
-    // Typing into the doomed pane during a 'death' countdown defuses it. 💥→😌
-    if (rouletteTargetRef.current === id) defuseRoulette()
     if (lightingRef.current && spotlightRef.current === id) {
       engagedRef.current = true
       if (dwellRef.current) { clearTimeout(dwellRef.current); dwellRef.current = null }
     }
+  }, [])
+
+  // Sending a prompt (Enter) into the doomed pane defuses the countdown. 💥→😌
+  // Typing alone isn't enough — you have to actually fire off a prompt.
+  const markUserSubmit = useCallback((id: string) => {
+    if (rouletteTargetRef.current === id) defuseRoulette()
   }, [defuseRoulette])
 
   // Clean up any pending attention/dwell/roulette timers on unmount.
@@ -2452,6 +2469,7 @@ function AgentGridInner({
       onActivity={() => markActivity(cell.id)}
       onFinished={() => markFinished(cell.id)}
       onUserInput={() => markUserInput(cell.id)}
+      onSubmit={() => markUserSubmit(cell.id)}
       registerApi={(api) => {
         if (api) cellApiRef.current.set(cell.id, api)
         else cellApiRef.current.delete(cell.id)
@@ -2627,7 +2645,24 @@ function AgentGridInner({
             </>
           )}
         </div>
+
+        {/* Settings — per-CLI launch flags (skip-permissions, extra args) & more. */}
+        <Button
+          onClick={() => setSettingsOpen(true)}
+          size="sm"
+          variant="ghost"
+          title="Settings"
+          className="px-2"
+        >
+          <Settings className="h-4 w-4" strokeWidth={1.75} />
+        </Button>
       </div>
+
+      <SettingsPanel
+        open={settingsOpen}
+        clis={CLI_OPTIONS.filter((o) => o.value !== 'shell')}
+        onClose={() => setSettingsOpen(false)}
+      />
 
       {enrollMsg && (
         <div
@@ -2742,7 +2777,7 @@ function AgentGridInner({
         {/* (Roulette controls live in the toolbar now — see the View-menu row.) */}
 
         {/* Death countdown — pointer-events-none so keystrokes still reach the
-            doomed terminal (typing into it is how you defuse). */}
+            doomed terminal (you defuse by actually SENDING a prompt / Enter). */}
         {roulette && (
           <div className="pointer-events-none absolute inset-0 z-[200] flex items-center justify-center">
             <div className="animate-pulse rounded-2xl border-2 border-red-500/70 bg-black/70 px-10 py-6 text-center shadow-2xl backdrop-blur-sm">
@@ -2750,7 +2785,7 @@ function AgentGridInner({
                 <Skull className="h-12 w-12" strokeWidth={1.5} />
                 <span className="text-6xl font-black leading-none tabular-nums">{roulette.count}</span>
               </div>
-              <div className="mt-3 text-sm font-semibold text-red-200">Type a prompt or it closes!</div>
+              <div className="mt-3 text-sm font-semibold text-red-200">Send a prompt or it closes!</div>
             </div>
           </div>
         )}
