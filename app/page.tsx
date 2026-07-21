@@ -16,7 +16,7 @@ import {
   LayoutGrid, Settings, RotateCcw, Paintbrush, Plus, X, Upload,
   Cloud, ExternalLink, Loader2, CheckCircle2, AlertCircle, Clock,
   Star, Tag, MessageSquare, Send, Monitor, Puzzle,
-  Activity, ScrollText, Server,
+  Activity, ScrollText, Server, Layers, Zap, PanelLeft, ArrowRightLeft,
 } from 'lucide-react'
 import { RemoteSessionModal } from '@/components/features/RemoteSessionModal'
 
@@ -167,6 +167,22 @@ export default function TerminalWorkspacePage() {
       {
         id: 'term-close', group: 'Terminal', label: 'Close active terminal', hint: 'Alt+W',
         icon: X, run: () => gridRef.current?.closeActive(),
+      },
+      {
+        id: 'term-cycle', group: 'Terminal', label: 'Switch to next terminal', hint: 'Ctrl+Tab',
+        icon: ArrowRightLeft, run: () => gridRef.current?.cycleTerminal(1),
+      },
+      {
+        id: 'term-overlay', group: 'Terminal', label: 'Toggle overlay windows', hint: '⌘⇧O',
+        icon: Layers, keepOpen: true, run: () => gridRef.current?.toggleOverlay(),
+      },
+      {
+        id: 'term-lighting', group: 'Terminal', label: 'Toggle lighting (surface finished)', hint: '⌘⇧Y',
+        icon: Zap, keepOpen: true, run: () => gridRef.current?.toggleLighting(),
+      },
+      {
+        id: 'term-sidebar', group: 'Terminal', label: 'Toggle terminal list sidebar', hint: '⌘⇧B',
+        icon: PanelLeft, keepOpen: true, run: () => gridRef.current?.toggleSidebar(),
       },
     )
 
@@ -1586,8 +1602,8 @@ function PluginsPanel() {
         <p className="font-mono text-[10px] uppercase tracking-wider text-zinc-500">Plugins & Integrations</p>
       </div>
 
-      {/* 2×3 grid — always stable */}
-      <div className="p-2">
+      {/* 2-column grid of plugin cards — logo on top, tagline wraps (no cut-off). */}
+      <div className="px-2.5 pb-2.5 pt-4">
         <div className="grid gap-2" style={{ gridTemplateColumns: 'repeat(2, minmax(0, 1fr))' }}>
           {PLUGINS.map(plugin => {
             const isSelected = selectedId === plugin.id
@@ -1595,16 +1611,14 @@ function PluginsPanel() {
               <button
                 key={plugin.id}
                 onClick={() => setSelectedId(isSelected ? null : plugin.id)}
-                className={`rounded-lg border px-2.5 py-2 text-left transition-colors ${
-                  isSelected ? colorMap[plugin.color] : 'border-zinc-800 bg-zinc-900/60 hover:border-zinc-700'
+                className={`flex flex-col gap-1.5 rounded-xl border px-2.5 py-2.5 text-left transition-colors ${
+                  isSelected ? colorMap[plugin.color] : 'border-zinc-800 bg-zinc-900/60 hover:border-zinc-700 hover:bg-zinc-800/40'
                 }`}
               >
-                <div className="flex items-center gap-1.5">
-                  <img src={plugin.logo} alt={plugin.name} className="h-5 w-5 flex-shrink-0 rounded" />
-                  <div className="flex-1 min-w-0">
-                    <p className="text-[10px] font-medium text-white truncate">{plugin.name}</p>
-                    <p className="text-[9px] text-zinc-500 truncate">{plugin.tagline}</p>
-                  </div>
+                <img src={plugin.logo} alt={plugin.name} className="h-8 w-8 flex-shrink-0 rounded-lg" />
+                <div className="min-w-0">
+                  <p className="truncate text-xs font-semibold text-white">{plugin.name}</p>
+                  <p className="text-[10px] leading-snug text-zinc-500 line-clamp-2">{plugin.tagline}</p>
                 </div>
               </button>
             )
@@ -1669,7 +1683,15 @@ function PluginsPanel() {
           </div>
         </div>
       ) : (
-        <div className="flex-1" />
+        <div className="flex flex-1 flex-col items-center justify-center gap-2 px-6 text-center">
+          <div className="rounded-2xl border border-white/10 bg-white/5 p-3">
+            <Puzzle className="h-6 w-6 text-zinc-600" />
+          </div>
+          <p className="text-xs font-medium text-zinc-400">Select a plugin</p>
+          <p className="text-[11px] leading-relaxed text-zinc-600">
+            Pick one above to see what it does, example prompts you can run, and how to wire it into your agents.
+          </p>
+        </div>
       )}
 
       {/* Footer actions */}

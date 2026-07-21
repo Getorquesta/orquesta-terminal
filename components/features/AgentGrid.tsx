@@ -2,13 +2,62 @@
 
 import { writeText as clipboardWrite, readText as clipboardRead } from '@tauri-apps/plugin-clipboard-manager'
 import { useState, useEffect, useMemo, useRef, useCallback, forwardRef, useImperativeHandle } from 'react'
-import { ResponsiveGridLayout, useContainerWidth } from 'react-grid-layout'
-import type { LayoutItem, ResponsiveLayouts } from 'react-grid-layout'
 import type { TauriHandle } from '@/hooks/useTauri'
+import { FloatingWindow, type Geom } from './TerminalDock'
+
+// ── Layout model (custom absolute-positioning engine) ────────────────────────
+// One grid-unit layout item per pane. Grid mode stores positions in these grid
+// units (12 cols × GRID_ROWS rows) and derives pixel rects from the live width;
+// overlay mode uses free pixel geometry (see FloatGeom) instead. We dropped
+// react-grid-layout entirely: it shoves items on collision (no free overlap) and
+// re-parents children across modes, which would tear down PTYs. This engine
+// renders BOTH modes through the same absolutely-positioned windows, so a mode
+// toggle never remounts a cell.
+interface LayoutItem {
+  i: string
+  x: number
+  y: number
+  w: number
+  h: number
+  minW?: number
+  minH?: number
+}
+interface ResponsiveLayouts {
+  lg: LayoutItem[]
+  md?: LayoutItem[]
+  sm?: LayoutItem[]
+}
+/** Free-floating pixel geometry for a pane in overlay mode. `z` = stack order. */
+interface FloatGeom {
+  x: number
+  y: number
+  w: number
+  h: number
+  z: number
+}
+
+/** Measure a container's live width via ResizeObserver (RGL replacement). */
+function useContainerWidth<T extends HTMLElement = HTMLDivElement>() {
+  const containerRef = useRef<T>(null)
+  const [width, setWidth] = useState(0)
+  useEffect(() => {
+    const el = containerRef.current
+    if (!el) return
+    const measure = () => setWidth(el.clientWidth)
+    measure()
+    const ro = new ResizeObserver(measure)
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [])
+  return { containerRef, width }
+}
 import { GeistMono } from 'geist/font/mono'
 import { Button } from '@/components/ui/button'
 import { Plus, X, Maximize2, GitBranch, LayoutGrid, Pencil, Cloud, Share2, Eye, Keyboard, Search, Check, ChevronDown, Link2, Users, Cpu, AlertTriangle, Folder, FolderOpen, Home, CornerLeftUp, PanelLeft, Loader2 } from 'lucide-react'
 import { TerminalSidebar } from './TerminalSidebar'
+import { TerminalListSidebar, PluginDock, TerminalSwitcherDock } from './TerminalDock'
+import type { CellStatus, DockItem, PluginDockItem } from './TerminalDock'
+import { PanelLeftOpen, Layers, Zap, Mail, MonitorSmartphone, Video, Radar, Mic, Dices, Shuffle, Skull } from 'lucide-react'
 import '@xterm/xterm/css/xterm.css'
 
 export interface HostedProject {
@@ -83,6 +132,9 @@ const MAX_FONT = 24
 interface CellApi {
   clear: () => void
   fit: () => void
+  focus: () => void
+  /** Type text into the live PTY as one bracketed paste (no auto-submit). */
+  seed: (text: string) => void
 }
 
 /**
@@ -199,6 +251,14 @@ function cursorColor(id: string): string {
   return `hsl(${h % 360} 85% 62%)`
 }
 
+// A terminal's default name is the folder its agent runs in — more meaningful
+// than "shell 2". Handles both / and \ and trailing slashes.
+function folderLabel(cwd?: string): string {
+  if (!cwd) return ''
+  const clean = cwd.replace(/[/\\]+$/, '')
+  return clean.split(/[/\\]/).pop() || ''
+}
+
 // Stable per-browser identity for this cockpit's own cursor.
 function localParticipant(): { id: string; name: string; color: string } {
   let id = ''
@@ -285,18 +345,32 @@ interface TerminalCellProps {
   onArrange: () => void
   onZoom: (delta: number) => void
   registerApi: (api: CellApi | null) => void
+  /** Fired on every chunk of PTY output — marks the pane "running". */
+  onActivity: () => void
+  /** Fired when the pane looks done: a terminal bell, or ~2.5s of quiet after
+   *  activity. Drives the sidebar attention dot and lighting mode. */
+  onFinished: () => void
+  /** Fired when the user types into this pane (real keyboard input). Lighting
+   *  mode reads this as "engaged" so it won't auto-advance away from it. */
+  onUserInput: () => void
+  /** Highlight this pane (lighting mode just surfaced it). */
+  attention?: boolean
 }
 
 function TerminalCell({
   cellId, socket, cliType, name, fontSize, opacity, hostedApiUrl, hostedToken, hostedUserId,
   hostedProjects, hostedProjectId, cwd, resumeId, daemonRunning,
   onClose, onCliTypeChange, onRename, onHostedProjectChange, onMakeAgent, onPickFolder, onFocusCell, onNew, onArrange, onZoom, registerApi,
+  onActivity, onFinished, onUserInput, attention,
 }: TerminalCellProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const termRef = useRef<import('@xterm/xterm').Terminal | null>(null)
   const fitAddonRef = useRef<import('@xterm/addon-fit').FitAddon | null>(null)
   const sessionIdRef = useRef<string | null>(null)
   const hoverTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // Prompt-completion detection (feeds the sidebar dot + lighting mode).
+  const idleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const busyRef = useRef(false)
   const [branch, setBranch] = useState<string | null>(null)
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState(name)
@@ -328,8 +402,8 @@ function TerminalCell({
 
   // Latest callbacks in refs so the (heavy) init effect never re-runs when a
   // parent handler's identity changes — only cellId/socket/cliType restart it.
-  const cbRef = useRef({ onClose, onFocusCell, onNew, onArrange, onZoom, registerApi })
-  cbRef.current = { onClose, onFocusCell, onNew, onArrange, onZoom, registerApi }
+  const cbRef = useRef({ onClose, onFocusCell, onNew, onArrange, onZoom, registerApi, onActivity, onFinished, onUserInput })
+  cbRef.current = { onClose, onFocusCell, onNew, onArrange, onZoom, registerApi, onActivity, onFinished, onUserInput }
   const fontRef = useRef(fontSize)
   fontRef.current = fontSize
   // Hosted-hook target read live at (re)connect time so toggling it from the
@@ -357,6 +431,7 @@ function TerminalCell({
 
     let term: import('@xterm/xterm').Terminal
     let mounted = true
+    let startTimer: ReturnType<typeof setTimeout> | null = null
 
     async function initTerminal() {
       const xtermModule = await import('@xterm/xterm')
@@ -396,6 +471,14 @@ function TerminalCell({
       termRef.current = term
       fitAddonRef.current = fitAddon
 
+      // ── Prompt-done: many CLIs ring the terminal bell (BEL) when they finish
+      // and hand the prompt back. Treat that as an immediate "finished" signal.
+      term.onBell(() => {
+        if (idleTimerRef.current) clearTimeout(idleTimerRef.current)
+        busyRef.current = false
+        cbRef.current.onFinished()
+      })
+
       // ── Resize: push the real pane size to the PTY. Without this the shell
       // stays at 80×24 while the pane is larger, so wrapping + every TUI break.
       let resizeTimer: ReturnType<typeof setTimeout> | undefined
@@ -415,6 +498,11 @@ function TerminalCell({
       cbRef.current.registerApi({
         clear: () => term.clear(),
         fit: () => { try { fitAddon.fit(); emitResize() } catch {} },
+        // Use xterm's own focus() (not raw textarea.focus) so its internal
+        // focused-state is set and keystrokes actually route to the pane.
+        focus: () => { try { term.focus() } catch {} },
+        // Paste a plugin prompt into this pane for review-before-send.
+        seed: (text: string) => seedInput(text),
       })
 
       // ── Clipboard: xterm has no copy/paste by default in the browser. ──
@@ -482,6 +570,9 @@ function TerminalCell({
         if (e.type !== 'keydown') return true
         const mod = e.ctrlKey || e.metaKey
         const k = e.key.toLowerCase()
+        // Ctrl+Tab / Ctrl+Shift+Tab cycle terminals (handled at window level) —
+        // swallow here so xterm doesn't also send a literal tab to the shell.
+        if (e.ctrlKey && !e.altKey && !e.metaKey && k === 'tab') return false
         if (mod && e.shiftKey && k === 'c') { if (term.hasSelection()) { copySelection(); return false } }
         if (mod && e.shiftKey && k === 'v') { paste(); return false }
         if (mod && e.shiftKey && k === 'l') { e.preventDefault(); term.clear(); return false }
@@ -491,6 +582,11 @@ function TerminalCell({
         if (mod && !e.shiftKey && k === 'p') { e.preventDefault(); cbRef.current.onArrange(); return false }
         if (e.altKey && k === 't') { e.preventDefault(); cbRef.current.onNew(); return false }
         if (e.altKey && k === 'w') { e.preventDefault(); cbRef.current.onClose(); return false }
+        // Genuine user keystroke that will reach the shell → Lighting "engagement"
+        // signal ("seguir = escribir"). Uses real KeyboardEvents (not term.onData,
+        // which also fires for the terminal's own auto-replies to CLI queries).
+        // Skip bare modifier presses.
+        if (k !== 'shift' && k !== 'control' && k !== 'alt' && k !== 'meta') cbRef.current.onUserInput()
         return true
       })
 
@@ -515,7 +611,8 @@ function TerminalCell({
       }
       // Delay session start slightly so the container has its final size
       // (prevents orquesta-cli/Ink from getting 24x80 when pane is larger)
-      setTimeout(() => {
+      startTimer = setTimeout(() => {
+        startTimer = null
         try { fitAddon.fit() } catch {}
         startSession()
       }, 100)
@@ -539,6 +636,7 @@ function TerminalCell({
       socket?.on('connect', onConnect)
 
       return () => {
+        if (startTimer) clearTimeout(startTimer)
         clearTimeout(resizeTimer)
         resizeObserver.disconnect()
         host.removeEventListener('mouseup', onMouseUp)
@@ -581,6 +679,16 @@ function TerminalCell({
     const handleOutput = (data: { sessionId: string; data: string }) => {
       if (data.sessionId !== sessionIdRef.current) return
       termRef.current?.write(data.data)
+      // Activity → running. Arm/rearm an idle timer; when output goes quiet for
+      // ~2.5s we call it "finished". Kept generous so the frequent mid-work
+      // pauses agents take (thinking, tool calls) don't read as "done" and
+      // yank Lighting mode's stage around.
+      cbRef.current.onActivity()
+      busyRef.current = true
+      if (idleTimerRef.current) clearTimeout(idleTimerRef.current)
+      idleTimerRef.current = setTimeout(() => {
+        if (busyRef.current) { busyRef.current = false; cbRef.current.onFinished() }
+      }, 2500)
     }
     const handleEnded = (data: { sessionId: string }) => {
       if (data.sessionId !== sessionIdRef.current) return
@@ -620,6 +728,7 @@ function TerminalCell({
       socket.off('session:meta', handleMeta)
       socket.off('terminal:share-status', handleShareStatus)
       socket.off('terminal:viewers', handleViewers)
+      if (idleTimerRef.current) clearTimeout(idleTimerRef.current)
     }
   }, [socket])
 
@@ -743,10 +852,15 @@ function TerminalCell({
   }
 
   const cliLabel = CLI_OPTIONS.find((o) => o.value === cliType)?.label ?? cliType
+  // Display name precedence: user-set name → folder the agent runs in → CLI name.
+  const folderName = folderLabel(cwd)
+  const displayName = name || folderName || cliLabel
 
   return (
     <div
-      className="flex h-full flex-col rounded-md border border-zinc-800 overflow-hidden backdrop-blur-sm"
+      className={`flex h-full flex-col rounded-md border overflow-hidden backdrop-blur-sm ${
+        attention ? 'border-emerald-500/60 ring-1 ring-emerald-500/40' : 'border-zinc-800'
+      }`}
       style={{ backgroundColor: `rgba(10, 12, 16, ${opacity})` }}
       // Focus-follows-mouse: once the cursor settles on a pane (~150ms) it
       // becomes active for the keyboard — no click needed. The delay avoids
@@ -756,6 +870,9 @@ function TerminalCell({
         if (hoverTimerRef.current) clearTimeout(hoverTimerRef.current)
         hoverTimerRef.current = setTimeout(() => {
           if (!window.getSelection()?.isCollapsed) return
+          // Don't yank focus away from the rename box (an <input>); xterm's own
+          // input helper is a <textarea>, so this never blocks real terminal focus.
+          if (document.activeElement instanceof HTMLInputElement) return
           try { termRef.current?.focus() } catch {}
         }, 150)
       }}
@@ -776,7 +893,7 @@ function TerminalCell({
                 else if (e.key === 'Escape') { setDraft(name); setEditing(false) }
               }}
               onMouseDown={(e) => e.stopPropagation()}
-              placeholder={cliLabel}
+              placeholder={folderName || cliLabel}
               className="w-24 rounded bg-zinc-800 px-1.5 py-0.5 text-xs font-mono text-zinc-200 outline-none focus:ring-1 focus:ring-green-600/50"
             />
           ) : (
@@ -786,7 +903,7 @@ function TerminalCell({
               className="group flex min-w-0 items-center gap-1 text-xs font-mono text-zinc-300 hover:text-zinc-100"
               title="Rename pane"
             >
-              <span className="truncate max-w-[8rem]">{name || cliLabel}</span>
+              <span className="truncate max-w-[8rem]">{displayName}</span>
               <Pencil className="h-2.5 w-2.5 shrink-0 text-zinc-600 opacity-0 group-hover:opacity-100" />
             </button>
           )}
@@ -971,7 +1088,17 @@ export interface AgentGridHandle {
   closeActive: () => void
   /** Create one live terminal pane per external session, then tidy the grid. */
   importSessions: (specs: ImportSpec[]) => void
+  /** Flip between the tiling grid and free-floating overlay windows. */
+  toggleOverlay: () => void
+  /** Toggle "lighting": auto-surface whichever terminal last finished a prompt. */
+  toggleLighting: () => void
+  /** Show/hide the left terminal-list sidebar. */
+  toggleSidebar: () => void
+  /** Cycle keyboard focus to the next (+1) / previous (-1) terminal. */
+  cycleTerminal: (dir: 1 | -1) => void
 }
+
+type ViewMode = 'grid' | 'overlay'
 
 interface AgentGridProps {
   socket: TauriHandle | null
@@ -992,6 +1119,11 @@ interface PersistShape {
   v: number
   cells: GridCell[]
   layouts: ResponsiveLayouts
+  viewMode?: ViewMode
+  /** Free-floating pixel geometry used by overlay mode (grid mode keeps `layouts`). */
+  floatGeom?: Record<string, FloatGeom>
+  lighting?: boolean
+  sidebarOpen?: boolean
 }
 
 // Total grid-row budget a tidy layout spans. Combined with a dynamic rowHeight
@@ -1000,6 +1132,81 @@ const GRID_ROWS = 12
 // Gap between panes (px) and estimated height of the Arrange/Add toolbar above.
 const GRID_MARGIN = 6
 const TOOLBAR_H = 44
+// Left terminal-list sidebar width (px) and the gap to the workspace.
+const SIDEBAR_W = 208
+const SIDEBAR_GAP = 8
+// How long a finished pane keeps its attention highlight (ms). Also how long it
+// stays promoted on Lighting mode's big stage before demoting to the calm grid —
+// long enough to actually read and reply before it moves.
+const ATTENTION_MS = 10000
+// Minimum time (ms) a pane holds Lighting mode's big stage before it can hand
+// off to the next waiting pane — only if you haven't engaged it by then.
+const DWELL_MS = 5000
+
+// Number of columns the tidy grid spans (matches GRID_ROWS for the row budget).
+const GRID_COLS = 12
+
+// Height (px) reserved at the bottom of the workspace for the plugin dock.
+const DOCK_H = 66
+
+// The "activated" companion plugins shown in the macOS-style bottom dock.
+// Clicking a tile pastes its prompt into the currently-active terminal for
+// review-before-send (never auto-submitted). Icons rendered at dock size.
+//
+// Each prompt names the plugin's CANONICAL daemon explicitly — its MCP server /
+// tool and service endpoint — instead of a loose description. A pane's CLI agent
+// otherwise interprets a vague ask ("open a remote-control link") its own way and
+// never hits the real integration; pinning the concrete tool makes it act.
+const PLUGIN_DOCK: Array<PluginDockItem & { prompt: string }> = [
+  {
+    id: 'mail',
+    label: 'Mail',
+    hint: 'Agent inbox (Apumail)',
+    color: '#22c55e',
+    icon: <Mail className="h-6 w-6" strokeWidth={1.5} />,
+    prompt: 'Use the Apumail daemon (MCP server for apumail.com, REST at https://apumail.com/api/inbox, address agent@apumail.com) to read my agent inbox. Summarize new messages and flag anything that needs a reply.',
+  },
+  {
+    id: 'remote',
+    label: 'Remote control',
+    hint: 'Drive this terminal from your phone (RogerThat)',
+    color: '#38bdf8',
+    icon: <MonitorSmartphone className="h-6 w-6" strokeWidth={1.5} />,
+    prompt: 'Use the RogerThat daemon (rogerthat MCP server, https://rogerthat.chat): call its open_remote_control tool to create a phone remote-control channel for this terminal, then give me the link.',
+  },
+  {
+    id: 'coordination',
+    label: 'Coordination',
+    hint: 'Coordinate agents on a channel (RogerThat)',
+    color: '#a78bfa',
+    icon: <Users className="h-6 w-6" strokeWidth={1.5} />,
+    prompt: 'Use the RogerThat daemon (rogerthat MCP server, https://rogerthat.chat): call create_channel to open a coordination channel for this task, post my current status with send, and listen for teammates.',
+  },
+  {
+    id: 'voice',
+    label: 'Voice control',
+    hint: 'Drive the terminal by voice (RogerThat)',
+    color: '#2dd4bf',
+    icon: <Mic className="h-6 w-6" strokeWidth={1.5} />,
+    prompt: 'Use the RogerThat daemon (rogerthat MCP server, https://meet.rogerthat.chat): call open_video_call to start a voice session for this terminal so I can dictate prompts, and give me the join link.',
+  },
+  {
+    id: 'meet',
+    label: 'Agent meet',
+    hint: 'Start a voice / video meet (RogerThat)',
+    color: '#f472b6',
+    icon: <Video className="h-6 w-6" strokeWidth={1.5} />,
+    prompt: 'Use the RogerThat daemon (rogerthat MCP server, https://meet.rogerthat.chat): call open_video_call to start an agent meet (voice/video) for this session and give me the join link.',
+  },
+  {
+    id: 'prowl',
+    label: 'Bench prowl',
+    hint: 'Discover & benchmark agents (Prowl)',
+    color: '#fbbf24',
+    icon: <Radar className="h-6 w-6" strokeWidth={1.5} />,
+    prompt: 'Use the Prowl daemon (Agent Discovery Network — MCP server at https://prowl.world/mcp, REST at https://prowl.world/api) to discover and benchmark the available agents for this task, then recommend the best fit.',
+  },
+]
 
 function buildTidyLayout(cells: GridCell[]): LayoutItem[] {
   const n = cells.length
@@ -1017,6 +1224,106 @@ function buildTidyLayout(cells: GridCell[]): LayoutItem[] {
     minW: 2,
     minH: 2,
   }))
+}
+
+// ── Lighting layout ───────────────────────────────────────────────────────────
+// Lighting mode stages ONE terminal at a time: the current spotlight fills the
+// top of the workspace, every other pane sits in a single filmstrip row along
+// the bottom. With no spotlight it's a calm, even tidy grid. Returns pixel rects
+// keyed by cell id. The spotlight only changes on promote/hand-off (see the
+// controller in AgentGridInner), so this layout stays put between those events.
+function computeLightingGeoms(
+  cells: GridCell[],
+  spotlightId: string | null,
+  W: number,
+  H: number,
+): Record<string, Geom> {
+  const M = GRID_MARGIN
+  const spot = spotlightId ? cells.find((c) => c.id === spotlightId) : undefined
+  const rest = cells.filter((c) => c.id !== spot?.id)
+
+  const out: Record<string, Geom> = {}
+
+  // Tidy-grid a set of cells inside a pixel box (x0,y0,boxW,boxH).
+  const packGrid = (list: GridCell[], x0: number, y0: number, boxW: number, boxH: number) => {
+    const n = list.length
+    if (!n) return
+    const cols = Math.ceil(Math.sqrt(n))
+    const rows = Math.ceil(n / cols)
+    const cw = (boxW - (cols - 1) * M) / cols
+    const ch = (boxH - (rows - 1) * M) / rows
+    list.forEach((c, i) => {
+      const cx = i % cols
+      const cy = Math.floor(i / cols)
+      out[c.id] = {
+        x: Math.round(x0 + cx * (cw + M)),
+        y: Math.round(y0 + cy * (ch + M)),
+        w: Math.round(cw),
+        h: Math.round(ch),
+      }
+    })
+  }
+
+  if (!spot) {
+    // No spotlight → a calm, even tidy grid of everything. This is Lighting's
+    // stable baseline: we still own the geometry (never handing back to the
+    // react-grid layout), so a pane finishing later is one smooth promotion
+    // instead of a whole-workspace snap between two different layout engines.
+    packGrid(cells, 0, 0, W, H)
+  } else if (rest.length === 0) {
+    // Spotlight is the only pane → it fills the whole stage.
+    packGrid([spot], 0, 0, W, H)
+  } else {
+    // ── Turntable carousel ─────────────────────────────────────────────────────
+    // Every pane is mounted on ONE shared cylinder (a turntable) and we rotate the
+    // whole ring as a single body — no pane spins on its own axis. Each card keeps
+    // an IDENTICAL centred box; its only difference is its angle around the ring.
+    // The card is placed with `translateZ(-R) rotateY(θ) translateZ(R)` (see
+    // FloatingWindow) so it orbits a common vertical axis R behind the stage: the
+    // front card (θ=0) lands dead-centre at the base plane (never zoomed), its
+    // neighbours swing back and to the sides. A promote just re-labels every
+    // card's θ by the same step, and since they all ease together on one curve the
+    // entire turntable appears to rotate one notch as a rigid whole.
+    const idx = cells.findIndex((c) => c.id === spot.id)
+    const n = cells.length
+
+    // Identical box for all cards — the ring, not the box, does the work.
+    const cardW = Math.round(Math.min(W * 0.62, 1180))
+    const cardH = Math.round(H * 0.99)
+    const cardX = Math.round((W - cardW) / 2)
+    const cardY = Math.round((H - cardH) / 2)
+
+    const STEP = 52               // angular gap between adjacent panes (deg) — small gap, no overlap
+    const R = Math.round(cardW * 1.05)   // ring radius (px)
+    const VISIBLE = 95            // panes past this angle face away → hidden
+
+    cells.forEach((c, i) => {
+      // Signed ring distance from the spotlight, wrapped to the short way round so
+      // the reel is a closed loop (rotating past the last pane wraps to the first).
+      let rel = i - idx
+      if (rel > n / 2) rel -= n
+      // Strict `<` (not `<=`) so an exact-opposite pane stays on its own side.
+      // With `<=`, the 2-terminal case collapsed both panes onto the same side —
+      // switching then slid them across each other instead of rotating the ring
+      // as one body. Strict keeps them antipodal → every pane shifts by the same
+      // delta on a promote, so the whole turntable turns rigidly.
+      if (rel < -n / 2) rel += n
+      const angle = rel * STEP
+      if (Math.abs(angle) > VISIBLE) {
+        // On the far side of the ring: mounted (PTY alive) but invisible & inert.
+        out[c.id] = { x: cardX, y: cardY, w: cardW, h: cardH, rotY: angle, zDepth: R, z: 0, hidden: true }
+        return
+      }
+      const front = angle === 0
+      out[c.id] = {
+        x: cardX, y: cardY, w: cardW, h: cardH,
+        rotY: angle, zDepth: R,
+        opacity: front ? 1 : 0.7,
+        z: Math.round(100 - Math.abs(angle)),   // nearer the front → stacked higher
+      }
+    })
+  }
+  return out
 }
 
 /**
@@ -1270,14 +1577,150 @@ function AgentGridInner({
   const [layouts, setLayouts] = useState<ResponsiveLayouts>({ lg: [] })
   const [fontSize, setFontSize] = useState(DEFAULT_FONT)
   const loadedRef = useRef(false)
+
+  // ── Layout modes ───────────────────────────────────────────────────────────
+  const [viewMode, setViewMode] = useState<ViewMode>('grid')
+  const [sidebarOpen, setSidebarOpen] = useState(true)
+  const [lighting, setLighting] = useState(false)
+  // Overlay mode's own free-floating pixel geometry (kept apart from the tiled
+  // `layouts` so switching modes doesn't destroy either arrangement).
+  const [floatGeom, setFloatGeom] = useState<Record<string, FloatGeom>>({})
+  // Per-pane live status + "just finished" attention set (drives sidebar + rings).
+  const [statuses, setStatuses] = useState<Record<string, CellStatus>>({})
+  const [finishedIds, setFinishedIds] = useState<Set<string>>(new Set())
+  const attentionTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map())
+  const lightingRef = useRef(lighting)
+  lightingRef.current = lighting
+  const viewModeRef = useRef(viewMode)
+  viewModeRef.current = viewMode
   // The storageKey the persist effect last committed under. Lets it skip the one
   // commit where `key` changes (stale cells closure) before re-persisting.
   const persistKeyRef = useRef(key)
   const toolbarRef = useRef<HTMLDivElement>(null)
   const activeCellIdRef = useRef<string | null>(null)
+  // Mirror of the active-cell ref as state so the sidebar/overlay highlight
+  // updates reactively (the ref alone wouldn't re-render on focus changes).
+  const [activeCellId, setActiveCellId] = useState<string | null>(null)
+  const setActive = useCallback((id: string | null) => {
+    activeCellIdRef.current = id
+    setActiveCellId(id)
+  }, [])
   const cellApiRef = useRef<Map<string, CellApi>>(new Map())
   const cellsRef = useRef<GridCell[]>([])
   cellsRef.current = cells
+
+  // ── Lighting spotlight controller ───────────────────────────────────────────
+  // Exactly ONE terminal holds the big stage at a time (the rest sit in the
+  // bottom filmstrip). A CLI pane that finishes is promoted onto the stage and
+  // stays there for a MINIMUM dwell; after that, if you haven't engaged it
+  // (typed into it), it hands the stage to the next waiting pane. This is what
+  // keeps Lighting calm: motion happens ONLY on promote / hand-off, never on the
+  // constant finish↔resume churn that made the old whole-grid reflow thrash.
+  const [spotlightId, setSpotlightId] = useState<string | null>(null)
+  const spotlightRef = useRef<string | null>(null)   // mirror for callbacks
+  const lightQueueRef = useRef<string[]>([])          // FIFO of CLI panes waiting
+  const engagedRef = useRef(false)                    // user typed into spotlight
+  const dwellRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // True while promote() is doing its own fit()/focus() + carousel reflow. The
+  // reflow can bounce DOM focus onto a neighbouring pane, whose focus event would
+  // otherwise re-promote it → an endless round-robin. Focus-driven promotion is
+  // suppressed during this window so only genuine user focus stages a pane.
+  const suppressFocusPromoteRef = useRef(false)
+  // Late-bound so promote/advance (mutually recursive) can call each other.
+  const spotCtl = useRef<{ promote: (id: string | null, opts?: { silent?: boolean }) => void; advance: () => void }>({
+    promote: () => {}, advance: () => {},
+  })
+
+  // A short, warm "orchestra" swell played when a new pane takes the spotlight —
+  // a rising major triad on a soft triangle voice. Synthesised (no asset needed)
+  // and gracefully no-ops if WebAudio is unavailable or blocked.
+  const audioCtxRef = useRef<AudioContext | null>(null)
+  const playSpotlightChime = useCallback(() => {
+    try {
+      let ctx = audioCtxRef.current
+      if (!ctx) {
+        const AC = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext
+        if (!AC) return
+        ctx = new AC(); audioCtxRef.current = ctx
+      }
+      if (ctx.state === 'suspended') void ctx.resume()
+      const now = ctx.currentTime
+      const notes = [392.0, 523.25, 659.25, 783.99] // G4 · C5 · E5 · G5 (arpeggio up)
+      notes.forEach((f, i) => {
+        const osc = ctx!.createOscillator()
+        const gain = ctx!.createGain()
+        osc.type = 'triangle'
+        osc.frequency.value = f
+        const t0 = now + i * 0.055
+        gain.gain.setValueAtTime(0, t0)
+        gain.gain.linearRampToValueAtTime(0.11, t0 + 0.02)
+        gain.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.5)
+        osc.connect(gain).connect(ctx!.destination)
+        osc.start(t0)
+        osc.stop(t0 + 0.55)
+      })
+    } catch { /* audio unavailable — silent */ }
+  }, [])
+
+  const promoteSpotlight = useCallback((id: string | null, opts?: { silent?: boolean }) => {
+    if (dwellRef.current) { clearTimeout(dwellRef.current); dwellRef.current = null }
+    if (id) {
+      const q = lightQueueRef.current
+      const i = q.indexOf(id); if (i >= 0) q.splice(i, 1)
+    }
+    spotlightRef.current = id
+    setSpotlightId(id)
+    engagedRef.current = false
+    if (!id) return
+    setActive(id)
+    // Silent hop: used by the roulette spin to rotate the ring one notch without
+    // the chime / focus-grab / dwell-handoff — those only fire when a pane truly
+    // takes the stage (the spin's final landing, or any normal promote).
+    if (opts?.silent) return
+    playSpotlightChime()  // orchestra swell as the new pane takes the stage
+    // Fit + focus once the reflow to the big stage has settled, so you can reply.
+    // Guard the whole reflow window: the geometry change can hand DOM focus to a
+    // neighbour, and that focus event must NOT promote (it'd loop forever).
+    suppressFocusPromoteRef.current = true
+    setTimeout(() => {
+      cellApiRef.current.get(id)?.fit()
+      cellApiRef.current.get(id)?.focus()
+      // Release on the next tick, after the focus event this triggers has fired.
+      setTimeout(() => { suppressFocusPromoteRef.current = false }, 60)
+    }, 320)
+    // Minimum dwell, then hand off unless you've engaged it.
+    dwellRef.current = setTimeout(() => {
+      dwellRef.current = null
+      if (engagedRef.current) return   // you're typing in it → it's yours, keep it
+      spotCtl.current.advance()
+    }, DWELL_MS)
+  }, [setActive, playSpotlightChime])
+
+  const advanceSpotlight = useCallback(() => {
+    // Current spotlight's turn lapsed unattended → promote the next waiting pane.
+    const next = lightQueueRef.current.shift() ?? null
+    if (next && next !== spotlightRef.current) spotCtl.current.promote(next)
+    // Nothing waiting → leave the current pane up (no better candidate), no timer.
+  }, [])
+
+  useEffect(() => {
+    spotCtl.current = { promote: promoteSpotlight, advance: advanceSpotlight }
+  }, [promoteSpotlight, advanceSpotlight])
+
+  // Tear down all spotlight state (leaving Lighting, or on unmount).
+  const resetSpotlight = useCallback(() => {
+    if (dwellRef.current) { clearTimeout(dwellRef.current); dwellRef.current = null }
+    spotlightRef.current = null
+    setSpotlightId(null)
+    lightQueueRef.current = []
+    engagedRef.current = false
+  }, [])
+  // Live grid→pixel projector, refreshed each render (see the geometry section
+  // below). Lets non-render callbacks (e.g. seeding overlay geometry) read the
+  // current pixel rect of a pane's grid slot without re-plumbing width/height.
+  const gridPxRef = useRef<(id: string) => Geom | null>(() => null)
+  const floatGeomRef = useRef<Record<string, FloatGeom>>({})
+  floatGeomRef.current = floatGeom
 
   // ── Daemon takeover state ──────────────────────────────────────────────
   // Which projects currently have a local daemon running (this machine is their
@@ -1302,6 +1745,12 @@ function AgentGridInner({
   // Folder picker: choose a working directory for a new terminal ('new') or an
   // existing pane (cellId set → changing it restarts that pane's session there).
   const [folderPicker, setFolderPicker] = useState<{ cellId: string | null; initialPath?: string } | null>(null)
+
+  // Toolbar dropdowns: the View menu (Overlay/Lighting/Arrange) and the Add
+  // split-button menu (new terminal vs. open in a folder). Kept lightweight —
+  // a click-away backdrop closes them.
+  const [viewMenuOpen, setViewMenuOpen] = useState(false)
+  const [addMenuOpen, setAddMenuOpen] = useState(false)
 
   useEffect(() => {
     if (!socket) return
@@ -1412,6 +1861,10 @@ function AgentGridInner({
     loadedRef.current = false
     let nextCells: GridCell[] = []
     let nextLayouts: ResponsiveLayouts = { lg: [] }
+    let nextViewMode: ViewMode = 'grid'
+    let nextFloatGeom: Record<string, FloatGeom> = {}
+    let nextLighting = false
+    let nextSidebar = true
     try {
       const saved = localStorage.getItem(key)
       if (saved) {
@@ -1425,6 +1878,17 @@ function AgentGridInner({
           } else {
             nextLayouts = { lg: buildTidyLayout(nextCells) }
           }
+          if (p.viewMode === 'overlay' || p.viewMode === 'grid') nextViewMode = p.viewMode
+          // Keep only geometry for panes that still exist; missing ones get
+          // seeded lazily when overlay mode is (re)entered.
+          if (p.floatGeom && typeof p.floatGeom === 'object') {
+            for (const c of nextCells) {
+              const g = p.floatGeom[c.id]
+              if (g && typeof g.x === 'number') nextFloatGeom[c.id] = g
+            }
+          }
+          if (typeof p.lighting === 'boolean') nextLighting = p.lighting
+          if (typeof p.sidebarOpen === 'boolean') nextSidebar = p.sidebarOpen
         } else if (p && (p.lg || p.md || p.sm)) {
           nextLayouts = p // legacy layouts-only shape — no panes to restore
         }
@@ -1432,6 +1896,10 @@ function AgentGridInner({
     } catch {}
     setCells(nextCells)
     setLayouts(nextLayouts)
+    setViewMode(nextViewMode)
+    setFloatGeom(nextFloatGeom)
+    setLighting(nextLighting)
+    setSidebarOpen(nextSidebar)
     try {
       const f = parseInt(localStorage.getItem(FONT_KEY) || '', 10)
       if (f >= MIN_FONT && f <= MAX_FONT) setFontSize(f)
@@ -1446,10 +1914,10 @@ function AgentGridInner({
     if (!loadedRef.current) return
     if (persistKeyRef.current !== key) { persistKeyRef.current = key; return }
     try {
-      const payload: PersistShape = { v: 3, cells, layouts }
+      const payload: PersistShape = { v: 5, cells, layouts, viewMode, floatGeom, lighting, sidebarOpen }
       localStorage.setItem(key, JSON.stringify(payload))
     } catch {}
-  }, [key, cells, layouts])
+  }, [key, cells, layouts, viewMode, floatGeom, lighting, sidebarOpen])
 
   const addCell = useCallback((init?: Partial<Omit<GridCell, 'id'>>) => {
     const id = `cell-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
@@ -1457,6 +1925,9 @@ function AgentGridInner({
     const newCells = [...cellsRef.current, newCell]
     setCells(newCells)
     setLayouts((prev) => ({ ...prev, lg: buildTidyLayout(newCells) }))
+    // In overlay mode the new pane needs a floating slot right away; grid mode
+    // seeds lazily on the next overlay entry.
+    if (viewModeRef.current === 'overlay') setTimeout(() => ensureFloatGeoms(), 0)
     setTimeout(() => cellApiRef.current.forEach((a) => a?.fit()), 80)
     return id
   }, [])
@@ -1475,18 +1946,109 @@ function AgentGridInner({
 
   const removeCell = useCallback((id: string) => {
     cellApiRef.current.delete(id)
-    if (activeCellIdRef.current === id) activeCellIdRef.current = null
+    if (activeCellIdRef.current === id) { activeCellIdRef.current = null; setActiveCellId(null) }
+    // Drop from the Lighting stage/queue; if it held the spotlight, hand off.
+    const q = lightQueueRef.current
+    const qi = q.indexOf(id); if (qi >= 0) q.splice(qi, 1)
+    if (spotlightRef.current === id) {
+      if (dwellRef.current) { clearTimeout(dwellRef.current); dwellRef.current = null }
+      spotlightRef.current = null; setSpotlightId(null); engagedRef.current = false
+      const next = q.shift() ?? null
+      if (next && lightingRef.current) spotCtl.current.promote(next)
+    }
     setCells((prev) => prev.filter((c) => c.id !== id))
     setLayouts((prev) => ({
       ...prev,
       lg: ((prev.lg || []) as LayoutItem[]).filter((l) => l.i !== id),
     }))
+    setFloatGeom((prev) => {
+      if (!(id in prev)) return prev
+      const next = { ...prev }
+      delete next[id]
+      return next
+    })
   }, [])
 
   const closeActive = useCallback(() => {
     const target = activeCellIdRef.current || cellsRef.current[cellsRef.current.length - 1]?.id
     if (target) removeCell(target)
   }, [removeCell])
+
+  // ── Russian roulette (just for fun) ─────────────────────────────────────────
+  // Spins the turntable like a wheel and lands on a random terminal. Two modes:
+  //   • 'gentle'   — harmless: it just becomes the spotlight, nothing dies.
+  //   • 'death' — the chosen one gets a 5s countdown; type a prompt into it to
+  //                  survive, or it closes (PTY killed) when the timer hits zero.
+  const spinningRef = useRef(false)
+  const [spinning, setSpinning] = useState(false)
+  const rouletteTargetRef = useRef<string | null>(null)
+  const rouletteTimersRef = useRef<ReturnType<typeof setTimeout>[]>([])
+  const [roulette, setRoulette] = useState<{ id: string; count: number } | null>(null)
+
+  const clearRouletteTimers = useCallback(() => {
+    rouletteTimersRef.current.forEach(clearTimeout)
+    rouletteTimersRef.current = []
+  }, [])
+
+  // Cancel a pending death countdown (the player typed in time, or a new spin/
+  // close superseded it). Safe to call when nothing is armed.
+  const defuseRoulette = useCallback(() => {
+    if (!rouletteTargetRef.current) return
+    rouletteTargetRef.current = null
+    clearRouletteTimers()
+    setRoulette(null)
+  }, [clearRouletteTimers])
+
+  const startDeathCountdown = useCallback((id: string) => {
+    rouletteTargetRef.current = id
+    let n = 5
+    setRoulette({ id, count: n })
+    const tick = () => {
+      n -= 1
+      if (n <= 0) {
+        const doomed = rouletteTargetRef.current   // nobody typed → BANG 💀
+        rouletteTargetRef.current = null
+        clearRouletteTimers()
+        setRoulette(null)
+        if (doomed) removeCell(doomed)
+        return
+      }
+      setRoulette({ id, count: n })
+      rouletteTimersRef.current.push(setTimeout(tick, 1000))
+    }
+    rouletteTimersRef.current.push(setTimeout(tick, 1000))
+  }, [clearRouletteTimers, removeCell])
+
+  const russianRoulette = useCallback((mode: 'gentle' | 'death') => {
+    const list = cellsRef.current
+    if (spinningRef.current || list.length < 2) return
+    defuseRoulette()                              // drop any prior countdown
+    if (!lightingRef.current) setLighting(true)   // the turntable needs Lighting on
+    spinningRef.current = true
+    setSpinning(true)
+    const startIdx = Math.max(0, list.findIndex((c) => c.id === spotlightRef.current))
+    const winnerIdx = Math.floor(Math.random() * list.length)
+    const LOOPS = 2                               // full turns before it settles
+    const total = LOOPS * list.length + ((winnerIdx - startIdx + list.length) % list.length)
+    let step = 1
+    const hop = () => {
+      const idx = (startIdx + step) % list.length
+      const last = step >= total
+      spotCtl.current.promote(list[idx].id, { silent: !last })   // rotate one notch
+      if (last) {
+        spinningRef.current = false
+        setSpinning(false)
+        if (mode === 'death') startDeathCountdown(list[idx].id)
+        return
+      }
+      step += 1
+      // Ease-out: the wheel slows as it nears the winner (delay grows with p²).
+      const p = step / total
+      rouletteTimersRef.current.push(setTimeout(hop, 55 + p * p * 470))
+    }
+    // Small kick so Lighting has flipped on before the first hop.
+    rouletteTimersRef.current.push(setTimeout(hop, lightingRef.current ? 0 : 140))
+  }, [defuseRoulette, startDeathCountdown])
 
   const setCellCli = useCallback((id: string, cliType: CliType) => {
     setCells((prev) => prev.map((c) => (c.id === id ? { ...c, cliType } : c)))
@@ -1533,10 +2095,211 @@ function AgentGridInner({
     })
   }, [])
 
+  // ── Overlay window helpers ─────────────────────────────────────────────────
+  // Overlay windows overlap freely; stacking is a pure z-index. "Bring to front"
+  // just bumps this pane above the current max — the cells array (and thus the
+  // render order / sidebar order) never changes, so nothing remounts and the
+  // terminal's PTY survives untouched.
+  const bringToFront = useCallback((id: string) => {
+    setFloatGeom((prev) => {
+      const g = prev[id]
+      if (!g) return prev
+      const maxZ = Math.max(0, ...Object.values(prev).map((v) => v.z))
+      if (g.z >= maxZ) return prev
+      return { ...prev, [id]: { ...g, z: maxZ + 1 } }
+    })
+  }, [])
+
+  // Ensure every current cell has a floating rect (entering overlay / new pane).
+  // Seed from the pane's current grid slot so toggling into overlay keeps windows
+  // exactly where they were — then the user scatters them from there.
+  const ensureFloatGeoms = useCallback(() => {
+    setFloatGeom((prev) => {
+      let maxZ = Math.max(0, ...Object.values(prev).map((v) => v.z))
+      let changed = false
+      const next = { ...prev }
+      cellsRef.current.forEach((c, i) => {
+        if (next[c.id]) return
+        const seed = gridPxRef.current(c.id) || {
+          x: 40 + (i % 4) * 48,
+          y: 40 + (i % 4) * 40,
+          w: 480,
+          h: 320,
+        }
+        next[c.id] = { ...seed, z: ++maxZ }
+        changed = true
+      })
+      return changed ? next : prev
+    })
+  }, [])
+
+  // ── Sidebar: focus / reorder ────────────────────────────────────────────────
+  const focusCellFromList = useCallback((id: string) => {
+    setActive(id)
+    if (viewModeRef.current === 'overlay') bringToFront(id)
+    // In Lighting, explicitly switching to a pane stages it (moves it to the
+    // spotlight) — including a bare shell. The "shells never grab the stage" rule
+    // only governs AUTOMATIC staging (markFinished / reflow-bounced focus); when
+    // you deliberately pick a pane, you want to see it centre-stage regardless of
+    // its CLI. Without this you can't switch to a shell while Lighting is on.
+    if (lightingRef.current && id !== spotlightRef.current) {
+      spotCtl.current.promote(id)
+    }
+    // Give keyboard focus to that pane's terminal. Focus AFTER a tick so any
+    // z-order/geometry re-render from setActive has settled first (otherwise the
+    // pane is selected but the keyboard focus doesn't stick and you can't type).
+    const el = document.getElementById(`cell-wrap-${id}`)
+    el?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+    setTimeout(() => {
+      cellApiRef.current.get(id)?.fit()
+      cellApiRef.current.get(id)?.focus()
+    }, 0)
+  }, [bringToFront, setActive])
+
+  // Cycle keyboard focus through the open terminals (Ctrl+Tab / Ctrl+Shift+Tab),
+  // in sidebar order, wrapping around. In overlay the target is also raised.
+  const cycleActive = useCallback((dir: 1 | -1) => {
+    const list = cellsRef.current
+    if (list.length === 0) return
+    const cur = activeCellIdRef.current
+    const i = list.findIndex((c) => c.id === cur)
+    const nextIdx = i < 0
+      ? (dir === 1 ? 0 : list.length - 1)
+      : (i + dir + list.length) % list.length
+    focusCellFromList(list[nextIdx].id)
+  }, [focusCellFromList])
+
+  const reorderCells = useCallback((fromId: string, toId: string) => {
+    setCells((prev) => {
+      const from = prev.findIndex((c) => c.id === fromId)
+      const to = prev.findIndex((c) => c.id === toId)
+      if (from < 0 || to < 0 || from === to) return prev
+      const next = [...prev]
+      const [moved] = next.splice(from, 1)
+      next.splice(to, 0, moved)
+      return next
+    })
+  }, [])
+
+  // ── Prompt-completion signals from panes ────────────────────────────────────
+  const markActivity = useCallback((id: string) => {
+    setStatuses((prev) => (prev[id] === 'running' ? prev : { ...prev, [id]: 'running' }))
+    // A newly-active pane is no longer "waiting for attention".
+    setFinishedIds((prev) => {
+      if (!prev.has(id)) return prev
+      const next = new Set(prev); next.delete(id); return next
+    })
+    const t = attentionTimers.current.get(id)
+    if (t) { clearTimeout(t); attentionTimers.current.delete(id) }
+    // Lighting: a queued pane that started working again is no longer "waiting".
+    // The spotlight itself is left alone if it resumes — we keep watching it.
+    const q = lightQueueRef.current
+    const qi = q.indexOf(id); if (qi >= 0) q.splice(qi, 1)
+  }, [])
+
+  const markFinished = useCallback((id: string) => {
+    setStatuses((prev) => ({ ...prev, [id]: 'idle' }))
+    setFinishedIds((prev) => { const next = new Set(prev); next.add(id); return next })
+    const prevT = attentionTimers.current.get(id)
+    if (prevT) clearTimeout(prevT)
+    attentionTimers.current.set(id, setTimeout(() => {
+      setFinishedIds((prev) => { const next = new Set(prev); next.delete(id); return next })
+      attentionTimers.current.delete(id)
+    }, ATTENTION_MS))
+    // Lighting spotlight: only panes actually running a CLI are eligible (a bare
+    // shell never grabs the stage). Empty stage → take it; busy stage → queue
+    // WITHOUT moving anything (the current spotlight keeps the keyboard).
+    if (lightingRef.current) {
+      const cell = cellsRef.current.find((c) => c.id === id)
+      const isCli = !!cell && cell.cliType !== 'shell'
+      if (isCli) {
+        if (spotlightRef.current === null) {
+          spotCtl.current.promote(id)
+        } else if (id !== spotlightRef.current && !lightQueueRef.current.includes(id)) {
+          // If the current spotlight's dwell already lapsed unattended (no timer
+          // pending, never engaged), a freshly-finished pane takes the stage now
+          // instead of waiting forever. Otherwise it queues without moving anything.
+          if (dwellRef.current === null && !engagedRef.current) {
+            spotCtl.current.promote(id)
+          } else {
+            lightQueueRef.current.push(id)
+          }
+        }
+      }
+    }
+  }, [])
+
+  // User typed into a pane → in Lighting, if it's the spotlight, mark it engaged
+  // so the dwell hand-off never pulls it out from under you ("seguir = escribir").
+  const markUserInput = useCallback((id: string) => {
+    // Typing into the doomed pane during a 'death' countdown defuses it. 💥→😌
+    if (rouletteTargetRef.current === id) defuseRoulette()
+    if (lightingRef.current && spotlightRef.current === id) {
+      engagedRef.current = true
+      if (dwellRef.current) { clearTimeout(dwellRef.current); dwellRef.current = null }
+    }
+  }, [defuseRoulette])
+
+  // Clean up any pending attention/dwell/roulette timers on unmount.
+  useEffect(() => () => {
+    attentionTimers.current.forEach((t) => clearTimeout(t))
+    if (dwellRef.current) clearTimeout(dwellRef.current)
+    rouletteTimersRef.current.forEach(clearTimeout)
+  }, [])
+
+  // ── Mode toggles ────────────────────────────────────────────────────────────
+  const toggleOverlay = useCallback(() => {
+    setViewMode((m) => {
+      const next = m === 'overlay' ? 'grid' : 'overlay'
+      if (next === 'overlay') ensureFloatGeoms()
+      setTimeout(() => cellApiRef.current.forEach((a) => a?.fit()), 90)
+      return next
+    })
+  }, [ensureFloatGeoms])
+
+  const toggleLighting = useCallback(() => setLighting((v) => {
+    if (v) resetSpotlight()  // leaving Lighting → drop the stage state
+    return !v
+  }), [resetSpotlight])
+  const toggleSidebar = useCallback(() => setSidebarOpen((v) => !v), [])
+
+  // While in overlay mode, any pane added later still needs a floating geometry.
+  useEffect(() => {
+    if (viewMode === 'overlay') ensureFloatGeoms()
+  }, [viewMode, cells, ensureFloatGeoms])
+
+  // Global shortcuts for the layout modes — these work even while a pane has
+  // keyboard focus (unlike the grid nav keys, which the focused pane consumes).
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const mod = e.ctrlKey || e.metaKey
+      const k = e.key.toLowerCase()
+      // Alt+Tab cycles focus across terminals (Alt+Shift+Tab goes back), per the
+      // user's request. NOTE: most Linux window managers grab Alt+Tab for their
+      // own app switcher before the app ever sees it — if that happens here it
+      // simply won't fire. Ctrl+Tab is kept as a guaranteed-reachable fallback.
+      if ((e.altKey || e.ctrlKey) && !e.metaKey && k === 'tab') {
+        // Runs in the CAPTURE phase (below), so it fires BEFORE the focused
+        // pane's xterm handler ever sees the key. stopImmediatePropagation makes
+        // Ctrl+Tab always "win": no other listener acts, the shell gets no tab,
+        // and focus can't drift. (Alt+Tab is usually eaten by the WM upstream.)
+        e.preventDefault(); e.stopImmediatePropagation(); cycleActive(e.shiftKey ? -1 : 1); return
+      }
+      if (mod && e.shiftKey && k === 'o') { e.preventDefault(); toggleOverlay() }
+      else if (mod && e.shiftKey && k === 'y') { e.preventDefault(); toggleLighting() }
+      else if (mod && e.shiftKey && k === 'b') { e.preventDefault(); toggleSidebar() }
+    }
+    window.addEventListener('keydown', onKey, true)
+    return () => window.removeEventListener('keydown', onKey, true)
+  }, [toggleOverlay, toggleLighting, toggleSidebar, cycleActive])
+
   // Expose imperative controls to the host page (palette / buttons).
   useEffect(() => {
-    apiRef.current = { addTerminal: () => addCell(), arrange, closeActive, importSessions }
-  }, [apiRef, addCell, arrange, closeActive, importSessions])
+    apiRef.current = {
+      addTerminal: () => addCell(), arrange, closeActive, importSessions,
+      toggleOverlay, toggleLighting, toggleSidebar, cycleTerminal: cycleActive,
+    }
+  }, [apiRef, addCell, arrange, closeActive, importSessions, toggleOverlay, toggleLighting, toggleSidebar, cycleActive])
 
   // Grid-level keyboard shortcuts for when NO terminal is focused (the focused
   // case is handled inside the pane so the keys don't reach the shell).
@@ -1556,21 +2319,168 @@ function AgentGridInner({
     return () => window.removeEventListener('keydown', onKey)
   }, [addCell, closeActive, arrange, zoom])
 
-  const handleLayoutChange = (_layout: unknown, allLayouts: ResponsiveLayouts) => {
-    setLayouts(allLayouts)
-  }
+  // ── Geometry: grid units ⇄ pixels ──────────────────────────────────────────
+  // Width available for the workspace once the terminal-list rail is subtracted.
+  const gridWidth = Math.max(240, sidebarOpen ? containerWidth - SIDEBAR_W - SIDEBAR_GAP : containerWidth)
+  // Height of the absolutely-positioned workspace (below the toolbar).
+  const contentH = useMemo(() => {
+    const toolbarH = toolbarRef.current ? toolbarRef.current.offsetHeight + 12 : TOOLBAR_H
+    return Math.max(200, containerHeight - toolbarH - DOCK_H)
+  }, [containerHeight, sidebarOpen, viewMode, cells])
 
   // Dynamic row height: divide the visible area by the current layout's row span
   // so the whole grid always fits the viewport — no page scroll to lose panes.
   const rowHeight = useMemo(() => {
     const items = (layouts.lg || []) as LayoutItem[]
-    const span = items.length ? Math.max(...items.map((it) => it.y + it.h)) : GRID_ROWS
-    // Measured toolbar height (incl. its bottom margin) when mounted; estimate otherwise.
-    const toolbarH = toolbarRef.current ? toolbarRef.current.offsetHeight + 12 : TOOLBAR_H
-    const avail = containerHeight - toolbarH
-    if (avail <= 0 || span <= 0) return 40
-    return Math.max(16, Math.floor((avail - (span - 1) * GRID_MARGIN) / span))
-  }, [layouts, containerHeight])
+    const span = items.length ? Math.max(GRID_ROWS, ...items.map((it) => it.y + it.h)) : GRID_ROWS
+    if (span <= 0) return 40
+    return Math.max(16, Math.floor((contentH - (span - 1) * GRID_MARGIN) / span))
+  }, [layouts, contentH])
+
+  // One grid column's width in px (12 columns + inter-column margins).
+  const colW = Math.max(1, (gridWidth - (GRID_COLS - 1) * GRID_MARGIN) / GRID_COLS)
+  const colStep = colW + GRID_MARGIN
+  const rowStep = rowHeight + GRID_MARGIN
+
+  // Project a pane's grid slot to a pixel rectangle.
+  const gridPx = useCallback((id: string): Geom | null => {
+    const it = ((layouts.lg || []) as LayoutItem[]).find((l) => l.i === id)
+    if (!it) return null
+    return {
+      x: Math.round(it.x * colStep),
+      y: Math.round(it.y * rowStep),
+      w: Math.round(it.w * colW + (it.w - 1) * GRID_MARGIN),
+      h: Math.round(it.h * rowHeight + (it.h - 1) * GRID_MARGIN),
+    }
+  }, [layouts, colStep, rowStep, colW, rowHeight])
+  gridPxRef.current = gridPx
+
+  // Commit a dragged/resized pixel rect back to the grid: snap to the nearest
+  // grid cell. Overlapping is allowed (Arrange re-tidies); we never shove peers.
+  const commitGridGeom = useCallback((id: string, g: Geom) => {
+    const x = Math.max(0, Math.round(g.x / colStep))
+    const y = Math.max(0, Math.round(g.y / rowStep))
+    const w = Math.max(2, Math.round((g.w + GRID_MARGIN) / colStep))
+    const h = Math.max(2, Math.round((g.h + GRID_MARGIN) / rowStep))
+    setLayouts((prev) => ({
+      ...prev,
+      lg: ((prev.lg || []) as LayoutItem[]).map((l) =>
+        l.i === id ? { ...l, x: Math.min(x, GRID_COLS - w), y, w, h } : l,
+      ),
+    }))
+    setTimeout(() => cellApiRef.current.get(id)?.fit(), 60)
+  }, [colStep, rowStep])
+
+  // Commit a dragged/resized pixel rect in overlay mode: store it verbatim.
+  const commitFloatGeom = useCallback((id: string, g: Geom) => {
+    setFloatGeom((prev) => {
+      const cur = prev[id]
+      return { ...prev, [id]: { ...g, z: cur?.z ?? 1 } }
+    })
+    setTimeout(() => cellApiRef.current.get(id)?.fit(), 60)
+  }, [])
+
+  // Lighting mode: the spotlight pane fills the stage, everyone else a bottom
+  // filmstrip; with no spotlight it's a calm even grid. spotlightId only moves
+  // on promote/hand-off, so this never yanks around on finish/resume churn.
+  const lightingGeoms = useMemo(
+    () => (lighting ? computeLightingGeoms(cells, spotlightId, gridWidth, contentH) : {}),
+    [lighting, cells, spotlightId, gridWidth, contentH],
+  )
+  const lightingActive = lighting && Object.keys(lightingGeoms).length > 0
+
+  // Dock launch: paste the plugin's prompt into the active terminal for
+  // review-before-send. Falls back to the most-recent pane if none is focused,
+  // focusing it first so the paste lands somewhere visible.
+  const launchDock = useCallback((pluginId: string) => {
+    const item = PLUGIN_DOCK.find((p) => p.id === pluginId)
+    if (!item) return
+    const target = activeCellIdRef.current || cellsRef.current[cellsRef.current.length - 1]?.id
+    if (!target) return
+    setActive(target)
+    const api = cellApiRef.current.get(target)
+    api?.focus()
+    api?.seed(item.prompt)
+  }, [setActive])
+
+  // Shared cell renderer so grid + overlay modes stay in lockstep on props.
+  const renderTerminalCell = (cell: GridCell) => (
+    <TerminalCell
+      cellId={cell.id}
+      socket={socket}
+      cliType={cell.cliType}
+      name={cell.name}
+      fontSize={fontSize}
+      opacity={terminalOpacity}
+      hostedApiUrl={hostedApiUrl}
+      hostedToken={hostedToken}
+      hostedUserId={hostedUserId}
+      hostedProjects={hostedProjects}
+      hostedProjectId={cell.hostedProjectId}
+      cwd={cell.cwd}
+      resumeId={cell.resumeId}
+      daemonRunning={!!(cell.hostedProjectId && daemonStatus[cell.hostedProjectId]?.running)}
+      attention={finishedIds.has(cell.id)}
+      onClose={() => removeCell(cell.id)}
+      onCliTypeChange={(v) => setCellCli(cell.id, v)}
+      onRename={(v) => setCellName(cell.id, v)}
+      onHostedProjectChange={(v) => setCellHostedProject(cell.id, v)}
+      onMakeAgent={() => openDaemonModal(cell.id)}
+      onPickFolder={() => setFolderPicker({ cellId: cell.id, initialPath: cell.cwd })}
+      onFocusCell={() => {
+        setActive(cell.id)
+        // In Lighting/carousel, focusing a side pane's terminal must also bring
+        // it to centre stage — otherwise the "active" pane wouldn't match the one
+        // shown front-and-centre in the carousel. This fires for shells too: a
+        // deliberate click is explicit selection, so you can stage a shell (the
+        // "shells never grab the stage" rule only blocks AUTOMATIC staging via
+        // markFinished). Guarded so it only fires on genuine user focus:
+        //   • not the current spotlight (promote's own focus() of the centre pane)
+        //   • not during a promote reflow (focus bouncing to a neighbour would
+        //     otherwise re-promote it → endless round-robin)
+        if (
+          lightingRef.current &&
+          cell.id !== spotlightRef.current &&
+          !suppressFocusPromoteRef.current
+        ) {
+          spotCtl.current.promote(cell.id)
+        }
+      }}
+      onNew={() => addCell()}
+      onArrange={arrange}
+      onZoom={zoom}
+      onActivity={() => markActivity(cell.id)}
+      onFinished={() => markFinished(cell.id)}
+      onUserInput={() => markUserInput(cell.id)}
+      registerApi={(api) => {
+        if (api) cellApiRef.current.set(cell.id, api)
+        else cellApiRef.current.delete(cell.id)
+      }}
+    />
+  )
+
+  // Left rail as tabs — shown alongside both modes.
+  const dockItems: DockItem[] = cells.map((c) => {
+    const disp = (c.name && c.name.trim())
+      || folderLabel(c.cwd)
+      || (CLI_OPTIONS.find((o) => o.value === c.cliType)?.label ?? c.cliType)
+    return { id: c.id, name: disp, cliType: c.cliType, label: disp }
+  })
+  const sidebarEl = sidebarOpen ? (
+    <div style={{ width: SIDEBAR_W }} className="shrink-0">
+      <TerminalListSidebar
+        items={dockItems}
+        activeId={activeCellId}
+        statuses={statuses}
+        finishedIds={finishedIds}
+        onFocus={focusCellFromList}
+        onClose={removeCell}
+        onReorder={reorderCells}
+        onAdd={() => addCell()}
+        onCollapse={() => setSidebarOpen(false)}
+      />
+    </div>
+  ) : null
 
   if (cells.length === 0) {
     return (
@@ -1604,17 +2514,119 @@ function AgentGridInner({
   }
 
   return (
-    <div>
-      <div ref={toolbarRef} className="mb-3 flex justify-end gap-2">
-        <Button onClick={arrange} size="sm" variant="outline" title="Auto-arrange & fit all panes (Ctrl+P)">
-          <LayoutGrid className="h-4 w-4" /> Arrange
-        </Button>
-        <Button onClick={() => setFolderPicker({ cellId: null })} size="sm" variant="outline" title="New terminal in a chosen folder">
-          <FolderOpen className="h-4 w-4" /> Open in folder…
-        </Button>
-        <Button onClick={() => addCell()} size="sm" variant="outline" title="New terminal (Alt+T)">
-          <Plus className="h-4 w-4" /> Add Terminal
-        </Button>
+    <div className="flex gap-2 overflow-hidden" style={{ height: containerHeight || '100%' }}>
+      {sidebarEl}
+      <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
+      <div ref={toolbarRef} className="mb-3 flex items-center gap-2">
+        {!sidebarOpen && (
+          <Button onClick={() => setSidebarOpen(true)} size="sm" variant="outline" title="Show terminals (Ctrl+Shift+B)">
+            <PanelLeftOpen className="h-4 w-4" />
+          </Button>
+        )}
+        <div className="flex-1" />
+
+        {/* Roulette — only meaningful in Lighting; sits just left of the View menu. */}
+        {lighting && cells.length >= 2 && (
+          <div className="flex items-center gap-0.5 rounded-md border border-white/10 bg-zinc-900/70 px-1 py-0.5">
+            <Dices className="mx-0.5 h-4 w-4 text-zinc-400" strokeWidth={1.75} />
+            <button
+              onClick={() => russianRoulette('gentle')}
+              disabled={spinning}
+              className="flex items-center gap-1 rounded px-2 py-0.5 text-xs font-medium text-emerald-300 hover:bg-emerald-500/15 disabled:opacity-40"
+              title="Spin and land on a random terminal (harmless)"
+            >
+              <Shuffle className="h-3.5 w-3.5" strokeWidth={1.75} /> Spin
+            </button>
+            <button
+              onClick={() => russianRoulette('death')}
+              disabled={spinning}
+              className="flex items-center gap-1 rounded px-2 py-0.5 text-xs font-medium text-red-300 hover:bg-red-500/20 disabled:opacity-40"
+              title="Spin; if you don't type a prompt within 5s, the terminal closes"
+            >
+              <Skull className="h-3.5 w-3.5" strokeWidth={1.75} /> Sudden death
+            </button>
+          </div>
+        )}
+
+        {/* View menu — the three layout modes (Overlay / Lighting / Arrange) in one place. */}
+        <div className="relative">
+          <Button
+            onClick={() => { setViewMenuOpen((v) => !v); setAddMenuOpen(false) }}
+            size="sm"
+            variant={viewMode === 'overlay' || lighting ? 'default' : 'outline'}
+            title="Layout modes"
+          >
+            {lighting ? <Zap className="h-4 w-4 text-amber-300" /> : viewMode === 'overlay' ? <Layers className="h-4 w-4" /> : <LayoutGrid className="h-4 w-4" />}
+            {lighting ? 'Lighting' : viewMode === 'overlay' ? 'Overlay' : 'View'}
+            <ChevronDown className="h-3.5 w-3.5 opacity-70" />
+          </Button>
+          {viewMenuOpen && (
+            <>
+              <div className="fixed inset-0 z-40" onClick={() => setViewMenuOpen(false)} />
+              <div className="absolute right-0 top-full z-50 mt-1 w-56 overflow-hidden rounded-lg border border-white/10 bg-zinc-900/95 py-1 shadow-2xl backdrop-blur">
+                <button
+                  onClick={() => { toggleOverlay(); setViewMenuOpen(false) }}
+                  className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs hover:bg-white/5 ${viewMode === 'overlay' ? 'text-sky-300' : 'text-zinc-200'}`}
+                >
+                  <Layers className="h-4 w-4" /> <span className="flex-1">Overlay windows</span>
+                  {viewMode === 'overlay' && <Check className="h-3.5 w-3.5" />}
+                  <span className="font-mono text-[10px] text-zinc-500">⌘⇧O</span>
+                </button>
+                <button
+                  onClick={() => { toggleLighting(); setViewMenuOpen(false) }}
+                  className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs hover:bg-white/5 ${lighting ? 'text-amber-300' : 'text-zinc-200'}`}
+                >
+                  <Zap className="h-4 w-4" /> <span className="flex-1">Lighting</span>
+                  {lighting && <Check className="h-3.5 w-3.5" />}
+                  <span className="font-mono text-[10px] text-zinc-500">⌘⇧Y</span>
+                </button>
+                <button
+                  onClick={() => { arrange(); setViewMenuOpen(false) }}
+                  disabled={viewMode !== 'grid'}
+                  className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs text-zinc-200 hover:bg-white/5 disabled:opacity-40"
+                >
+                  <LayoutGrid className="h-4 w-4" /> <span className="flex-1">Arrange &amp; fit</span>
+                  <span className="font-mono text-[10px] text-zinc-500">⌘P</span>
+                </button>
+              </div>
+            </>
+          )}
+        </div>
+
+        {/* Add split-button — click adds a terminal; caret offers "open in a folder". */}
+        <div className="relative flex items-center">
+          <Button onClick={() => addCell()} size="sm" title="New terminal (Alt+T)" className="rounded-r-none">
+            <Plus className="h-4 w-4" /> Add Terminal
+          </Button>
+          <Button
+            onClick={() => { setAddMenuOpen((v) => !v); setViewMenuOpen(false) }}
+            size="sm"
+            title="More ways to add a terminal"
+            className="rounded-l-none border-l border-white/20 px-1.5"
+          >
+            <ChevronDown className="h-3.5 w-3.5" />
+          </Button>
+          {addMenuOpen && (
+            <>
+              <div className="fixed inset-0 z-40" onClick={() => setAddMenuOpen(false)} />
+              <div className="absolute right-0 top-full z-50 mt-1 w-56 overflow-hidden rounded-lg border border-white/10 bg-zinc-900/95 py-1 shadow-2xl backdrop-blur">
+                <button
+                  onClick={() => { addCell(); setAddMenuOpen(false) }}
+                  className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs text-zinc-200 hover:bg-white/5"
+                >
+                  <Plus className="h-4 w-4" /> <span className="flex-1">New terminal</span>
+                  <span className="font-mono text-[10px] text-zinc-500">Alt+T</span>
+                </button>
+                <button
+                  onClick={() => { setFolderPicker({ cellId: null }); setAddMenuOpen(false) }}
+                  className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs text-zinc-200 hover:bg-white/5"
+                >
+                  <FolderOpen className="h-4 w-4" /> <span className="flex-1">Open in a folder…</span>
+                </button>
+              </div>
+            </>
+          )}
+        </div>
       </div>
 
       {enrollMsg && (
@@ -1673,53 +2685,91 @@ function AgentGridInner({
         />
       )}
 
-      <ResponsiveGridLayout
-        width={containerWidth}
-        layouts={layouts}
-        breakpoints={{ lg: 1200, md: 996, sm: 768 }}
-        cols={{ lg: 12, md: 8, sm: 4 }}
-        rowHeight={rowHeight}
-        margin={[GRID_MARGIN, GRID_MARGIN]}
-        containerPadding={[0, 0]}
-        onLayoutChange={handleLayoutChange}
-        dragConfig={{ enabled: true, handle: '.drag-handle', bounded: true }}
-        resizeConfig={{ enabled: true }}
+      {/* One absolute-positioning engine for both modes. Grid mode derives each
+          window's rect from its tidy grid slot (snap on drop); overlay mode uses
+          free pixel geometry that overlaps without shoving. The SAME window nodes
+          render in both modes, so a toggle never re-parents a pane — terminals
+          (and their PTYs) are never torn down. */}
+      <div
+        className="relative min-h-0 flex-1 overflow-hidden"
+        style={{
+          width: gridWidth,
+          height: contentH,
+          // Cover-flow depth: give the stage a vanishing point so the carousel's
+          // angled side cards read as turned-in-3D rather than merely skewed.
+          perspective: lightingActive ? 2600 : undefined,
+          perspectiveOrigin: lightingActive ? '50% 46%' : undefined,
+        }}
       >
-        {cells.map((cell) => (
-          <div key={cell.id} className="h-full">
-            <TerminalCell
-              cellId={cell.id}
-              socket={socket}
-              cliType={cell.cliType}
-              name={cell.name}
-              fontSize={fontSize}
-              opacity={terminalOpacity}
-              hostedApiUrl={hostedApiUrl}
-              hostedToken={hostedToken}
-              hostedUserId={hostedUserId}
-              hostedProjects={hostedProjects}
-              hostedProjectId={cell.hostedProjectId}
-              cwd={cell.cwd}
-              resumeId={cell.resumeId}
-              daemonRunning={!!(cell.hostedProjectId && daemonStatus[cell.hostedProjectId]?.running)}
-              onClose={() => removeCell(cell.id)}
-              onCliTypeChange={(v) => setCellCli(cell.id, v)}
-              onRename={(v) => setCellName(cell.id, v)}
-              onHostedProjectChange={(v) => setCellHostedProject(cell.id, v)}
-              onMakeAgent={() => openDaemonModal(cell.id)}
-              onPickFolder={() => setFolderPicker({ cellId: cell.id, initialPath: cell.cwd })}
-              onFocusCell={() => { activeCellIdRef.current = cell.id }}
-              onNew={() => addCell()}
-              onArrange={arrange}
-              onZoom={zoom}
-              registerApi={(api) => {
-                if (api) cellApiRef.current.set(cell.id, api)
-                else cellApiRef.current.delete(cell.id)
+        {cells.map((cell) => {
+          const overlay = viewMode === 'overlay' && !lightingActive
+          const fg = floatGeom[cell.id]
+          const attention = finishedIds.has(cell.id)
+          // Lighting mode overrides geometry to stage the attention pane(s).
+          // Otherwise: grid slot (grid mode) or stored free rect (overlay).
+          const rect: Geom = (lightingActive ? lightingGeoms[cell.id] : undefined)
+            || (overlay ? fg : gridPx(cell.id))
+            || gridPx(cell.id)
+            || { x: 0, y: 0, w: Math.min(480, gridWidth), h: 320 }
+          const z = lightingActive
+            ? (rect?.z ?? (activeCellId === cell.id ? 4 : attention ? 3 : 1))
+            : overlay ? (fg?.z ?? 1) : (activeCellId === cell.id ? 2 : 1)
+          return (
+            <FloatingWindow
+              key={cell.id}
+              id={cell.id}
+              geom={rect}
+              z={z}
+              overlay={overlay}
+              active={activeCellId === cell.id}
+              bounded={!overlay}
+              animate={lightingActive}
+              containerW={gridWidth}
+              containerH={contentH}
+              onFocus={(fid) => {
+                setActive(fid)
+                if (viewModeRef.current === 'overlay') bringToFront(fid)
+                // In Lighting, clicking a filmstrip pane promotes it to the stage.
+                if (lightingRef.current && fid !== spotlightRef.current) spotCtl.current.promote(fid)
               }}
-            />
+              onCommit={overlay ? commitFloatGeom : commitGridGeom}
+            >
+              {renderTerminalCell(cell)}
+            </FloatingWindow>
+          )
+        })}
+
+        {/* (Roulette controls live in the toolbar now — see the View-menu row.) */}
+
+        {/* Death countdown — pointer-events-none so keystrokes still reach the
+            doomed terminal (typing into it is how you defuse). */}
+        {roulette && (
+          <div className="pointer-events-none absolute inset-0 z-[200] flex items-center justify-center">
+            <div className="animate-pulse rounded-2xl border-2 border-red-500/70 bg-black/70 px-10 py-6 text-center shadow-2xl backdrop-blur-sm">
+              <div className="flex items-center justify-center gap-3 text-red-400">
+                <Skull className="h-12 w-12" strokeWidth={1.5} />
+                <span className="text-6xl font-black leading-none tabular-nums">{roulette.count}</span>
+              </div>
+              <div className="mt-3 text-sm font-semibold text-red-200">Type a prompt or it closes!</div>
+            </div>
           </div>
-        ))}
-      </ResponsiveGridLayout>
+        )}
+      </div>
+
+      {/* Bottom docks: LEFT = open terminals (click to switch/stage), RIGHT =
+          activated plugins (click seeds its prompt into the active terminal). */}
+      <div className="pointer-events-none flex w-full shrink-0 flex-wrap items-end justify-center gap-3 pb-2 pt-1">
+        <TerminalSwitcherDock
+          items={dockItems}
+          activeId={activeCellId}
+          statuses={statuses}
+          finishedIds={finishedIds}
+          onSwitch={focusCellFromList}
+          onAdd={() => addCell()}
+        />
+        <PluginDock items={PLUGIN_DOCK} onLaunch={launchDock} />
+      </div>
+      </div>
     </div>
   )
 }
@@ -1729,12 +2779,19 @@ export const AgentGrid = forwardRef<AgentGridHandle, AgentGridProps>(function Ag
 ) {
   const { containerRef, width } = useContainerWidth()
   const [height, setHeight] = useState(0)
-  const apiRef = useRef<AgentGridHandle>({ addTerminal() {}, arrange() {}, closeActive() {}, importSessions() {} })
+  const apiRef = useRef<AgentGridHandle>({
+    addTerminal() {}, arrange() {}, closeActive() {}, importSessions() {},
+    toggleOverlay() {}, toggleLighting() {}, toggleSidebar() {}, cycleTerminal() {},
+  })
   useImperativeHandle(ref, () => ({
     addTerminal: () => apiRef.current.addTerminal(),
     arrange: () => apiRef.current.arrange(),
     closeActive: () => apiRef.current.closeActive(),
     importSessions: (specs) => apiRef.current.importSessions(specs),
+    toggleOverlay: () => apiRef.current.toggleOverlay(),
+    toggleLighting: () => apiRef.current.toggleLighting(),
+    toggleSidebar: () => apiRef.current.toggleSidebar(),
+    cycleTerminal: (dir) => apiRef.current.cycleTerminal(dir),
   }), [])
 
   // Available height for the grid = the scroll container's inner content box

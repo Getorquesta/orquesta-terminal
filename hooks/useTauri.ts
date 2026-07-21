@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useRef, useState, useCallback } from 'react'
+import { useEffect, useRef, useState, useCallback, useMemo } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 
@@ -123,13 +123,16 @@ export function useTauri(_opts: { projectId?: string; sessionToken?: string } = 
     [],
   )
 
-  const handle: TauriHandle = {
-    emit,
-    on,
-    off,
-    connected,
-    id: 'tauri-ipc',
-  }
+  // Memoize the handle so its identity is STABLE across renders. emit/on/off are
+  // already useCallback-stable, so this only changes when `connected` flips (once,
+  // at startup). Critical: consumers like TerminalCell key their PTY-lifecycle
+  // effect on `socket`; an unmemoized handle (new object every render) made that
+  // effect re-run on every parent re-render — tearing down and force-ending the
+  // live PTY (→ "Session not found" on the next keystroke, so typing died).
+  const handle: TauriHandle = useMemo(
+    () => ({ emit, on, off, connected, id: 'tauri-ipc' }),
+    [emit, on, off, connected],
+  )
 
   return {
     socket: handle,     // backward-compat: callers do const { socket } = useTauri()

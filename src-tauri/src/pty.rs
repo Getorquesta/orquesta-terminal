@@ -361,9 +361,13 @@ pub fn resize_session(
     state: &AppState,
 ) -> Result<(), String> {
     let sessions = state.sessions.lock().unwrap();
-    let session = sessions
-        .get(session_id)
-        .ok_or_else(|| format!("Session not found: {session_id}"))?;
+    // A resize can race ahead of session_start (the frontend delays the start by
+    // ~100ms to settle the pane size) or land just after a session ends. Resizing
+    // a session that isn't in the map is a harmless no-op — treat it as success
+    // instead of an error so it doesn't spam the console. (Input still errors.)
+    let Some(session) = sessions.get(session_id) else {
+        return Ok(());
+    };
 
     // Actually resize the PTY (TIOCSWINSZ) so TUI apps see the real terminal size
     // and redraw correctly — otherwise their frames don't clear and output doubles.
