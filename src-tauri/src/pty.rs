@@ -19,6 +19,68 @@ fn cli_or_shell(bin: &str, install_hint: &str, env_extras: Vec<(String, String)>
     (shell, vec!["-c".to_string(), msg], env_extras)
 }
 
+/// Remove the AppImage mount segments from a `PATH`-style (`:`-separated) value.
+/// Returns the remaining real-system segments joined back together (may be empty).
+fn strip_mount_paths(value: &str, appdir: Option<&str>, mount_prefix: &str) -> String {
+    value
+        .split(':')
+        .filter(|seg| {
+            !seg.is_empty()
+                && !seg.contains(mount_prefix)
+                && appdir.map_or(true, |d| !seg.starts_with(d))
+        })
+        .collect::<Vec<_>>()
+        .join(":")
+}
+
+/// Build the environment for a spawned PTY.
+///
+/// When Orquesta Terminal runs as an AppImage, its runtime exports variables
+/// (`PYTHONHOME`, `PYTHONPATH`, `LD_LIBRARY_PATH`, `GTK_PATH`, …) pointing into
+/// the read-only mount at `$APPDIR` (`/tmp/.mount_*`). Inheriting those into a
+/// user's shell hijacks system tools — e.g. `python3` dies with
+/// `ModuleNotFoundError: No module named 'encodings'`. Here we drop the runtime's
+/// own vars, prefer any `<VAR>_ORIG` backup the runtime stashed, and strip mount
+/// path segments from the rest (dropping vars that end up empty). Outside an
+/// AppImage the environment is passed through unchanged.
+fn build_pty_env(env_extras: &[(String, String)]) -> Vec<(String, String)> {
+    const MOUNT_PREFIX: &str = "/tmp/.mount_";
+    // Variables the AppImage runtime uses for its own bookkeeping — never forward.
+    const RUNTIME_VARS: &[&str] = &["APPDIR", "APPIMAGE", "ARGV0", "OWD"];
+
+    let appdir = std::env::var("APPDIR").ok();
+    let is_appimage = appdir.is_some() || std::env::var("APPIMAGE").is_ok();
+
+    let mut result: Vec<(String, String)> = Vec::new();
+    for (k, v) in std::env::vars() {
+        if !is_appimage {
+            result.push((k, v));
+            continue;
+        }
+        if RUNTIME_VARS.contains(&k.as_str()) || k.ends_with("_ORIG") {
+            continue;
+        }
+        // Prefer the original value the runtime backed up, if any.
+        let value = std::env::var(format!("{k}_ORIG")).ok().unwrap_or(v);
+        let points_into_mount = value.contains(MOUNT_PREFIX)
+            || appdir.as_deref().map_or(false, |d| value.contains(d));
+        if points_into_mount {
+            let cleaned = strip_mount_paths(&value, appdir.as_deref(), MOUNT_PREFIX);
+            if cleaned.is_empty() {
+                continue; // e.g. PYTHONHOME/PYTHONPATH with no real counterpart
+            }
+            result.push((k, cleaned));
+        } else {
+            result.push((k, value));
+        }
+    }
+
+    for (k, v) in env_extras {
+        result.push((k.clone(), v.clone()));
+    }
+    result
+}
+
 /// Resolve CLI command + args from a cliType string.
 fn resolve_command(
     cli_type: &str,
@@ -108,12 +170,10 @@ pub async fn spawn_session(
         .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().to_string_lossy().into());
     command.cwd(&work_dir);
 
-    // Inherit environment and add extras
+    // Inherit environment and add extras, stripping AppImage-injected vars
+    // (PYTHONHOME, LD_LIBRARY_PATH, …) that would otherwise hijack system tools.
     command.env_clear();
-    for (k, v) in std::env::vars() {
-        command.env(k, v);
-    }
-    for (k, v) in &env_extras {
+    for (k, v) in build_pty_env(&env_extras) {
         command.env(k, v);
     }
     command.env("TERM", "xterm-256color");
