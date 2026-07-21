@@ -1,16 +1,52 @@
 use std::io::Read;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use portable_pty::{CommandBuilder, PtySize};
 use serde_json::json;
 use tauri::Emitter;
 
 use crate::state::{AppState, PtySession};
 
-/// If `bin` is in PATH, return it directly; otherwise return a shell that
-/// prints a friendly "not installed" message and then stays open.
+/// The user's real login-shell PATH, computed once and cached.
+///
+/// A GUI launch (from a `.desktop` file / AppImage) does NOT source the user's
+/// shell profile, so the app process's PATH lacks nvm / npm-global / `~/.local/bin`.
+/// That makes installed CLIs (claude, orquesta, kimi, …) look "not installed" and
+/// unrunnable. We ask the login+interactive shell for its PATH once and reuse it
+/// for both detection and the spawned PTY environment. AppImage mount segments are
+/// stripped so we never reintroduce the poisoned paths.
+fn login_shell_path() -> Option<&'static str> {
+    static PATH: OnceLock<Option<String>> = OnceLock::new();
+    PATH.get_or_init(|| {
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".into());
+        let out = std::process::Command::new(&shell)
+            .args(["-lic", "printf %s \"$PATH\""])
+            .output()
+            .ok()?;
+        let raw = String::from_utf8_lossy(&out.stdout);
+        let appdir = std::env::var("APPDIR").ok();
+        let cleaned = strip_mount_paths(raw.trim(), appdir.as_deref(), "/tmp/.mount_");
+        if cleaned.is_empty() { None } else { Some(cleaned) }
+    })
+    .as_deref()
+}
+
+/// Absolute path to `bin`, searching the login-shell PATH first (so GUI launches
+/// resolve nvm/npm-global installs) and falling back to the app's own PATH.
+fn resolve_bin(bin: &str) -> Option<String> {
+    let cwd = std::env::current_dir().unwrap_or_default();
+    if let Some(p) = login_shell_path() {
+        if let Ok(path) = which::which_in(bin, Some(p), &cwd) {
+            return Some(path.to_string_lossy().into_owned());
+        }
+    }
+    which::which(bin).ok().map(|p| p.to_string_lossy().into_owned())
+}
+
+/// If `bin` is installed, return its absolute path directly; otherwise return a
+/// shell that prints a friendly "not installed" message and then stays open.
 fn cli_or_shell(bin: &str, install_hint: &str, env_extras: Vec<(String, String)>) -> (String, Vec<String>, Vec<(String, String)>) {
-    if which::which(bin).is_ok() {
-        return (bin.to_string(), vec![], env_extras);
+    if let Some(abs) = resolve_bin(bin) {
+        return (abs, vec![], env_extras);
     }
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".into());
     let msg = format!(
@@ -75,6 +111,13 @@ fn build_pty_env(env_extras: &[(String, String)]) -> Vec<(String, String)> {
         }
     }
 
+    // Replace PATH with the user's login-shell PATH so a GUI-launched app can still
+    // find nvm / npm-global / ~/.local/bin CLIs inside the terminal.
+    if let Some(p) = login_shell_path() {
+        result.retain(|(k, _)| k != "PATH");
+        result.push(("PATH".to_string(), p.to_string()));
+    }
+
     for (k, v) in env_extras {
         result.push((k.clone(), v.clone()));
     }
@@ -108,9 +151,10 @@ fn resolve_command(
                 args.push("--resume".into());
                 args.push(rid.into());
             }
-            ("claude".into(), args, env_extras)
+            let cmd = resolve_bin("claude").unwrap_or_else(|| "claude".into());
+            (cmd, args, env_extras)
         }
-        "orquesta" => cli_or_shell("orquesta", "npm i -g @getorquesta/cli", env_extras),
+        "orquesta" => cli_or_shell("orquesta", "npm i -g orquesta-cli", env_extras),
         "kimi"     => cli_or_shell("kimi",     "npm i -g @moonshot-ai/kimi-cli", env_extras),
         "kiro"     => cli_or_shell("kiro",     "Download Kiro at https://kiro.dev", env_extras),
         "opencode" => cli_or_shell("opencode", "npm i -g opencode", env_extras),
