@@ -1,19 +1,11 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Default capabilities for Orquesta Terminal",
+  "description": "Least-privilege IPC surface for the main window: the webview may call the app's own commands (PTY, cloud, fs helpers) and the clipboard, nothing else. File access happens inside those Rust commands, so the fs, dialog and shell plugins are deliberately not exposed over IPC.",
   "windows": ["main"],
   "permissions": [
     "core:default",
-    "shell:default",
-    "shell:allow-open",
-    "dialog:default",
-    "fs:default",
-    "fs:allow-home-read-recursive",
-    "fs:allow-home-write-recursive",
-    "fs:scope-home-recursive",
-    "clipboard-manager:default",
-    "clipboard-manager:allow-write-text",
-    "clipboard-manager:allow-read-text"
+    "clipboard-manager:allow-read-text",
+    "clipboard-manager:allow-write-text"
   ]
 }

@@ -149,6 +149,13 @@ Integrations with companion tools:
 | **Web** | ✅ Ready | `npm run dev` → browser, or [getorquesta.com](https://getorquesta.com) |
 | **TUI** | 🚧 Coming | `npm run tui` → terminal-native UI |
 
+## Security
+
+The app spawns real shells on your machine, so it is worth knowing where the
+boundaries are: [SECURITY.md](SECURITY.md) covers what the webview is allowed to
+call, what the app reads and writes, the CSP, and where tokens are stored. Found
+a vulnerability? Email security@getorquesta.com instead of opening an issue.
+
 ## Related
 
 - [orquesta-oss](https://github.com/Getorquesta/orquesta-oss) — Self-hosted backend
