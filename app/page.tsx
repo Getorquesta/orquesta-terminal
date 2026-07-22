@@ -103,7 +103,11 @@ export default function TerminalWorkspacePage() {
     (paneId: string, text: string) => gridRef.current?.dispatchPrompt(paneId, text) ?? false,
     [],
   )
-  const board = useKanban({ scope: projectId, panes, dispatchPrompt })
+  const readPaneTail = useCallback(
+    (paneId: string) => gridRef.current?.paneTail(paneId) ?? '',
+    [],
+  )
+  const board = useKanban({ scope: projectId, panes, dispatchPrompt, readPaneTail })
   // Prompts typed straight into a pane land on the board too. Routed through a
   // ref because `board` is a fresh object each render and an unstable callback
   // here would restart every pane's terminal.

@@ -414,8 +414,10 @@ test('a card dispatched into an already-busy pane still reaches Review', async (
   await page.getByTestId('card-run').first().click()
   await expect(page.getByTestId('count-running')).toHaveText('1', { timeout: 10_000 })
 
-  // Pane falls quiet — the card must follow it out of Running.
-  await expect(page.getByTestId('count-review')).toHaveText('1', { timeout: 10_000 })
+  // Pane falls quiet — the card must follow it out of Running. Generous: the
+  // pane's idle window is 2.5s of wall clock, and wall clock is exactly what a
+  // loaded machine running the whole suite in parallel is short of.
+  await expect(page.getByTestId('count-review')).toHaveText('1', { timeout: 25_000 })
   await expect(page.getByTestId('count-running')).toHaveText('0')
 })
 
@@ -458,4 +460,104 @@ test('dispatching to a pane whose session ended is refused, not swallowed', asyn
   await expect(page.getByTestId('count-backlog')).toHaveText('1')
   // …and nothing was written to the dead PTY.
   expect(await ptyWrites(page)).toEqual([])
+})
+
+// ── What the agent said ─────────────────────────────────────────────────────
+
+/** A believable tail from an agent: prose, a spinner frame, then a question. */
+const AGENT_TAIL =
+  '\x1b[2mThinking…\x1b[0m\r' +
+  '\x1b[1mSwap is exhausted\x1b[0m — if something asks for memory the OOM killer acts.\r\n' +
+  '\r\n' +
+  'Should I stop Waydroid or the dev server?\r\n' +
+  '╭──────────────────────────╮\r\n' +
+  '│ >                        │\r\n' +
+  '╰──────────────────────────╯\r\n' +
+  '  ? for shortcuts\r\n'
+
+/** Run the seeded card, feed it AGENT_TAIL, and wait for it to reach Review. */
+async function runUntilReview(page: Page) {
+  await openBoard(page)
+  await page.getByTestId('card-run').first().click()
+  await expect(page.getByTestId('count-running')).toHaveText('1', { timeout: 10_000 })
+  await emit(page, 'session:output', { sessionId: await liveSessionId(page), data: AGENT_TAIL })
+  await expect(page.getByTestId('count-review')).toHaveText('1', { timeout: 10_000 })
+}
+
+test('a reviewed card carries back what the agent actually said', async ({ page }) => {
+  await page.addInitScript(seed([card({ id: 'k_ram', text: 'check the ram' })]))
+  await page.goto('/')
+  await page.waitForSelector('header', { state: 'visible' })
+  await openLivePane(page)
+  await runUntilReview(page)
+
+  // The question is surfaced on its own — it's the decision waiting on a human.
+  await expect(page.getByTestId('card-suggestion')).toContainText('Should I stop Waydroid or the dev server?')
+
+  // The fuller output is one click away, with the TUI chrome stripped out.
+  await page.getByRole('button', { name: 'Agent output' }).click()
+  const out = page.getByTestId('card-result')
+  await expect(out).toContainText('Swap is exhausted')
+  await expect(out).not.toContainText('for shortcuts')
+  await expect(out).not.toContainText('│')
+})
+
+test('the agent’s suggestion can be queued as its own prompt', async ({ page }) => {
+  await page.addInitScript(seed([card({ id: 'k_ram', text: 'check the ram' })]))
+  await page.goto('/')
+  await page.waitForSelector('header', { state: 'visible' })
+  await openLivePane(page)
+  await runUntilReview(page)
+
+  await page.getByTestId('card-queue-suggestion').click()
+  // It arrives editable, in the agent's words — you send back your answer.
+  const box = page.getByTestId('card-queue-confirm').locator('xpath=../..').locator('textarea')
+  await box.fill('Stop Waydroid with waydroid session stop')
+  await page.getByTestId('card-queue-confirm').click()
+
+  await expect(page.getByTestId('count-queued')).toHaveText('1')
+  const queued = page.getByTestId('kanban-column-queued')
+  await expect(queued).toContainText('Stop Waydroid with waydroid session stop')
+  await expect(queued).toContainText('suggested')
+  // The original stays in Review — queueing a follow-up is not approving it.
+  await expect(page.getByTestId('count-review')).toHaveText('1')
+})
+
+test('a queued prompt can be rewritten in place', async ({ page }) => {
+  await page.addInitScript(seed([card({ id: 'k_edit', text: 'Close Waydroid?', column: 'queued' })]))
+  await page.goto('/')
+  await page.waitForSelector('header', { state: 'visible' })
+  await openBoard(page)
+
+  await page.getByTestId('card-edit-open').click()
+  await page.getByTestId('card-edit').fill('Close Waydroid with waydroid session stop')
+  await page.getByTestId('card-edit').press('ControlOrMeta+Enter')
+
+  await expect(page.getByTestId('kanban-column-queued')).toContainText('Close Waydroid with waydroid session stop')
+
+  // …and the rewrite is what's stored, so it's the rewrite that gets sent.
+  // (Checked in localStorage rather than across a reload: the seed init script
+  // re-runs on every navigation and would just paint the original back.)
+  await expect
+    .poll(async () => page.evaluate(() => {
+      const raw = localStorage.getItem('orquesta-kanban-standalone') || '{}'
+      const state = JSON.parse(raw) as { cards?: { text: string }[] }
+      return state.cards?.[0]?.text ?? ''
+    }))
+    .toBe('Close Waydroid with waydroid session stop')
+})
+
+test('a real prompt typed into a shell pane still lands on the board', async ({ page }) => {
+  await page.goto('/')            // default pane type is shell
+  await page.waitForSelector('header', { state: 'visible' })
+  await openLivePane(page)
+
+  // People launch `claude` by hand inside a shell pane; the pane still says
+  // "shell", so prose typed into it has to count as a prompt.
+  await page.locator('.xterm-helper-textarea').first().focus()
+  await page.keyboard.type('check how much ram the system is using right now')
+  await page.keyboard.press('Enter')
+
+  await openBoard(page)
+  await expect(page.getByTestId('count-running')).toHaveText('1', { timeout: 10_000 })
 })

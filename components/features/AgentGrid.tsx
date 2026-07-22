@@ -144,6 +144,8 @@ interface CellApi {
    * so the caller can refuse instead of losing the prompt into the void.
    */
   run: (text: string) => boolean
+  /** Last few KB this pane printed, raw (ANSI included). */
+  tail: () => string
 }
 
 /**
@@ -355,6 +357,13 @@ export function feedTypedBuffer(buf: string, data: string, submit: (line: string
  */
 const MIN_TYPED_PROMPT = 4
 
+/**
+ * How much trailing PTY output each pane keeps for the board. Generous enough
+ * to survive an agent's redraw-heavy final frame (box borders, spinners and
+ * cursor moves eat most of it) while still being a fixed, tiny cost per pane.
+ */
+const TAIL_BYTES = 8000
+
 interface TerminalCellProps {
   cellId: string
   socket: TauriHandle | null
@@ -449,6 +458,13 @@ function TerminalCell({
   // parking it in Running against a prompt that was never sent.
   /** In-progress line the user is typing (see feedTypedBuffer). */
   const typedRef = useRef('')
+  /**
+   * Rolling window of the last few KB the PTY printed. The Kanban board reads
+   * it the moment a card goes quiet, so the agent's closing words — usually a
+   * suggestion or a question — ride along on the card instead of being
+   * something you have to go dig out of the pane.
+   */
+  const tailRef = useRef('')
 
   const runInput = useCallback((text: string) => {
     const sid = sessionIdRef.current
@@ -579,6 +595,8 @@ function TerminalCell({
         seed: (text: string) => seedInput(text),
         // Paste AND submit — how the Kanban board dispatches a card.
         run: (text: string) => runInput(text),
+        // What the agent last said — the board turns this into the card's result.
+        tail: () => tailRef.current,
       })
 
       // ── Clipboard: xterm has no copy/paste by default in the browser. ──
@@ -767,6 +785,7 @@ function TerminalCell({
     const handleOutput = (data: { sessionId: string; data: string }) => {
       if (data.sessionId !== sessionIdRef.current) return
       termRef.current?.write(data.data)
+      tailRef.current = (tailRef.current + data.data).slice(-TAIL_BYTES)
       // Activity → running. Arm/rearm an idle timer; when output goes quiet for
       // ~2.5s we call it "finished". Kept generous so the frequent mid-work
       // pauses agents take (thinking, tool calls) don't read as "done" and
@@ -1190,6 +1209,12 @@ export interface AgentGridHandle {
    * can leave the card queued instead of pretending it ran.
    */
   dispatchPrompt: (cellId: string, text: string) => boolean
+  /**
+   * Trailing output of pane `cellId`, raw. The board snapshots this when a card
+   * finishes so the agent's answer/suggestion lands on the card. '' if the pane
+   * is gone or has printed nothing.
+   */
+  paneTail: (cellId: string) => string
 }
 
 /** Human label for a pane: its given name, else its folder, else its CLI. */
@@ -2437,6 +2462,7 @@ function AgentGridInner({
         api.focus()
         return true
       },
+      paneTail: (cellId) => cellApiRef.current.get(cellId)?.tail() ?? '',
     }
   }, [apiRef, addCell, arrange, closeActive, importSessions, toggleOverlay, toggleLighting, toggleSidebar, cycleActive, setActive])
 
@@ -2950,6 +2976,7 @@ export const AgentGrid = forwardRef<AgentGridHandle, AgentGridProps>(function Ag
     addTerminal() {}, arrange() {}, closeActive() {}, importSessions() {},
     toggleOverlay() {}, toggleLighting() {}, toggleSidebar() {}, cycleTerminal() {},
     dispatchPrompt: () => false,
+    paneTail: () => '',
   })
   useImperativeHandle(ref, () => ({
     addTerminal: () => apiRef.current.addTerminal(),
@@ -2961,6 +2988,7 @@ export const AgentGrid = forwardRef<AgentGridHandle, AgentGridProps>(function Ag
     toggleSidebar: () => apiRef.current.toggleSidebar(),
     cycleTerminal: (dir) => apiRef.current.cycleTerminal(dir),
     dispatchPrompt: (cellId, text) => apiRef.current.dispatchPrompt(cellId, text),
+    paneTail: (cellId) => apiRef.current.paneTail(cellId),
   }), [])
 
   // Available height for the grid = the scroll container's inner content box

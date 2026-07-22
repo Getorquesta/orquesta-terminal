@@ -15,7 +15,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import {
   Plus, X, Play, Check, RotateCcw, Trash2, Loader2, CornerDownLeft,
-  Terminal as TerminalIcon, Sparkles, ChevronDown,
+  Terminal as TerminalIcon, Sparkles, ChevronDown, ListPlus, Lightbulb, Pencil,
 } from 'lucide-react'
 import { COLUMNS, COLUMN_META, type ColumnId, type KanbanCard, type UseKanban } from '@/hooks/useKanban'
 import type { PaneInfo } from './AgentGrid'
@@ -69,10 +69,27 @@ function Card({
   const [feedback, setFeedback] = useState('')
   const [expanded, setExpanded] = useState(false)
   const [assignOpen, setAssignOpen] = useState(false)
+  const [outputOpen, setOutputOpen] = useState(false)
+  // Editable before it's queued: the agent's wording is a question ("shall I
+  // close X or Y?") and what you want to run is the answer.
+  const [queueing, setQueueing] = useState(false)
+  const [suggestText, setSuggestText] = useState('')
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState('')
 
   const style = COLUMN_STYLE[card.column]
   const pane = card.paneId ? panes.find((p) => p.id === card.paneId) : undefined
   const long = card.text.length > 150
+  // A suggestion arrives in the agent's words ("shall I close Waydroid?"); what
+  // you want to send is your answer, so a queued card has to be editable in place.
+  const editable = card.column === 'backlog' || card.column === 'queued'
+
+  const startEdit = () => { setDraft(card.text); setEditing(true) }
+  const commitEdit = () => {
+    const body = draft.trim()
+    if (body && body !== card.text) board.update(card.id, { text: body })
+    setEditing(false)
+  }
 
   const run = () => {
     const err = board.dispatch(card.id)
@@ -81,7 +98,7 @@ function Card({
 
   return (
     <div
-      draggable
+      draggable={!editing}
       onDragStart={(e) => {
         draggingCardId = card.id
         e.dataTransfer.setData('text/orquesta-card', card.id)
@@ -97,14 +114,43 @@ function Card({
     >
       <div className="flex items-start gap-1.5">
         <span className={`mt-1 inline-block h-1.5 w-1.5 shrink-0 rounded-full ${style.dot}`} />
-        <p
-          onClick={() => long && setExpanded((v) => !v)}
-          className={`flex-1 whitespace-pre-wrap break-words text-[11px] leading-snug text-zinc-200 ${
-            expanded ? '' : 'line-clamp-3'
-          } ${long ? 'cursor-pointer' : ''}`}
-        >
-          {card.text}
-        </p>
+        {editing ? (
+          <textarea
+            autoFocus
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            onBlur={commitEdit}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); commitEdit() }
+              if (e.key === 'Escape') { e.stopPropagation(); setEditing(false) }
+            }}
+            // The card is draggable; without this a text selection starts a drag.
+            onDragStart={(e) => e.preventDefault()}
+            data-testid="card-edit"
+            rows={Math.min(8, Math.max(2, draft.split('\n').length))}
+            className="flex-1 resize-none rounded border border-zinc-700 bg-zinc-950 px-1.5 py-1 text-[11px] leading-snug text-zinc-100 outline-none focus:border-cyan-500/40"
+          />
+        ) : (
+          <p
+            onClick={() => long && setExpanded((v) => !v)}
+            onDoubleClick={() => editable && startEdit()}
+            className={`flex-1 whitespace-pre-wrap break-words text-[11px] leading-snug text-zinc-200 ${
+              expanded ? '' : 'line-clamp-3'
+            } ${long ? 'cursor-pointer' : ''}`}
+          >
+            {card.text}
+          </p>
+        )}
+        {editable && !editing && (
+          <button
+            onClick={startEdit}
+            data-testid="card-edit-open"
+            className="shrink-0 rounded p-0.5 text-zinc-700 opacity-0 transition-opacity hover:text-cyan-300 group-hover:opacity-100"
+            title="Edit this prompt"
+          >
+            <Pencil className="h-3 w-3" />
+          </button>
+        )}
         <button
           onClick={() => board.remove(card.id)}
           className="shrink-0 rounded p-0.5 text-zinc-700 opacity-0 transition-opacity hover:text-red-400 group-hover:opacity-100"
@@ -191,6 +237,75 @@ function Card({
           </div>
         </div>
       ) : null}
+
+      {/*
+        What came back. A Review card that only shows your prompt is half a
+        review — the agent's closing words (usually "should I do X or Y?") are
+        the thing you're actually deciding on.
+      */}
+      {card.column === 'review' && card.result && (
+        <div className="mt-1.5 rounded border border-zinc-800 bg-zinc-950/60">
+          <button
+            onClick={() => setOutputOpen((v) => !v)}
+            className="flex w-full items-center gap-1 px-1.5 py-1 text-[10px] text-zinc-500 transition-colors hover:text-zinc-300"
+          >
+            <ChevronDown className={`h-2.5 w-2.5 transition-transform ${outputOpen ? '' : '-rotate-90'}`} />
+            Agent output
+          </button>
+          {outputOpen && (
+            <pre
+              data-testid="card-result"
+              className="max-h-44 overflow-auto whitespace-pre-wrap break-words border-t border-zinc-800/70 px-1.5 py-1 font-mono text-[10px] leading-snug text-zinc-400"
+            >
+              {card.result}
+            </pre>
+          )}
+        </div>
+      )}
+
+      {card.column === 'review' && card.suggestion && (
+        <div className="mt-1.5 rounded border border-amber-500/25 bg-amber-500/5 px-1.5 py-1">
+          <p data-testid="card-suggestion" className="flex items-start gap-1 text-[10px] leading-snug text-amber-100/90">
+            <Lightbulb className="mt-px h-2.5 w-2.5 shrink-0 text-amber-400" />
+            <span className="break-words">{card.suggestion}</span>
+          </p>
+          {queueing ? (
+            <div className="mt-1 space-y-1">
+              <textarea
+                autoFocus
+                value={suggestText}
+                onChange={(e) => setSuggestText(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { board.queueSuggestion(card.id, suggestText); setQueueing(false) }
+                  if (e.key === 'Escape') setQueueing(false)
+                }}
+                rows={2}
+                placeholder="What should the agent do next?"
+                className="w-full resize-none rounded border border-zinc-800 bg-zinc-950 px-1.5 py-1 text-[10px] text-zinc-200 outline-none placeholder:text-zinc-600 focus:border-amber-500/40"
+              />
+              <div className="flex items-center gap-1">
+                <button
+                  onClick={() => { board.queueSuggestion(card.id, suggestText); setQueueing(false) }}
+                  data-testid="card-queue-confirm"
+                  className="rounded border border-amber-500/25 bg-amber-500/10 px-1.5 py-0.5 text-[10px] text-amber-300 hover:bg-amber-500/20"
+                >
+                  Add to Queued <CornerDownLeft className="ml-0.5 inline h-2.5 w-2.5" />
+                </button>
+                <button onClick={() => setQueueing(false)} className="px-1 text-[10px] text-zinc-600 hover:text-zinc-400">Cancel</button>
+              </div>
+            </div>
+          ) : (
+            <button
+              onClick={() => { setSuggestText(card.suggestion ?? ''); setQueueing(true) }}
+              data-testid="card-queue-suggestion"
+              className="mt-1 inline-flex items-center gap-1 rounded border border-amber-500/25 px-1.5 py-0.5 text-[10px] text-amber-300/90 transition-colors hover:bg-amber-500/10"
+              title="Make this its own card in Queued"
+            >
+              <ListPlus className="h-2.5 w-2.5" /> Queue this
+            </button>
+          )}
+        </div>
+      )}
 
       {card.column === 'review' && (
         <div className="mt-1.5">

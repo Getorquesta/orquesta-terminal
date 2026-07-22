@@ -20,6 +20,7 @@
 
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import type { PaneInfo } from '@/components/features/AgentGrid'
+import { cleanOutput, pickSuggestion } from '@/lib/ptyText'
 
 export const COLUMNS = ['backlog', 'queued', 'running', 'review', 'done'] as const
 export type ColumnId = (typeof COLUMNS)[number]
@@ -54,6 +55,14 @@ export interface KanbanCard {
   sawRunning?: boolean
   /** Review feedback from a Rework, carried into the next dispatch. */
   feedback?: string
+  /**
+   * What the agent left on screen when it went quiet, cleaned up. This is the
+   * half of the review the board was missing: without it a Review card shows
+   * what you ASKED and nothing about what came back.
+   */
+  result?: string
+  /** The one line of `result` worth acting on — usually the agent's question. */
+  suggestion?: string
   /** Manual ordering within a column (lower = higher up). */
   order: number
 }
@@ -79,6 +88,21 @@ function newId(): string {
 function topOrder(cards: KanbanCard[], col: ColumnId): number {
   const inCol = cards.filter((c) => c.column === col)
   return inCol.length ? Math.min(...inCol.map((c) => c.order)) - 1 : 0
+}
+
+/**
+ * Does a line typed into a shell read as a prompt rather than a command?
+ * Heuristic and deliberately conservative: prose is long and spaced, commands
+ * are short and terse. A question mark settles it either way.
+ */
+function looksLikePrompt(line: string): boolean {
+  const body = line.trim()
+  if (/[?？]$/.test(body)) return true
+  if (body.length < 24) return false
+  if (!body.includes(' ')) return false
+  // `git commit -m "..."`, `./run.sh --flag`, `VAR=1 node x.js` — still a command.
+  if (/^[.~/]|^\w[\w.-]*=|(^|\s)-{1,2}[a-zA-Z]/.test(body)) return false
+  return body.split(/\s+/).length >= 4
 }
 
 function load(scope: string): KanbanCard[] {
@@ -109,6 +133,11 @@ export interface UseKanban {
   dispatch: (id: string) => string | null
   /** Record a prompt the user typed straight into a pane as a running card. */
   capture: (paneId: string, text: string) => void
+  /**
+   * Turn what the agent proposed into its own Queued card, pinned to the same
+   * pane. Returns the new card's id.
+   */
+  queueSuggestion: (id: string, text: string) => string | null
   approve: (id: string) => void
   rework: (id: string, feedback: string) => void
   clearDone: () => void
@@ -118,12 +147,15 @@ export function useKanban({
   scope,
   panes,
   dispatchPrompt,
+  readPaneTail,
 }: {
   /** Namespaces the board — the active project id. */
   scope: string
   panes: PaneInfo[]
   /** Paste + Enter into a pane. False = pane has no live PTY. */
   dispatchPrompt: (paneId: string, text: string) => boolean
+  /** Raw trailing output of a pane, read at the moment a card finishes. */
+  readPaneTail?: (paneId: string) => string
 }): UseKanban {
   const [cards, setCards] = useState<KanbanCard[]>([])
   const [cardsScope, setCardsScope] = useState<string | null>(null)
@@ -136,6 +168,8 @@ export function useKanban({
   cardsRef.current = cards
   const dispatchRef = useRef(dispatchPrompt)
   dispatchRef.current = dispatchPrompt
+  const tailRef = useRef(readPaneTail)
+  tailRef.current = readPaneTail
 
   useEffect(() => {
     // Both pieces in one commit: `cardsScope` is what `cards` was loaded for.
@@ -238,6 +272,8 @@ export function useKanban({
               dispatchedAt: Date.now(),
               finishedAt: undefined,
               sawRunning: false,
+              result: undefined,
+              suggestion: undefined,
               order: topOrder(prev, 'running'),
             }
           : c,
@@ -252,11 +288,16 @@ export function useKanban({
    * now" — hand-sent work belongs there too, and from here it follows exactly
    * the same path: the pane going quiet promotes it to Review.
    *
-   * Shell panes are left alone: every `ls` and `cd` would become a card.
+   * Works in every pane, whatever CLI it holds — including a plain shell,
+   * because that's where you end up when you launch `claude`/`codex` by hand
+   * and the pane never got told what it's running. Shell panes do get a filter:
+   * a bare command (`ls`, `git status`, `npm run dev`) is not a prompt, so only
+   * lines long enough to read as a sentence — or an outright question — count.
    */
   const capture = useCallback((paneId: string, text: string) => {
     const pane = panesRef.current.find((p) => p.id === paneId)
-    if (!pane || pane.cliType === 'shell') return
+    if (!pane) return
+    if (pane.cliType === 'shell' && !looksLikePrompt(text)) return
     // A card already owns this pane — this line is an answer to it (a "yes", a
     // menu pick, a follow-up), not a new piece of work.
     if (cardsRef.current.some((c) => c.column === 'running' && c.paneId === paneId)) return
@@ -276,6 +317,35 @@ export function useKanban({
         order: topOrder(prev, 'running'),
       },
     ])
+  }, [])
+
+  /**
+   * Promote the agent's own proposal to a card of its own.
+   *
+   * An agent finishing with "should I close Waydroid or the dev server?" has
+   * handed you the next task — it just isn't written down anywhere. This writes
+   * it down, in Queued, still pinned to the pane that asked, so running it
+   * answers the question in the session that's holding it.
+   */
+  const queueSuggestion = useCallback((id: string, text: string): string | null => {
+    const body = text.trim()
+    if (!body) return null
+    const src = cardsRef.current.find((c) => c.id === id)
+    const cardId = newId()
+    setCards((prev) => [
+      ...prev,
+      {
+        id: cardId,
+        text: body,
+        column: 'queued',
+        paneId: src?.paneId,
+        paneName: src?.paneName,
+        tags: ['suggested'],
+        createdAt: Date.now(),
+        order: topOrder(prev, 'queued'),
+      },
+    ])
+    return cardId
   }, [])
 
   const move = useCallback((id: string, to: ColumnId, beforeId?: string): string | null => {
@@ -353,11 +423,21 @@ export function useKanban({
         // Pane is idle. Only counts as "finished" once we saw it actually work.
         if (!c.sawRunning) return c
         changed = true
-        return { ...c, column: 'review' as ColumnId, finishedAt: now, order: topOrder(prev, 'review') }
+        // Snapshot what the agent left on screen NOW — the pane keeps writing,
+        // and by the time a human opens the card the answer may be scrolled off.
+        const result = cleanOutput(tailRef.current?.(pane.id) ?? '')
+        return {
+          ...c,
+          column: 'review' as ColumnId,
+          finishedAt: now,
+          result: result || undefined,
+          suggestion: pickSuggestion(result) || undefined,
+          order: topOrder(prev, 'review'),
+        }
       })
       return changed ? next : prev
     })
   }, [panes, cards])
 
-  return { cards, byColumn, add, update, remove, move, dispatch, capture, approve, rework, clearDone }
+  return { cards, byColumn, add, update, remove, move, dispatch, capture, queueSuggestion, approve, rework, clearDone }
 }
