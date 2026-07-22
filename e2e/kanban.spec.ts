@@ -561,3 +561,36 @@ test('a real prompt typed into a shell pane still lands on the board', async ({ 
   await openBoard(page)
   await expect(page.getByTestId('count-running')).toHaveText('1', { timeout: 10_000 })
 })
+
+test('the answer survives an agent that repaints its frame hundreds of times', async ({ page }) => {
+  // Regression, straight from a real run: TUI agents (Ink) don't stream a
+  // transcript, they redraw their whole frame on every tick. Reading back a
+  // window of raw PTY bytes therefore returned the tail of one repaint — box
+  // borders and escape codes — while the answer itself had scrolled out of it,
+  // and the card reached Review with nothing on it. Read the rendered screen
+  // and the repaints cost nothing.
+  await page.addInitScript(seed([card({ id: 'k_ink', text: 'check the ram' })]))
+  await page.goto('/')
+  await page.waitForSelector('header', { state: 'visible' })
+  await openLivePane(page)
+
+  await openBoard(page)
+  await page.getByTestId('card-run').first().click()
+  await expect(page.getByTestId('count-running')).toHaveText('1', { timeout: 10_000 })
+
+  const sessionId = await liveSessionId(page)
+  await emit(page, 'session:output', {
+    sessionId,
+    data: 'Swap is exhausted — if something asks for memory the OOM killer acts.\r\n' +
+          'Should I stop Waydroid or the dev server?\r\n',
+  })
+  // …then ~60 KB of the input box being redrawn in place, as Ink does.
+  const frame = '╭─────────────────────────╮\r\n│ > ' + ' '.repeat(21) + '│\r\n╰─────────────────────────╯\r\n'
+  let repaints = ''
+  for (let i = 0; i < 300; i++) repaints += frame + '\x1b[3A\x1b[0J'
+  await emit(page, 'session:output', { sessionId, data: repaints + frame })
+  expect(repaints.length).toBeGreaterThan(8000)
+
+  await expect(page.getByTestId('count-review')).toHaveText('1', { timeout: 25_000 })
+  await expect(page.getByTestId('card-suggestion')).toContainText('Should I stop Waydroid or the dev server?')
+})

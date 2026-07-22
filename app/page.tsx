@@ -104,7 +104,7 @@ export default function TerminalWorkspacePage() {
     [],
   )
   const readPaneTail = useCallback(
-    (paneId: string) => gridRef.current?.paneTail(paneId) ?? '',
+    (paneId: string) => gridRef.current?.paneTail?.(paneId) ?? '',
     [],
   )
   const board = useKanban({ scope: projectId, panes, dispatchPrompt, readPaneTail })

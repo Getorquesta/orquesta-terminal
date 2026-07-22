@@ -144,7 +144,7 @@ interface CellApi {
    * so the caller can refuse instead of losing the prompt into the void.
    */
   run: (text: string) => boolean
-  /** Last few KB this pane printed, raw (ANSI included). */
+  /** This pane's screen as text (see readScreen). */
   tail: () => string
 }
 
@@ -357,13 +357,6 @@ export function feedTypedBuffer(buf: string, data: string, submit: (line: string
  */
 const MIN_TYPED_PROMPT = 4
 
-/**
- * How much trailing PTY output each pane keeps for the board. Generous enough
- * to survive an agent's redraw-heavy final frame (box borders, spinners and
- * cursor moves eat most of it) while still being a fixed, tiny cost per pane.
- */
-const TAIL_BYTES = 8000
-
 interface TerminalCellProps {
   cellId: string
   socket: TauriHandle | null
@@ -459,12 +452,39 @@ function TerminalCell({
   /** In-progress line the user is typing (see feedTypedBuffer). */
   const typedRef = useRef('')
   /**
-   * Rolling window of the last few KB the PTY printed. The Kanban board reads
-   * it the moment a card goes quiet, so the agent's closing words — usually a
-   * suggestion or a question — ride along on the card instead of being
-   * something you have to go dig out of the pane.
+   * What this pane currently has ON SCREEN, as text — the Kanban board reads it
+   * the moment a card goes quiet so the agent's closing words (usually a
+   * suggestion or a question) ride along on the card.
+   *
+   * Read from xterm's own buffer rather than from a window of raw PTY bytes.
+   * A TUI agent doesn't stream a transcript, it repaints its whole frame on
+   * every tick: a byte window ends up holding the tail of one repaint — escape
+   * codes and the input box — while the actual answer has already scrolled out
+   * of it. The buffer is the resolved picture, with cursor moves, overwrites
+   * and colour already applied.
    */
-  const tailRef = useRef('')
+  const readScreen = useCallback((lines = 80): string => {
+    const term = termRef.current
+    if (!term) return ''
+    try {
+      const buf = term.buffer.active
+      const end = buf.baseY + term.rows
+      const out: string[] = []
+      for (let i = Math.max(0, end - lines); i < end; i++) {
+        const line = buf.getLine(i)
+        if (!line) continue
+        const text = line.translateToString(true)
+        // A long logical line is stored as N physical rows; stitching them back
+        // matters — a question split across rows would otherwise never be seen
+        // to end in '?'.
+        if (line.isWrapped && out.length) out[out.length - 1] += text
+        else out.push(text)
+      }
+      return out.join('\n')
+    } catch {
+      return ''
+    }
+  }, [])
 
   const runInput = useCallback((text: string) => {
     const sid = sessionIdRef.current
@@ -596,7 +616,7 @@ function TerminalCell({
         // Paste AND submit — how the Kanban board dispatches a card.
         run: (text: string) => runInput(text),
         // What the agent last said — the board turns this into the card's result.
-        tail: () => tailRef.current,
+        tail: () => readScreen(),
       })
 
       // ── Clipboard: xterm has no copy/paste by default in the browser. ──
@@ -785,7 +805,6 @@ function TerminalCell({
     const handleOutput = (data: { sessionId: string; data: string }) => {
       if (data.sessionId !== sessionIdRef.current) return
       termRef.current?.write(data.data)
-      tailRef.current = (tailRef.current + data.data).slice(-TAIL_BYTES)
       // Activity → running. Arm/rearm an idle timer; when output goes quiet for
       // ~2.5s we call it "finished". Kept generous so the frequent mid-work
       // pauses agents take (thinking, tool calls) don't read as "done" and
@@ -2462,7 +2481,12 @@ function AgentGridInner({
         api.focus()
         return true
       },
-      paneTail: (cellId) => cellApiRef.current.get(cellId)?.tail() ?? '',
+      // Defensive call: a pane hot-reloaded mid-session can still be holding an
+      // API object from before this method existed.
+      paneTail: (cellId) => {
+        const api = cellApiRef.current.get(cellId)
+        return typeof api?.tail === 'function' ? api.tail() : ''
+      },
     }
   }, [apiRef, addCell, arrange, closeActive, importSessions, toggleOverlay, toggleLighting, toggleSidebar, cycleActive, setActive])
 
