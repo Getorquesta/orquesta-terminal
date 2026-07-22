@@ -58,6 +58,22 @@ function toCommand(event: string): string {
   return event.replace(/[:-]/g, '_')
 }
 
+/**
+ * Is there a Tauri shell under us?
+ *
+ * Not always: `npm run next-dev` serves the same app in a plain browser for UI
+ * work, and there `__TAURI_INTERNALS__` is absent — every listen() and invoke()
+ * blows up on it. Those throws were the whole of the dev overlay's error pile
+ * (one uncaught rejection per subscribed event, plus one per IPC call), which
+ * buried any real error under noise.
+ *
+ * The shell injects this before any app JS runs, so a plain check is enough and
+ * needs no caching or readiness dance.
+ */
+function hasTauri(): boolean {
+  return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
+}
+
 // ── Hook ──────────────────────────────────────────────────────────────────────
 
 export function useTauri(_opts: { projectId?: string; sessionToken?: string } = {}) {
@@ -68,9 +84,10 @@ export function useTauri(_opts: { projectId?: string; sessionToken?: string } = 
   // Map of event name → Tauri unlisten fn
   const unlistenRef = useRef<Map<string, UnlistenFn>>(new Map())
 
-  // "Connect" immediately on mount — Tauri IPC is always available
+  // "Connect" on mount — instant when the IPC bridge is there, never when it
+  // isn't (browser preview), so the UI reports what's actually true.
   useEffect(() => {
-    setConnected(true)
+    setConnected(hasTauri())
     return () => {
       setConnected(false)
       // Clean up all Tauri listeners
@@ -84,13 +101,19 @@ export function useTauri(_opts: { projectId?: string; sessionToken?: string } = 
   const on = useCallback((event: string, handler: (data: any) => void) => {
     if (!listenersRef.current.has(event)) {
       listenersRef.current.set(event, new Set())
-      // Register once with Tauri runtime
-      listen(event, (tauriEvent) => {
-        const handlers = listenersRef.current.get(event)
-        handlers?.forEach((h) => h(tauriEvent.payload))
-      }).then((unlisten) => {
-        unlistenRef.current.set(event, unlisten)
-      })
+      // Register once with Tauri runtime. Nothing will ever be delivered
+      // without a shell, but the local handler set is still kept so on/off
+      // stay symmetric and callers need no branch of their own.
+      if (hasTauri()) {
+        listen(event, (tauriEvent) => {
+          const handlers = listenersRef.current.get(event)
+          handlers?.forEach((h) => h(tauriEvent.payload))
+        })
+          .then((unlisten) => {
+            unlistenRef.current.set(event, unlisten)
+          })
+          .catch((err) => console.warn(`[tauri] listen ${event} failed:`, err))
+      }
     }
     listenersRef.current.get(event)!.add(handler)
   }, [])
@@ -102,7 +125,7 @@ export function useTauri(_opts: { projectId?: string; sessionToken?: string } = 
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const emit = useCallback((event: string, data?: any) => {
-    if (!INVOKE_EVENTS.has(event)) return
+    if (!INVOKE_EVENTS.has(event) || !hasTauri()) return
     const cmd = toCommand(event)
     invoke(cmd, (data as Record<string, unknown>) ?? {}).catch((err) =>
       console.error(`[tauri] invoke ${cmd} failed:`, err),
@@ -118,6 +141,9 @@ export function useTauri(_opts: { projectId?: string; sessionToken?: string } = 
   const emitWithAck = useCallback(
     async (event: string, data?: unknown): Promise<unknown> => {
       const cmd = toCommand(event)
+      // Callers await a real answer here, so this one can't be silently
+      // dropped like emit() — say why instead of failing on a missing global.
+      if (!hasTauri()) throw new Error(`${cmd}: no Tauri backend (browser preview)`)
       return invoke(cmd, (data as Record<string, unknown>) ?? {})
     },
     [],
