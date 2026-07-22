@@ -137,6 +137,13 @@ interface CellApi {
   focus: () => void
   /** Type text into the live PTY as one bracketed paste (no auto-submit). */
   seed: (text: string) => void
+  /**
+   * Same as seed(), then press Enter — dispatches the prompt for real.
+   * False when this pane has no live PTY to write to (it registers its API on
+   * mount but the session only starts ~100ms later, and a session can end),
+   * so the caller can refuse instead of losing the prompt into the void.
+   */
+  run: (text: string) => boolean
 }
 
 /**
@@ -392,6 +399,25 @@ function TerminalCell({
     socket.emit('session:input', { sessionId: sid, data: wrapped })
     try { termRef.current?.focus() } catch {}
   }, [socket])
+
+  // Kanban dispatch: same paste, then Enter. The newline goes in a separate
+  // write a beat later — bundled into the same chunk, interactive CLIs tend to
+  // swallow it as part of the paste body instead of submitting.
+  // Returns false when there is nothing to write to: the pane registers this
+  // API on mount but startSession() only runs ~100ms later, and a session can
+  // end. Reporting that honestly lets the board keep the card instead of
+  // parking it in Running against a prompt that was never sent.
+  const runInput = useCallback((text: string) => {
+    const sid = sessionIdRef.current
+    if (!sid || !socket || !text) return false
+    socket.emit('session:input', { sessionId: sid, data: `\x1b[200~${text}\x1b[201~` })
+    setTimeout(() => {
+      if (sessionIdRef.current !== sid) return // pane restarted mid-flight
+      socket.emit('session:input', { sessionId: sid, data: '\r' })
+    }, 160)
+    try { termRef.current?.focus() } catch {}
+    return true
+  }, [socket])
   // Share-to-Orquesta state for this pane.
   const [shared, setShared] = useState(false)
   const [allowControl, setAllowControl] = useState(false)
@@ -508,6 +534,8 @@ function TerminalCell({
         focus: () => { try { term.focus() } catch {} },
         // Paste a plugin prompt into this pane for review-before-send.
         seed: (text: string) => seedInput(text),
+        // Paste AND submit — how the Kanban board dispatches a card.
+        run: (text: string) => runInput(text),
       })
 
       // ── Clipboard: xterm has no copy/paste by default in the browser. ──
@@ -1106,6 +1134,28 @@ export interface AgentGridHandle {
   toggleSidebar: () => void
   /** Cycle keyboard focus to the next (+1) / previous (-1) terminal. */
   cycleTerminal: (dir: 1 | -1) => void
+  /**
+   * Paste `text` into pane `cellId` and press Enter. Returns false when that
+   * pane has no live PTY yet (still booting, or the id is stale) so the caller
+   * can leave the card queued instead of pretending it ran.
+   */
+  dispatchPrompt: (cellId: string, text: string) => boolean
+}
+
+/** Human label for a pane: its given name, else its folder, else its CLI. */
+function paneLabel(c: GridCell): string {
+  return (c.name && c.name.trim())
+    || folderLabel(c.cwd)
+    || (CLI_OPTIONS.find((o) => o.value === c.cliType)?.label ?? c.cliType)
+}
+
+/** A live terminal pane, as the Kanban board sees it. */
+export interface PaneInfo {
+  id: string
+  name: string
+  cliType: CliType
+  /** 'running' = PTY is producing output right now. */
+  status: 'running' | 'idle'
 }
 
 type ViewMode = 'grid' | 'overlay'
@@ -1123,6 +1173,12 @@ interface AgentGridProps {
   hostedUserId?: string
   /** Available hosted projects (from useHostedAuth) for per-pane selector. */
   hostedProjects?: HostedProject[]
+  /**
+   * Fires whenever the pane roster or any pane's busy/idle status changes.
+   * Kanban mode reads this to know which agent a card is running on and when
+   * that agent went quiet (→ move the card to Review). Must be stable.
+   */
+  onPanesChange?: (panes: PaneInfo[]) => void
 }
 
 interface PersistShape {
@@ -1580,7 +1636,7 @@ function DaemonTakeoverModal({
 
 function AgentGridInner({
   socket, containerWidth, containerHeight, storageKey, terminalOpacity = 1, hostedApiUrl, hostedToken, hostedUserId, hostedProjects,
-  apiRef,
+  onPanesChange, apiRef,
 }: AgentGridProps & { containerWidth: number; containerHeight: number; apiRef: React.MutableRefObject<AgentGridHandle> }) {
   const key = storageKey || STORAGE_KEY
   const [cells, setCells] = useState<GridCell[]>([])
@@ -2315,8 +2371,19 @@ function AgentGridInner({
     apiRef.current = {
       addTerminal: () => addCell(), arrange, closeActive, importSessions,
       toggleOverlay, toggleLighting, toggleSidebar, cycleTerminal: cycleActive,
+      dispatchPrompt: (cellId, text) => {
+        const api = cellApiRef.current.get(cellId)
+        if (!api) return false
+        // run() reports whether the pty actually took the prompt — don't focus
+        // or steal the active pane for a write that didn't happen.
+        const sent = api.run(text)
+        if (!sent) return false
+        setActive(cellId)
+        api.focus()
+        return true
+      },
     }
-  }, [apiRef, addCell, arrange, closeActive, importSessions, toggleOverlay, toggleLighting, toggleSidebar, cycleActive])
+  }, [apiRef, addCell, arrange, closeActive, importSessions, toggleOverlay, toggleLighting, toggleSidebar, cycleActive, setActive])
 
   // Grid-level keyboard shortcuts for when NO terminal is focused (the focused
   // case is handled inside the pane so the keys don't reach the shell).
@@ -2420,6 +2487,17 @@ function AgentGridInner({
     api?.seed(item.prompt)
   }, [setActive])
 
+  // Publish the pane roster + busy/idle to the host page (Kanban mode).
+  useEffect(() => {
+    if (!onPanesChange) return
+    onPanesChange(cells.map((c) => ({
+      id: c.id,
+      name: paneLabel(c),
+      cliType: c.cliType,
+      status: statuses[c.id] === 'running' ? 'running' : 'idle',
+    })))
+  }, [cells, statuses, onPanesChange])
+
   // Shared cell renderer so grid + overlay modes stay in lockstep on props.
   const renderTerminalCell = (cell: GridCell) => (
     <TerminalCell
@@ -2479,9 +2557,7 @@ function AgentGridInner({
 
   // Left rail as tabs — shown alongside both modes.
   const dockItems: DockItem[] = cells.map((c) => {
-    const disp = (c.name && c.name.trim())
-      || folderLabel(c.cwd)
-      || (CLI_OPTIONS.find((o) => o.value === c.cliType)?.label ?? c.cliType)
+    const disp = paneLabel(c)
     return { id: c.id, name: disp, cliType: c.cliType, label: disp }
   })
   const sidebarEl = sidebarOpen ? (
@@ -2810,13 +2886,14 @@ function AgentGridInner({
 }
 
 export const AgentGrid = forwardRef<AgentGridHandle, AgentGridProps>(function AgentGrid(
-  { socket, storageKey, terminalOpacity, hostedApiUrl, hostedToken, hostedUserId, hostedProjects }, ref,
+  { socket, storageKey, terminalOpacity, hostedApiUrl, hostedToken, hostedUserId, hostedProjects, onPanesChange }, ref,
 ) {
   const { containerRef, width } = useContainerWidth()
   const [height, setHeight] = useState(0)
   const apiRef = useRef<AgentGridHandle>({
     addTerminal() {}, arrange() {}, closeActive() {}, importSessions() {},
     toggleOverlay() {}, toggleLighting() {}, toggleSidebar() {}, cycleTerminal() {},
+    dispatchPrompt: () => false,
   })
   useImperativeHandle(ref, () => ({
     addTerminal: () => apiRef.current.addTerminal(),
@@ -2827,6 +2904,7 @@ export const AgentGrid = forwardRef<AgentGridHandle, AgentGridProps>(function Ag
     toggleLighting: () => apiRef.current.toggleLighting(),
     toggleSidebar: () => apiRef.current.toggleSidebar(),
     cycleTerminal: (dir) => apiRef.current.cycleTerminal(dir),
+    dispatchPrompt: (cellId, text) => apiRef.current.dispatchPrompt(cellId, text),
   }), [])
 
   // Available height for the grid = the scroll container's inner content box
@@ -2861,6 +2939,7 @@ export const AgentGrid = forwardRef<AgentGridHandle, AgentGridProps>(function Ag
           hostedToken={hostedToken}
           hostedUserId={hostedUserId}
           hostedProjects={hostedProjects}
+          onPanesChange={onPanesChange}
           apiRef={apiRef}
         />
       )}
