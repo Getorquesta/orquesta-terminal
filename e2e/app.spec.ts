@@ -44,7 +44,9 @@ test('command palette opens via button click', async ({ page }) => {
 })
 
 test('command palette opens via Ctrl+K', async ({ page }) => {
-  await page.locator('header').click()
+  // Click the brand, not the header box — the header's centre point lands on
+  // whichever toolbar button happens to sit there, which would toggle it.
+  await page.locator('header').getByText('workspace').click()
   await page.keyboard.press('Control+k')
   await expect(page.getByPlaceholder(PALETTE_PLACEHOLDER)).toBeVisible({ timeout: 5_000 })
 })
@@ -102,8 +104,8 @@ test('can add terminal pane from empty state button', async ({ page }) => {
   await expect(addBtn).toBeVisible({ timeout: 5_000 })
   await addBtn.click()
 
-  // Grid item should appear
-  await expect(page.locator('.react-grid-item').first()).toBeVisible({ timeout: 10_000 })
+  // A live terminal pane should appear
+  await expect(page.locator('.xterm').first()).toBeVisible({ timeout: 10_000 })
 })
 
 test('can add terminal pane via command palette', async ({ page }) => {
@@ -114,9 +116,9 @@ test('can add terminal pane via command palette', async ({ page }) => {
   // The command label is "New terminal" (defined in page.tsx commands array)
   await page.locator('[role="dialog"]').getByText('New terminal').first().click()
 
-  // Grid item should appear and palette should close
+  // A live terminal pane should appear and the palette should close
   await expect(page.getByPlaceholder(PALETTE_PLACEHOLDER)).toBeHidden({ timeout: 3_000 })
-  await expect(page.locator('.react-grid-item').first()).toBeVisible({ timeout: 10_000 })
+  await expect(page.locator('.xterm').first()).toBeVisible({ timeout: 10_000 })
 })
 
 // ── Plugins panel ─────────────────────────────────────────────────────────────

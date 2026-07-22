@@ -6,7 +6,9 @@ import Image from 'next/image'
 import { useRouter } from 'next/navigation'
 import { useTauri } from '@/hooks/useTauri'
 import { hostedFetch } from '@/lib/tauri-proxy'
-import { AgentGrid, type AgentGridHandle, type ImportSpec } from '@/components/features/AgentGrid'
+import { AgentGrid, type AgentGridHandle, type ImportSpec, type PaneInfo } from '@/components/features/AgentGrid'
+import { KanbanBoard } from '@/components/features/KanbanBoard'
+import { useKanban } from '@/hooks/useKanban'
 import { useHostedAuth, type HostedAuth } from '@/hooks/useHostedAuth'
 import { CommandPalette, type Command } from '@/components/features/CommandPalette'
 import { Button } from '@/components/ui/button'
@@ -17,6 +19,7 @@ import {
   Cloud, ExternalLink, Loader2, CheckCircle2, AlertCircle, Clock,
   Star, Tag, MessageSquare, Send, Monitor, Puzzle,
   Activity, ScrollText, Server, Layers, Zap, PanelLeft, ArrowRightLeft,
+  Columns3,
 } from 'lucide-react'
 import { RemoteSessionModal } from '@/components/features/RemoteSessionModal'
 
@@ -76,11 +79,43 @@ export default function TerminalWorkspacePage() {
   const [timelineOpen, setTimelineOpen] = useState(false)
   const [pluginsOpen, setPluginsOpen] = useState(false)
   const [remoteOpen, setRemoteOpen] = useState(false)
+  // Kanban mode. The grid stays MOUNTED underneath (the board is an overlay) —
+  // unmounting it would kill every PTY the board is supposed to be driving.
+  const [boardOpen, setBoardOpen] = useState(false)
+  const [panes, setPanes] = useState<PaneInfo[]>([])
   const gridRef = useRef<AgentGridHandle>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   const { socket } = useTauri({ projectId, sessionToken })
   const hosted = useHostedAuth()
+
+  // Stable callbacks — AgentGrid re-publishes panes on every status flip, so an
+  // unstable identity here would loop the effect.
+  const onPanesChange = useCallback((next: PaneInfo[]) => {
+    setPanes((prev) => {
+      if (prev.length === next.length && prev.every((p, i) =>
+        p.id === next[i].id && p.status === next[i].status && p.name === next[i].name && p.cliType === next[i].cliType
+      )) return prev
+      return next
+    })
+  }, [])
+  const dispatchPrompt = useCallback(
+    (paneId: string, text: string) => gridRef.current?.dispatchPrompt(paneId, text) ?? false,
+    [],
+  )
+  const readPaneTail = useCallback(
+    (paneId: string) => gridRef.current?.paneTail?.(paneId) ?? '',
+    [],
+  )
+  const board = useKanban({ scope: projectId, panes, dispatchPrompt, readPaneTail })
+  // Prompts typed straight into a pane land on the board too. Routed through a
+  // ref because `board` is a fresh object each render and an unstable callback
+  // here would restart every pane's terminal.
+  const boardRef = useRef(board)
+  boardRef.current = board
+  const onPromptTyped = useCallback((paneId: string, text: string) => {
+    boardRef.current.capture(paneId, text)
+  }, [])
 
   // Load projects from backend (optional — only if self-hosted OSS is running)
   useEffect(() => {
@@ -134,7 +169,8 @@ export default function TerminalWorkspacePage() {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const mod = e.metaKey || e.ctrlKey
-      if (mod && (e.key === 'k' || e.key === 'K')) {
+      // !shiftKey: ⌘⇧K belongs to Kanban mode, so don't also open the palette.
+      if (mod && !e.shiftKey && (e.key === 'k' || e.key === 'K')) {
         e.preventDefault()
         setPaletteOpen(o => !o)
         return
@@ -217,6 +253,15 @@ export default function TerminalWorkspacePage() {
     })
 
     list.push({
+      id: 'view-board',
+      group: 'Navigate',
+      label: 'Toggle Kanban board',
+      hint: 'prompts as cards',
+      keys: '⌘⇧K',
+      icon: Columns3,
+      run: () => setBoardOpen(o => !o),
+    })
+    list.push({
       id: 'nav-dashboard',
       group: 'Navigate',
       label: 'Back to dashboard',
@@ -235,6 +280,22 @@ export default function TerminalWorkspacePage() {
 
     return list
   }, [projects, projectId, updateBg, router, online])
+
+  // Cards sitting in Review — the count badge on the Board button is the whole
+  // point of the mode: "N agent results need your approval".
+  const boardWaiting = board.byColumn.review.length
+
+  // ⌘⇧K / Ctrl+Shift+K flips between the grid and the board.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'k') {
+        e.preventDefault()
+        setBoardOpen(o => !o)
+      }
+    }
+    window.addEventListener('keydown', onKey, true)
+    return () => window.removeEventListener('keydown', onKey, true)
+  }, [])
 
   const wallpaperCss = WALLPAPERS.find(w => w.id === bg.wallpaper)?.css || ''
   const wallpaperStyle: React.CSSProperties = bg.url
@@ -438,6 +499,24 @@ export default function TerminalWorkspacePage() {
             )}
           </div>
 
+          {/* Kanban mode — the prompt board */}
+          <button
+            onClick={() => setBoardOpen(o => !o)}
+            data-testid="board-toggle"
+            className={`flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs transition-colors ${
+              boardOpen
+                ? 'border-violet-500/30 bg-violet-500/10 text-violet-300'
+                : 'border-white/10 bg-white/5 text-zinc-300 hover:bg-white/10 hover:text-white'
+            }`}
+            title="Kanban mode — prompts as cards (⌘⇧K)"
+          >
+            <Columns3 className="h-3.5 w-3.5" />
+            <span className="hidden sm:inline">Board</span>
+            {boardWaiting > 0 && (
+              <span className="rounded-full bg-violet-500/25 px-1 font-mono text-[10px] text-violet-200">{boardWaiting}</span>
+            )}
+          </button>
+
           {/* Hosted hook — report local CLI sessions to a hosted project */}
           {hosted.isLoggedIn && (
             <button
@@ -496,8 +575,18 @@ export default function TerminalWorkspacePage() {
             hostedToken={hosted.auth?.token}
             hostedUserId={hosted.auth?.userId}
             hostedProjects={hosted.auth?.projects}
+            onPanesChange={onPanesChange}
+            onPromptTyped={onPromptTyped}
           />
         </div>
+
+        {/* Kanban mode — covers the grid without unmounting it, so every pane
+            the board dispatches into stays alive behind the overlay. */}
+        {boardOpen && (
+          <div className="absolute inset-0 z-30 bg-zinc-950/95 backdrop-blur-sm">
+            <KanbanBoard board={board} panes={panes} onClose={() => setBoardOpen(false)} />
+          </div>
+        )}
 
         {/* Timeline sidebar — fixed overlay, doesn't affect grid layout */}
         {timelineOpen && hosted.isLoggedIn && (

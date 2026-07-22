@@ -39,7 +39,51 @@ export const TAURI_MOCK_SCRIPT = `
     'plugin:clipboard-manager|read_text':  '',
   };
 
+  // Every IPC call is recorded so tests can assert what the UI actually sent
+  // (e.g. that a Kanban card dispatch really wrote the prompt + Enter to a PTY).
+  window.__tauriCalls = [];
+
+  // ── Event bus ────────────────────────────────────────────────────────────
+  // @tauri-apps/api's listen() goes through transformCallback + the
+  // 'plugin:event|listen' command; without them every listen() threw and NO
+  // backend→frontend event could ever be delivered in tests. With this in
+  // place a test can push PTY output with window.__tauriEmit('session:output',
+  // { sessionId, data }) and drive the real busy/idle machinery.
+  var nextCallbackId = 0;
+  var subscriptions = [];   // { event, handlerId }
+
+  function transformCallback(callback, once) {
+    var id = ++nextCallbackId;
+    Object.defineProperty(window, '_' + id, {
+      value: function (result) {
+        if (once) { Reflect.deleteProperty(window, '_' + id); }
+        return callback && callback(result);
+      },
+      writable: false,
+      configurable: true,
+    });
+    return id;
+  }
+
+  window.__tauriEmit = function (event, payload) {
+    subscriptions
+      .filter(function (s) { return s.event === event; })
+      .forEach(function (s) {
+        var fn = window['_' + s.handlerId];
+        if (fn) fn({ event: event, id: s.handlerId, payload: payload });
+      });
+  };
+
   async function mockInvoke(cmd, args) {
+    try { window.__tauriCalls.push({ cmd: cmd, args: args }); } catch (e) {}
+    if (cmd === 'plugin:event|listen') {
+      subscriptions.push({ event: args.event, handlerId: args.handler });
+      return args.handler;
+    }
+    if (cmd === 'plugin:event|unlisten') {
+      subscriptions = subscriptions.filter(function (s) { return s.handlerId !== args.eventId; });
+      return null;
+    }
     await new Promise(r => setTimeout(r, 0));
     if (Object.prototype.hasOwnProperty.call(responses, cmd)) {
       return responses[cmd];
@@ -49,7 +93,7 @@ export const TAURI_MOCK_SCRIPT = `
   }
 
   Object.defineProperty(window, '__TAURI_INTERNALS__', {
-    value: { invoke: mockInvoke },
+    value: { invoke: mockInvoke, transformCallback: transformCallback },
     writable: false,
     configurable: true,
   });

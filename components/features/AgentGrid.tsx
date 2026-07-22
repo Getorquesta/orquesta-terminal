@@ -137,6 +137,15 @@ interface CellApi {
   focus: () => void
   /** Type text into the live PTY as one bracketed paste (no auto-submit). */
   seed: (text: string) => void
+  /**
+   * Same as seed(), then press Enter — dispatches the prompt for real.
+   * False when this pane has no live PTY to write to (it registers its API on
+   * mount but the session only starts ~100ms later, and a session can end),
+   * so the caller can refuse instead of losing the prompt into the void.
+   */
+  run: (text: string) => boolean
+  /** This pane's screen as text (see readScreen). */
+  tail: () => string
 }
 
 /**
@@ -311,6 +320,43 @@ function CursorOverlay({ cursors }: { cursors: RemoteCursor[] }) {
   )
 }
 
+/**
+ * Rebuild the line the human is typing from xterm's raw keystroke stream, so a
+ * prompt sent by hand can show up on the board like a dispatched one.
+ *
+ * We only ever see what the user *sends*, never what the CLI echoes back, so
+ * this has to reconstruct the line itself: honour backspace, drop escape
+ * sequences (arrows, history recall, function keys), strip the paste brackets
+ * xterm frames a paste with, and treat CR/LF as submit. Ctrl-C abandons the
+ * line, same as the shell would.
+ *
+ * Returns the new buffer; `submit` fires once per completed line.
+ */
+export function feedTypedBuffer(buf: string, data: string, submit: (line: string) => void): string {
+  let out = buf
+  const clean = data.replace(/\x1b\[20[01]~/g, '')
+  for (let i = 0; i < clean.length; i++) {
+    const ch = clean[i]
+    if (ch === '\r' || ch === '\n') { submit(out); out = ''; continue }
+    if (ch === '\x7f' || ch === '\b') { out = out.slice(0, -1); continue }
+    if (ch === '\x03') { out = ''; continue }
+    if (ch === '\x1b') {
+      // Skip to the sequence terminator rather than trying to parse it.
+      while (i < clean.length && !/[a-zA-Z~]/.test(clean[i])) i++
+      continue
+    }
+    if (ch < ' ') continue
+    out += ch
+  }
+  return out
+}
+
+/**
+ * Below this, a submitted line is an answer rather than a prompt — "y", "no",
+ * a menu pick. Cheap heuristic, and a wrong guess only costs a card you delete.
+ */
+const MIN_TYPED_PROMPT = 4
+
 interface TerminalCellProps {
   cellId: string
   socket: TauriHandle | null
@@ -358,6 +404,9 @@ interface TerminalCellProps {
   /** Fired when the user presses Enter (i.e. actually SENDS a prompt/line).
    *  Sudden-death reads this — you defuse by sending a prompt, not by typing. */
   onSubmit: () => void
+  /** Fired with the text of a prompt the user typed straight into this pane —
+   *  the board turns it into a card so hand-sent work shows as running too. */
+  onPromptTyped: (text: string) => void
   /** Highlight this pane (lighting mode just surfaced it). */
   attention?: boolean
 }
@@ -366,7 +415,7 @@ function TerminalCell({
   cellId, socket, cliType, name, fontSize, opacity, hostedApiUrl, hostedToken, hostedUserId,
   hostedProjects, hostedProjectId, cwd, resumeId, daemonRunning,
   onClose, onCliTypeChange, onRename, onHostedProjectChange, onMakeAgent, onPickFolder, onFocusCell, onNew, onArrange, onZoom, registerApi,
-  onActivity, onFinished, onUserInput, onSubmit, attention,
+  onActivity, onFinished, onUserInput, onSubmit, onPromptTyped, attention,
 }: TerminalCellProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const termRef = useRef<import('@xterm/xterm').Terminal | null>(null)
@@ -392,6 +441,62 @@ function TerminalCell({
     socket.emit('session:input', { sessionId: sid, data: wrapped })
     try { termRef.current?.focus() } catch {}
   }, [socket])
+
+  // Kanban dispatch: same paste, then Enter. The newline goes in a separate
+  // write a beat later — bundled into the same chunk, interactive CLIs tend to
+  // swallow it as part of the paste body instead of submitting.
+  // Returns false when there is nothing to write to: the pane registers this
+  // API on mount but startSession() only runs ~100ms later, and a session can
+  // end. Reporting that honestly lets the board keep the card instead of
+  // parking it in Running against a prompt that was never sent.
+  /** In-progress line the user is typing (see feedTypedBuffer). */
+  const typedRef = useRef('')
+  /**
+   * What this pane currently has ON SCREEN, as text — the Kanban board reads it
+   * the moment a card goes quiet so the agent's closing words (usually a
+   * suggestion or a question) ride along on the card.
+   *
+   * Read from xterm's own buffer rather than from a window of raw PTY bytes.
+   * A TUI agent doesn't stream a transcript, it repaints its whole frame on
+   * every tick: a byte window ends up holding the tail of one repaint — escape
+   * codes and the input box — while the actual answer has already scrolled out
+   * of it. The buffer is the resolved picture, with cursor moves, overwrites
+   * and colour already applied.
+   */
+  const readScreen = useCallback((lines = 80): string => {
+    const term = termRef.current
+    if (!term) return ''
+    try {
+      const buf = term.buffer.active
+      const end = buf.baseY + term.rows
+      const out: string[] = []
+      for (let i = Math.max(0, end - lines); i < end; i++) {
+        const line = buf.getLine(i)
+        if (!line) continue
+        const text = line.translateToString(true)
+        // A long logical line is stored as N physical rows; stitching them back
+        // matters — a question split across rows would otherwise never be seen
+        // to end in '?'.
+        if (line.isWrapped && out.length) out[out.length - 1] += text
+        else out.push(text)
+      }
+      return out.join('\n')
+    } catch {
+      return ''
+    }
+  }, [])
+
+  const runInput = useCallback((text: string) => {
+    const sid = sessionIdRef.current
+    if (!sid || !socket || !text) return false
+    socket.emit('session:input', { sessionId: sid, data: `\x1b[200~${text}\x1b[201~` })
+    setTimeout(() => {
+      if (sessionIdRef.current !== sid) return // pane restarted mid-flight
+      socket.emit('session:input', { sessionId: sid, data: '\r' })
+    }, 160)
+    try { termRef.current?.focus() } catch {}
+    return true
+  }, [socket])
   // Share-to-Orquesta state for this pane.
   const [shared, setShared] = useState(false)
   const [allowControl, setAllowControl] = useState(false)
@@ -407,8 +512,8 @@ function TerminalCell({
 
   // Latest callbacks in refs so the (heavy) init effect never re-runs when a
   // parent handler's identity changes — only cellId/socket/cliType restart it.
-  const cbRef = useRef({ onClose, onFocusCell, onNew, onArrange, onZoom, registerApi, onActivity, onFinished, onUserInput, onSubmit })
-  cbRef.current = { onClose, onFocusCell, onNew, onArrange, onZoom, registerApi, onActivity, onFinished, onUserInput, onSubmit }
+  const cbRef = useRef({ onClose, onFocusCell, onNew, onArrange, onZoom, registerApi, onActivity, onFinished, onUserInput, onSubmit, onPromptTyped })
+  cbRef.current = { onClose, onFocusCell, onNew, onArrange, onZoom, registerApi, onActivity, onFinished, onUserInput, onSubmit, onPromptTyped }
   const fontRef = useRef(fontSize)
   fontRef.current = fontSize
   // Hosted-hook target read live at (re)connect time so toggling it from the
@@ -508,6 +613,10 @@ function TerminalCell({
         focus: () => { try { term.focus() } catch {} },
         // Paste a plugin prompt into this pane for review-before-send.
         seed: (text: string) => seedInput(text),
+        // Paste AND submit — how the Kanban board dispatches a card.
+        run: (text: string) => runInput(text),
+        // What the agent last said — the board turns this into the card's result.
+        tail: () => readScreen(),
       })
 
       // ── Clipboard: xterm has no copy/paste by default in the browser. ──
@@ -633,6 +742,13 @@ function TerminalCell({
           startSession(true)
           return
         }
+        // Reconstruct what's being typed so a hand-sent prompt can reach the
+        // board. Board dispatches go straight to socket.emit and never pass
+        // through here, so they can't double-count.
+        typedRef.current = feedTypedBuffer(typedRef.current, data, (line) => {
+          const body = line.trim()
+          if (body.length >= MIN_TYPED_PROMPT) cbRef.current.onPromptTyped(body)
+        })
         socket?.emit('session:input', { sessionId: sessionIdRef.current, data })
       })
 
@@ -1106,6 +1222,34 @@ export interface AgentGridHandle {
   toggleSidebar: () => void
   /** Cycle keyboard focus to the next (+1) / previous (-1) terminal. */
   cycleTerminal: (dir: 1 | -1) => void
+  /**
+   * Paste `text` into pane `cellId` and press Enter. Returns false when that
+   * pane has no live PTY yet (still booting, or the id is stale) so the caller
+   * can leave the card queued instead of pretending it ran.
+   */
+  dispatchPrompt: (cellId: string, text: string) => boolean
+  /**
+   * Trailing output of pane `cellId`, raw. The board snapshots this when a card
+   * finishes so the agent's answer/suggestion lands on the card. '' if the pane
+   * is gone or has printed nothing.
+   */
+  paneTail: (cellId: string) => string
+}
+
+/** Human label for a pane: its given name, else its folder, else its CLI. */
+function paneLabel(c: GridCell): string {
+  return (c.name && c.name.trim())
+    || folderLabel(c.cwd)
+    || (CLI_OPTIONS.find((o) => o.value === c.cliType)?.label ?? c.cliType)
+}
+
+/** A live terminal pane, as the Kanban board sees it. */
+export interface PaneInfo {
+  id: string
+  name: string
+  cliType: CliType
+  /** 'running' = PTY is producing output right now. */
+  status: 'running' | 'idle'
 }
 
 type ViewMode = 'grid' | 'overlay'
@@ -1123,6 +1267,14 @@ interface AgentGridProps {
   hostedUserId?: string
   /** Available hosted projects (from useHostedAuth) for per-pane selector. */
   hostedProjects?: HostedProject[]
+  /**
+   * Fires whenever the pane roster or any pane's busy/idle status changes.
+   * Kanban mode reads this to know which agent a card is running on and when
+   * that agent went quiet (→ move the card to Review). Must be stable.
+   */
+  onPanesChange?: (panes: PaneInfo[]) => void
+  /** A prompt was typed by hand into a pane (not dispatched by the board). */
+  onPromptTyped?: (cellId: string, text: string) => void
 }
 
 interface PersistShape {
@@ -1580,9 +1732,12 @@ function DaemonTakeoverModal({
 
 function AgentGridInner({
   socket, containerWidth, containerHeight, storageKey, terminalOpacity = 1, hostedApiUrl, hostedToken, hostedUserId, hostedProjects,
-  apiRef,
+  onPanesChange, onPromptTyped, apiRef,
 }: AgentGridProps & { containerWidth: number; containerHeight: number; apiRef: React.MutableRefObject<AgentGridHandle> }) {
   const key = storageKey || STORAGE_KEY
+  // Held in a ref so a new callback identity can't restart a pane's terminal.
+  const onPromptTypedRef = useRef(onPromptTyped)
+  onPromptTypedRef.current = onPromptTyped
   const [cells, setCells] = useState<GridCell[]>([])
   const [layouts, setLayouts] = useState<ResponsiveLayouts>({ lg: [] })
   const [fontSize, setFontSize] = useState(DEFAULT_FONT)
@@ -2315,8 +2470,25 @@ function AgentGridInner({
     apiRef.current = {
       addTerminal: () => addCell(), arrange, closeActive, importSessions,
       toggleOverlay, toggleLighting, toggleSidebar, cycleTerminal: cycleActive,
+      dispatchPrompt: (cellId, text) => {
+        const api = cellApiRef.current.get(cellId)
+        if (!api) return false
+        // run() reports whether the pty actually took the prompt — don't focus
+        // or steal the active pane for a write that didn't happen.
+        const sent = api.run(text)
+        if (!sent) return false
+        setActive(cellId)
+        api.focus()
+        return true
+      },
+      // Defensive call: a pane hot-reloaded mid-session can still be holding an
+      // API object from before this method existed.
+      paneTail: (cellId) => {
+        const api = cellApiRef.current.get(cellId)
+        return typeof api?.tail === 'function' ? api.tail() : ''
+      },
     }
-  }, [apiRef, addCell, arrange, closeActive, importSessions, toggleOverlay, toggleLighting, toggleSidebar, cycleActive])
+  }, [apiRef, addCell, arrange, closeActive, importSessions, toggleOverlay, toggleLighting, toggleSidebar, cycleActive, setActive])
 
   // Grid-level keyboard shortcuts for when NO terminal is focused (the focused
   // case is handled inside the pane so the keys don't reach the shell).
@@ -2420,6 +2592,17 @@ function AgentGridInner({
     api?.seed(item.prompt)
   }, [setActive])
 
+  // Publish the pane roster + busy/idle to the host page (Kanban mode).
+  useEffect(() => {
+    if (!onPanesChange) return
+    onPanesChange(cells.map((c) => ({
+      id: c.id,
+      name: paneLabel(c),
+      cliType: c.cliType,
+      status: statuses[c.id] === 'running' ? 'running' : 'idle',
+    })))
+  }, [cells, statuses, onPanesChange])
+
   // Shared cell renderer so grid + overlay modes stay in lockstep on props.
   const renderTerminalCell = (cell: GridCell) => (
     <TerminalCell
@@ -2470,6 +2653,7 @@ function AgentGridInner({
       onFinished={() => markFinished(cell.id)}
       onUserInput={() => markUserInput(cell.id)}
       onSubmit={() => markUserSubmit(cell.id)}
+      onPromptTyped={(text) => onPromptTypedRef.current?.(cell.id, text)}
       registerApi={(api) => {
         if (api) cellApiRef.current.set(cell.id, api)
         else cellApiRef.current.delete(cell.id)
@@ -2479,9 +2663,7 @@ function AgentGridInner({
 
   // Left rail as tabs — shown alongside both modes.
   const dockItems: DockItem[] = cells.map((c) => {
-    const disp = (c.name && c.name.trim())
-      || folderLabel(c.cwd)
-      || (CLI_OPTIONS.find((o) => o.value === c.cliType)?.label ?? c.cliType)
+    const disp = paneLabel(c)
     return { id: c.id, name: disp, cliType: c.cliType, label: disp }
   })
   const sidebarEl = sidebarOpen ? (
@@ -2810,13 +2992,15 @@ function AgentGridInner({
 }
 
 export const AgentGrid = forwardRef<AgentGridHandle, AgentGridProps>(function AgentGrid(
-  { socket, storageKey, terminalOpacity, hostedApiUrl, hostedToken, hostedUserId, hostedProjects }, ref,
+  { socket, storageKey, terminalOpacity, hostedApiUrl, hostedToken, hostedUserId, hostedProjects, onPanesChange, onPromptTyped }, ref,
 ) {
   const { containerRef, width } = useContainerWidth()
   const [height, setHeight] = useState(0)
   const apiRef = useRef<AgentGridHandle>({
     addTerminal() {}, arrange() {}, closeActive() {}, importSessions() {},
     toggleOverlay() {}, toggleLighting() {}, toggleSidebar() {}, cycleTerminal() {},
+    dispatchPrompt: () => false,
+    paneTail: () => '',
   })
   useImperativeHandle(ref, () => ({
     addTerminal: () => apiRef.current.addTerminal(),
@@ -2827,6 +3011,8 @@ export const AgentGrid = forwardRef<AgentGridHandle, AgentGridProps>(function Ag
     toggleLighting: () => apiRef.current.toggleLighting(),
     toggleSidebar: () => apiRef.current.toggleSidebar(),
     cycleTerminal: (dir) => apiRef.current.cycleTerminal(dir),
+    dispatchPrompt: (cellId, text) => apiRef.current.dispatchPrompt(cellId, text),
+    paneTail: (cellId) => apiRef.current.paneTail(cellId),
   }), [])
 
   // Available height for the grid = the scroll container's inner content box
@@ -2861,6 +3047,8 @@ export const AgentGrid = forwardRef<AgentGridHandle, AgentGridProps>(function Ag
           hostedToken={hostedToken}
           hostedUserId={hostedUserId}
           hostedProjects={hostedProjects}
+          onPanesChange={onPanesChange}
+          onPromptTyped={onPromptTyped}
           apiRef={apiRef}
         />
       )}
