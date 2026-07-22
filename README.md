@@ -37,7 +37,7 @@ Orquesta Terminal ships as a **native desktop app** (built with [Tauri](https://
 | **Linux** · AppImage | [Orquesta.Terminal_0.1.14_amd64.AppImage](https://github.com/Getorquesta/orquesta-terminal/releases/download/v0.1.14/Orquesta.Terminal_0.1.14_amd64.AppImage) |
 | **Linux** · Debian/Ubuntu `.deb` | [Orquesta.Terminal_0.1.14_amd64.deb](https://github.com/Getorquesta/orquesta-terminal/releases/download/v0.1.14/Orquesta.Terminal_0.1.14_amd64.deb) |
 | **Windows** · installer `.exe` | [Orquesta.Terminal_0.1.14_x64-setup.exe](https://github.com/Getorquesta/orquesta-terminal/releases/download/v0.1.14/Orquesta.Terminal_0.1.14_x64-setup.exe) |
-| **macOS** | Use the [web version](https://getorquesta.com) for now — native installer coming soon |
+| **macOS** · Universal `.dmg` | [Orquesta.Terminal_0.1.14_universal.dmg](https://github.com/Getorquesta/orquesta-terminal/releases/download/v0.1.14/Orquesta.Terminal_0.1.14_universal.dmg) |
 
 Latest builds are always on the [Releases page](https://github.com/Getorquesta/orquesta-terminal/releases/latest).
 
@@ -137,7 +137,7 @@ Integrations with companion tools:
 
 | Mode | Status | How |
 |------|--------|-----|
-| **Desktop** | ✅ Linux · ✅ Windows | [Download](#download) the AppImage/`.deb`/`.exe` (Tauri native app); macOS via web for now |
+| **Desktop** | ✅ Linux · ✅ Windows · ✅ macOS | [Download](#download) the AppImage/`.deb`/`.exe`/`.dmg` (Tauri native app) |
 | **Web** | ✅ Ready | `npm run dev` → browser, or [getorquesta.com](https://getorquesta.com) |
 | **TUI** | 🚧 Coming | `npm run tui` → terminal-native UI |
 
