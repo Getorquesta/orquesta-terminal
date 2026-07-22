@@ -9,7 +9,8 @@
 
 This is a **frontend product** (Next.js) that connects to a backend:
 - **Self-hosted mode**: connects to `orquesta-oss` running locally (WebSocket + REST)
-- **Cloud mode**: connects to `getorquesta.com` directly (via `/api/hosted/proxy` to avoid CORS)
+- **Cloud mode**: connects to Orquesta Cloud, proxied through the Tauri backend
+  (`src-tauri/src/cloud.rs`) so the webview never hits CORS
 
 The agent (`agent/index.js`) runs alongside and:
 - Spawns PTYs for terminal sessions
@@ -20,9 +21,12 @@ The agent (`agent/index.js`) runs alongside and:
 
 | Repo | Purpose |
 |------|---------|
-| `Getorquesta/orquesta-oss` | Self-hosted backend (Prisma, SQLite, Socket.io, better-auth) |
+| `Getorquesta/orquesta-oss` | Self-hosted backend |
 | `Getorquesta/orquesta-terminal` | This repo — the terminal product |
-| `opcastil11/orquesta` | Private hosted platform (getorquesta.com) |
+
+Orquesta Cloud ([getorquesta.com](https://getorquesta.com)) is the managed
+platform this terminal can connect to. Its source is not public; from this
+repo's point of view it is just the REST + WebSocket API documented above.
 
 ## Rules
 
@@ -30,7 +34,7 @@ The agent (`agent/index.js`) runs alongside and:
 - **Port**: Dev runs on port 4000 (`npm run dev`)
 - **Backend**: Self-hosted OSS runs on port 3000
 - **No DB**: This repo has NO database — it's a pure frontend + agent
-- **Proxy**: All calls to hosted APIs go through `/api/hosted/proxy` (CORS)
+- **Proxy**: Calls to the cloud API go through the Tauri command layer (CORS)
 - **Agent**: The agent connects to the backend (OSS or hosted) via socket.io
 
 ## Key Files
@@ -40,7 +44,7 @@ The agent (`agent/index.js`) runs alongside and:
 - `components/features/CommandPalette.tsx` — ⌘K command palette
 - `hooks/useSocket.ts` — WebSocket connection to backend
 - `hooks/useHostedAuth.ts` — Auth against Orquesta Cloud
-- `app/api/hosted/proxy/route.ts` — Server-side proxy for CORS
+- `lib/tauri-proxy.ts` / `src-tauri/src/cloud.rs` — Cloud API calls without CORS
 - `agent/index.js` — Local agent (PTY spawner, hook manager, session detector)
 - `src/tui/index.ts` — TUI mode entry point (coming soon)
 

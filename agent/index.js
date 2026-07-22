@@ -620,7 +620,7 @@ function claudeProjectsRoot() {
 
 // Decode the Claude project dir name back to the original cwd
 function decodeDirName(encoded) {
-  // Claude Code encodes cwd as: /home/kai/foo → -home-kai-foo
+  // Claude Code encodes cwd as: /home/user/foo → -home-user-foo
   return '/' + encoded.replace(/^-/, '').replace(/-/g, '/')
 }
 
