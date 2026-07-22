@@ -318,6 +318,43 @@ function CursorOverlay({ cursors }: { cursors: RemoteCursor[] }) {
   )
 }
 
+/**
+ * Rebuild the line the human is typing from xterm's raw keystroke stream, so a
+ * prompt sent by hand can show up on the board like a dispatched one.
+ *
+ * We only ever see what the user *sends*, never what the CLI echoes back, so
+ * this has to reconstruct the line itself: honour backspace, drop escape
+ * sequences (arrows, history recall, function keys), strip the paste brackets
+ * xterm frames a paste with, and treat CR/LF as submit. Ctrl-C abandons the
+ * line, same as the shell would.
+ *
+ * Returns the new buffer; `submit` fires once per completed line.
+ */
+export function feedTypedBuffer(buf: string, data: string, submit: (line: string) => void): string {
+  let out = buf
+  const clean = data.replace(/\x1b\[20[01]~/g, '')
+  for (let i = 0; i < clean.length; i++) {
+    const ch = clean[i]
+    if (ch === '\r' || ch === '\n') { submit(out); out = ''; continue }
+    if (ch === '\x7f' || ch === '\b') { out = out.slice(0, -1); continue }
+    if (ch === '\x03') { out = ''; continue }
+    if (ch === '\x1b') {
+      // Skip to the sequence terminator rather than trying to parse it.
+      while (i < clean.length && !/[a-zA-Z~]/.test(clean[i])) i++
+      continue
+    }
+    if (ch < ' ') continue
+    out += ch
+  }
+  return out
+}
+
+/**
+ * Below this, a submitted line is an answer rather than a prompt — "y", "no",
+ * a menu pick. Cheap heuristic, and a wrong guess only costs a card you delete.
+ */
+const MIN_TYPED_PROMPT = 4
+
 interface TerminalCellProps {
   cellId: string
   socket: TauriHandle | null
@@ -365,6 +402,9 @@ interface TerminalCellProps {
   /** Fired when the user presses Enter (i.e. actually SENDS a prompt/line).
    *  Sudden-death reads this — you defuse by sending a prompt, not by typing. */
   onSubmit: () => void
+  /** Fired with the text of a prompt the user typed straight into this pane —
+   *  the board turns it into a card so hand-sent work shows as running too. */
+  onPromptTyped: (text: string) => void
   /** Highlight this pane (lighting mode just surfaced it). */
   attention?: boolean
 }
@@ -373,7 +413,7 @@ function TerminalCell({
   cellId, socket, cliType, name, fontSize, opacity, hostedApiUrl, hostedToken, hostedUserId,
   hostedProjects, hostedProjectId, cwd, resumeId, daemonRunning,
   onClose, onCliTypeChange, onRename, onHostedProjectChange, onMakeAgent, onPickFolder, onFocusCell, onNew, onArrange, onZoom, registerApi,
-  onActivity, onFinished, onUserInput, onSubmit, attention,
+  onActivity, onFinished, onUserInput, onSubmit, onPromptTyped, attention,
 }: TerminalCellProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const termRef = useRef<import('@xterm/xterm').Terminal | null>(null)
@@ -407,6 +447,9 @@ function TerminalCell({
   // API on mount but startSession() only runs ~100ms later, and a session can
   // end. Reporting that honestly lets the board keep the card instead of
   // parking it in Running against a prompt that was never sent.
+  /** In-progress line the user is typing (see feedTypedBuffer). */
+  const typedRef = useRef('')
+
   const runInput = useCallback((text: string) => {
     const sid = sessionIdRef.current
     if (!sid || !socket || !text) return false
@@ -433,8 +476,8 @@ function TerminalCell({
 
   // Latest callbacks in refs so the (heavy) init effect never re-runs when a
   // parent handler's identity changes — only cellId/socket/cliType restart it.
-  const cbRef = useRef({ onClose, onFocusCell, onNew, onArrange, onZoom, registerApi, onActivity, onFinished, onUserInput, onSubmit })
-  cbRef.current = { onClose, onFocusCell, onNew, onArrange, onZoom, registerApi, onActivity, onFinished, onUserInput, onSubmit }
+  const cbRef = useRef({ onClose, onFocusCell, onNew, onArrange, onZoom, registerApi, onActivity, onFinished, onUserInput, onSubmit, onPromptTyped })
+  cbRef.current = { onClose, onFocusCell, onNew, onArrange, onZoom, registerApi, onActivity, onFinished, onUserInput, onSubmit, onPromptTyped }
   const fontRef = useRef(fontSize)
   fontRef.current = fontSize
   // Hosted-hook target read live at (re)connect time so toggling it from the
@@ -661,6 +704,13 @@ function TerminalCell({
           startSession(true)
           return
         }
+        // Reconstruct what's being typed so a hand-sent prompt can reach the
+        // board. Board dispatches go straight to socket.emit and never pass
+        // through here, so they can't double-count.
+        typedRef.current = feedTypedBuffer(typedRef.current, data, (line) => {
+          const body = line.trim()
+          if (body.length >= MIN_TYPED_PROMPT) cbRef.current.onPromptTyped(body)
+        })
         socket?.emit('session:input', { sessionId: sessionIdRef.current, data })
       })
 
@@ -1179,6 +1229,8 @@ interface AgentGridProps {
    * that agent went quiet (→ move the card to Review). Must be stable.
    */
   onPanesChange?: (panes: PaneInfo[]) => void
+  /** A prompt was typed by hand into a pane (not dispatched by the board). */
+  onPromptTyped?: (cellId: string, text: string) => void
 }
 
 interface PersistShape {
@@ -1636,9 +1688,12 @@ function DaemonTakeoverModal({
 
 function AgentGridInner({
   socket, containerWidth, containerHeight, storageKey, terminalOpacity = 1, hostedApiUrl, hostedToken, hostedUserId, hostedProjects,
-  onPanesChange, apiRef,
+  onPanesChange, onPromptTyped, apiRef,
 }: AgentGridProps & { containerWidth: number; containerHeight: number; apiRef: React.MutableRefObject<AgentGridHandle> }) {
   const key = storageKey || STORAGE_KEY
+  // Held in a ref so a new callback identity can't restart a pane's terminal.
+  const onPromptTypedRef = useRef(onPromptTyped)
+  onPromptTypedRef.current = onPromptTyped
   const [cells, setCells] = useState<GridCell[]>([])
   const [layouts, setLayouts] = useState<ResponsiveLayouts>({ lg: [] })
   const [fontSize, setFontSize] = useState(DEFAULT_FONT)
@@ -2548,6 +2603,7 @@ function AgentGridInner({
       onFinished={() => markFinished(cell.id)}
       onUserInput={() => markUserInput(cell.id)}
       onSubmit={() => markUserSubmit(cell.id)}
+      onPromptTyped={(text) => onPromptTypedRef.current?.(cell.id, text)}
       registerApi={(api) => {
         if (api) cellApiRef.current.set(cell.id, api)
         else cellApiRef.current.delete(cell.id)
@@ -2886,7 +2942,7 @@ function AgentGridInner({
 }
 
 export const AgentGrid = forwardRef<AgentGridHandle, AgentGridProps>(function AgentGrid(
-  { socket, storageKey, terminalOpacity, hostedApiUrl, hostedToken, hostedUserId, hostedProjects, onPanesChange }, ref,
+  { socket, storageKey, terminalOpacity, hostedApiUrl, hostedToken, hostedUserId, hostedProjects, onPanesChange, onPromptTyped }, ref,
 ) {
   const { containerRef, width } = useContainerWidth()
   const [height, setHeight] = useState(0)
@@ -2940,6 +2996,7 @@ export const AgentGrid = forwardRef<AgentGridHandle, AgentGridProps>(function Ag
           hostedUserId={hostedUserId}
           hostedProjects={hostedProjects}
           onPanesChange={onPanesChange}
+          onPromptTyped={onPromptTyped}
           apiRef={apiRef}
         />
       )}

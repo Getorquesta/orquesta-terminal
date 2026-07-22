@@ -107,6 +107,8 @@ export interface UseKanban {
   move: (id: string, to: ColumnId, beforeId?: string) => string | null
   /** Send a card's prompt to its pane now (used by Queued → Running and Retry). */
   dispatch: (id: string) => string | null
+  /** Record a prompt the user typed straight into a pane as a running card. */
+  capture: (paneId: string, text: string) => void
   approve: (id: string) => void
   rework: (id: string, feedback: string) => void
   clearDone: () => void
@@ -244,6 +246,38 @@ export function useKanban({
     return null
   }, [resolvePane])
 
+  /**
+   * A prompt sent by hand, straight into a pane. The board didn't dispatch it,
+   * but the whole point of the Running column is "what is an agent doing right
+   * now" — hand-sent work belongs there too, and from here it follows exactly
+   * the same path: the pane going quiet promotes it to Review.
+   *
+   * Shell panes are left alone: every `ls` and `cd` would become a card.
+   */
+  const capture = useCallback((paneId: string, text: string) => {
+    const pane = panesRef.current.find((p) => p.id === paneId)
+    if (!pane || pane.cliType === 'shell') return
+    // A card already owns this pane — this line is an answer to it (a "yes", a
+    // menu pick, a follow-up), not a new piece of work.
+    if (cardsRef.current.some((c) => c.column === 'running' && c.paneId === paneId)) return
+    const now = Date.now()
+    setCards((prev) => [
+      ...prev,
+      {
+        id: newId(),
+        text,
+        column: 'running',
+        paneId: pane.id,
+        paneName: pane.name,
+        tags: ['typed'],
+        createdAt: now,
+        dispatchedAt: now,
+        sawRunning: false,
+        order: topOrder(prev, 'running'),
+      },
+    ])
+  }, [])
+
   const move = useCallback((id: string, to: ColumnId, beforeId?: string): string | null => {
     const card = cardsRef.current.find((c) => c.id === id)
     if (!card) return null
@@ -325,5 +359,5 @@ export function useKanban({
     })
   }, [panes, cards])
 
-  return { cards, byColumn, add, update, remove, move, dispatch, approve, rework, clearDone }
+  return { cards, byColumn, add, update, remove, move, dispatch, capture, approve, rework, clearDone }
 }

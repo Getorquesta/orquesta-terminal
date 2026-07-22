@@ -104,6 +104,14 @@ export default function TerminalWorkspacePage() {
     [],
   )
   const board = useKanban({ scope: projectId, panes, dispatchPrompt })
+  // Prompts typed straight into a pane land on the board too. Routed through a
+  // ref because `board` is a fresh object each render and an unstable callback
+  // here would restart every pane's terminal.
+  const boardRef = useRef(board)
+  boardRef.current = board
+  const onPromptTyped = useCallback((paneId: string, text: string) => {
+    boardRef.current.capture(paneId, text)
+  }, [])
 
   // Load projects from backend (optional — only if self-hosted OSS is running)
   useEffect(() => {
@@ -564,6 +572,7 @@ export default function TerminalWorkspacePage() {
             hostedUserId={hosted.auth?.userId}
             hostedProjects={hosted.auth?.projects}
             onPanesChange={onPanesChange}
+            onPromptTyped={onPromptTyped}
           />
         </div>
 

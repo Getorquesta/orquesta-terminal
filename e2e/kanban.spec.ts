@@ -337,6 +337,65 @@ test('a card follows its agent: running while it works, review when it goes quie
   await expect(page.getByTestId('count-done')).toHaveText('1')
 })
 
+// ── Prompts typed by hand ───────────────────────────────────────────────────
+
+/** Open panes as an agent CLI rather than a plain shell. */
+const asAgentPane = `try { localStorage.setItem('orq-term-settings', JSON.stringify({ cli: {}, defaultCli: 'claude' })) } catch (e) {}`
+
+test('a prompt typed straight into an agent pane shows up as running', async ({ page }) => {
+  await page.addInitScript(asAgentPane)
+  await page.goto('/')
+  await page.waitForSelector('header', { state: 'visible' })
+  await openLivePane(page)
+  const sessionId = await liveSessionId(page)
+
+  // Type into the terminal itself — the board never sees this dispatch.
+  await page.locator('.xterm-helper-textarea').first().focus()
+  await page.keyboard.type('check the memory usage on prod')
+  await page.keyboard.press('Enter')
+
+  await openBoard(page)
+  await expect(page.getByTestId('count-running')).toHaveText('1', { timeout: 10_000 })
+  await expect(page.getByTestId('kanban-column-running')).toContainText('check the memory usage on prod')
+
+  // …and it follows the pane out of Running like any other card.
+  await emit(page, 'session:output', { sessionId, data: 'reading…\r\n' })
+  await expect(page.getByTestId('count-review')).toHaveText('1', { timeout: 10_000 })
+})
+
+test('typing an answer to a card already running adds nothing', async ({ page }) => {
+  await page.addInitScript(asAgentPane)
+  await page.addInitScript(seed([card({ id: 'k_own', text: 'Owns the pane' })]))
+  await page.goto('/')
+  await page.waitForSelector('header', { state: 'visible' })
+  await openLivePane(page)
+
+  await openBoard(page)
+  await page.getByTestId('card-run').first().click()
+  await expect(page.getByTestId('count-running')).toHaveText('1', { timeout: 10_000 })
+
+  await page.getByTestId('kanban-close').click()
+  await page.locator('.xterm-helper-textarea').first().focus()
+  await page.keyboard.type('yes go ahead with that')
+  await page.keyboard.press('Enter')
+
+  await openBoard(page)
+  await expect(page.getByTestId('count-running')).toHaveText('1')
+})
+
+test('shell panes do not turn every command into a card', async ({ page }) => {
+  await page.goto('/')            // default pane type is shell
+  await page.waitForSelector('header', { state: 'visible' })
+  await openLivePane(page)
+
+  await page.locator('.xterm-helper-textarea').first().focus()
+  await page.keyboard.type('git status --short')
+  await page.keyboard.press('Enter')
+
+  await openBoard(page)
+  await expect(page.getByTestId('count-running')).toHaveText('0')
+})
+
 // ── Regressions ─────────────────────────────────────────────────────────────
 
 test('a card dispatched into an already-busy pane still reaches Review', async ({ page }) => {
