@@ -20,7 +20,7 @@
 
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import type { PaneInfo } from '@/components/features/AgentGrid'
-import { cleanOutput, pickSuggestion } from '@/lib/ptyText'
+import { cleanOutput, pickSuggestions } from '@/lib/ptyText'
 
 export const COLUMNS = ['backlog', 'queued', 'running', 'review', 'done'] as const
 export type ColumnId = (typeof COLUMNS)[number]
@@ -61,8 +61,11 @@ export interface KanbanCard {
    * what you ASKED and nothing about what came back.
    */
   result?: string
-  /** The one line of `result` worth acting on — usually the agent's question. */
-  suggestion?: string
+  /**
+   * The actionable items in `result` — the agent's question, or each entry of
+   * the "quickest wins" list it just handed you. One card each, if you want.
+   */
+  suggestions?: string[]
   /** Manual ordering within a column (lower = higher up). */
   order: number
 }
@@ -113,9 +116,15 @@ function load(scope: string): KanbanCard[] {
     if (!parsed || !Array.isArray(parsed.cards)) return []
     // A card left mid-flight by a reload can't still be running — no PTY is
     // attached to it any more. Park it in Review so the run isn't lost silently.
-    return parsed.cards.map((c) =>
-      c.column === 'running' ? { ...c, column: 'review' as ColumnId, finishedAt: c.finishedAt ?? Date.now() } : c,
-    )
+    return parsed.cards.map((c) => {
+      // v1 stored a single `suggestion`; it's a list now (an agent's closing
+      // advice is usually several separate things to do).
+      const legacy = (c as KanbanCard & { suggestion?: string }).suggestion
+      const migrated = legacy && !c.suggestions ? { ...c, suggestions: [legacy] } : c
+      return migrated.column === 'running'
+        ? { ...migrated, column: 'review' as ColumnId, finishedAt: migrated.finishedAt ?? Date.now() }
+        : migrated
+    })
   } catch {
     return []
   }
@@ -273,7 +282,7 @@ export function useKanban({
               finishedAt: undefined,
               sawRunning: false,
               result: undefined,
-              suggestion: undefined,
+              suggestions: undefined,
               order: topOrder(prev, 'running'),
             }
           : c,
@@ -426,12 +435,13 @@ export function useKanban({
         // Snapshot what the agent left on screen NOW — the pane keeps writing,
         // and by the time a human opens the card the answer may be scrolled off.
         const result = cleanOutput(tailRef.current?.(pane.id) ?? '')
+        const items = pickSuggestions(result)
         return {
           ...c,
           column: 'review' as ColumnId,
           finishedAt: now,
           result: result || undefined,
-          suggestion: pickSuggestion(result) || undefined,
+          suggestions: items.length ? items : undefined,
           order: topOrder(prev, 'review'),
         }
       })

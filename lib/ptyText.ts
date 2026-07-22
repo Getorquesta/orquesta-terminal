@@ -64,25 +64,76 @@ export function cleanOutput(raw: string, maxLines = 14): string {
   return lines.slice(-maxLines).join('\n')
 }
 
+/** A list item: "- do the thing", "• do the thing", "2) do the thing". */
+const BULLET = /^\s*(?:[-*•·◦▪‣]|\d+[.)])\s+(.{8,})$/
+
+/** Lead-ins that announce a list of actions rather than a sentence. */
+const LEAD_IN =
+  /\b(wins?|steps?|options?|next|recommend\w*|suggest\w*|todo|ideas?|acciones|pasos|opciones|sugerencias|recomiendo|podr[íi]as?|puedo)\b/i
+
 /**
- * The one line of an agent's closing output most worth acting on.
- *
- * A question beats a statement: when an agent ends with "should I close X or
- * Y?" that question IS the next task, and it's exactly what the user wants
- * sitting on the board waiting for a decision. Failing that, the last thing it
- * said stands in as the summary.
+ * Split "a, b (x, y), and c" into three clauses. Commas inside brackets belong
+ * to the clause — "(5 running, ~1.7 GB total)" is one parenthetical, not two
+ * separate pieces of advice.
  */
-export function pickSuggestion(clean: string): string {
-  const lines = clean.split('\n').map((l) => l.trim()).filter(Boolean)
-  if (!lines.length) return ''
-  // Scan from the end: the latest question is the live one.
-  for (let i = lines.length - 1; i >= 0; i--) {
-    if (/[?？]\s*$/.test(lines[i])) {
-      // A question often spills over two lines — glue the previous one back on
-      // when it clearly runs into this one (no terminal punctuation).
-      const prev = i > 0 && !/[.!?:;•—]\s*$/.test(lines[i - 1]) && lines[i - 1].length < 120 ? lines[i - 1] : ''
-      return (prev ? `${prev} ${lines[i]}` : lines[i]).slice(0, 400)
-    }
+function splitClauses(text: string): string[] {
+  const out: string[] = []
+  let depth = 0
+  let cur = ''
+  const push = () => {
+    const t = cur.trim().replace(/^(?:and|or|y|o)\s+/i, '').replace(/[.;]+$/, '')
+    if (t.length >= 12) out.push(t)
+    cur = ''
   }
-  return lines[lines.length - 1].slice(0, 400)
+  for (const ch of text) {
+    if ('([{'.includes(ch)) depth++
+    else if (')]}'.includes(ch)) depth = Math.max(0, depth - 1)
+    if (depth === 0 && (ch === ',' || ch === ';')) { push(); continue }
+    cur += ch
+  }
+  push()
+  return out
+}
+
+/**
+ * What an agent's closing output is asking you to decide, as separate items.
+ *
+ * Three shapes, because agents end in all three:
+ *   - a bulleted/numbered list of actions
+ *   - one line that packs the list into prose ("Quickest wins: do a, do b, and do c")
+ *   - a question ("should I stop Waydroid or the dev server?")
+ * Each item comes back on its own so it can become its own card — a list of
+ * three "quickest wins" is three pieces of work, not one.
+ *
+ * Falls back to the last thing said, which at worst is a summary of the run.
+ */
+export function pickSuggestions(clean: string, max = 5): string[] {
+  const lines = clean.split('\n').map((l) => l.trim()).filter(Boolean)
+  if (!lines.length) return []
+  const tail = lines.slice(-25)
+  const cap = (s: string) => s.slice(0, 300)
+
+  const bullets = tail.map((l) => l.match(BULLET)?.[1]?.trim()).filter((s): s is string => !!s)
+  if (bullets.length >= 2) return bullets.slice(-max).map(cap)
+
+  // Prose list: a short lead-in, a colon, then clauses. Requiring either a
+  // recognisable lead-in word or three-plus clauses keeps ordinary sentences
+  // with a colon ("Error: connection refused, retrying") out of it.
+  for (let i = tail.length - 1; i >= 0; i--) {
+    const m = tail[i].match(/^(.{0,48}?):\s+(.{24,})$/)
+    if (!m) continue
+    const clauses = splitClauses(m[2])
+    if (clauses.length >= 2 && (LEAD_IN.test(m[1]) || clauses.length >= 3)) return clauses.slice(0, max).map(cap)
+  }
+
+  // A question, latest first. It often spills over two lines — glue the
+  // previous one back on when it clearly runs into this one.
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (!/[?？]\s*$/.test(lines[i])) continue
+    const prev = i > 0 && !/[.!?:;•—]\s*$/.test(lines[i - 1]) && lines[i - 1].length < 120 ? lines[i - 1] : ''
+    return [cap(prev ? `${prev} ${lines[i]}` : lines[i])]
+  }
+
+  if (bullets.length === 1) return [cap(bullets[0])]
+  return [cap(lines[lines.length - 1])]
 }

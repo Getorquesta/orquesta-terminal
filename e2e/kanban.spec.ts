@@ -594,3 +594,34 @@ test('the answer survives an agent that repaints its frame hundreds of times', a
   await expect(page.getByTestId('count-review')).toHaveText('1', { timeout: 25_000 })
   await expect(page.getByTestId('card-suggestion')).toContainText('Should I stop Waydroid or the dev server?')
 })
+
+test('a list of "quickest wins" becomes one queued card per win', async ({ page }) => {
+  // Real output, verbatim: agents just as often end with a list of actions as
+  // with a question, and three quickest wins are three pieces of work.
+  await page.addInitScript(seed([card({ id: 'k_wins', text: 'check the ram' })]))
+  await page.goto('/')
+  await page.waitForSelector('header', { state: 'visible' })
+  await openLivePane(page)
+
+  await openBoard(page)
+  await page.getByTestId('card-run').first().click()
+  await expect(page.getByTestId('count-running')).toHaveText('1', { timeout: 10_000 })
+
+  await emit(page, 'session:output', {
+    sessionId: await liveSessionId(page),
+    data:
+      'Quickest wins: close idle Claude sessions (5 running, ~1.7 GB total), ' +
+      'shut down the QEMU/Waydroid VM if you are not using Android, ' +
+      'and kill the next-server dev server if that project is not active.\r\n',
+  })
+  await expect(page.getByTestId('count-review')).toHaveText('1', { timeout: 25_000 })
+
+  // Three items — and the parenthetical's comma did not split one in half.
+  const items = page.getByTestId('card-suggestion')
+  await expect(items).toHaveCount(3)
+  await expect(items.first()).toContainText('close idle Claude sessions (5 running, ~1.7 GB total)')
+  await expect(items.nth(2)).toContainText('kill the next-server dev server')
+
+  await page.getByTestId('card-queue-all').click()
+  await expect(page.getByTestId('count-queued')).toHaveText('3')
+})

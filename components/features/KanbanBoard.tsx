@@ -263,14 +263,24 @@ function Card({
         </div>
       )}
 
-      {card.column === 'review' && card.suggestion && (
-        <div className="mt-1.5 rounded border border-amber-500/25 bg-amber-500/5 px-1.5 py-1">
-          <p data-testid="card-suggestion" className="flex items-start gap-1 text-[10px] leading-snug text-amber-100/90">
-            <Lightbulb className="mt-px h-2.5 w-2.5 shrink-0 text-amber-400" />
-            <span className="break-words">{card.suggestion}</span>
-          </p>
-          {queueing ? (
-            <div className="mt-1 space-y-1">
+      {card.column === 'review' && card.suggestions?.length ? (
+        <div className="mt-1.5 space-y-1 rounded border border-amber-500/25 bg-amber-500/5 px-1.5 py-1">
+          {card.suggestions.map((s, i) => (
+            <div key={i} className="flex items-start gap-1">
+              <Lightbulb className="mt-px h-2.5 w-2.5 shrink-0 text-amber-400" />
+              <span data-testid="card-suggestion" className="flex-1 break-words text-[10px] leading-snug text-amber-100/90">{s}</span>
+              <button
+                onClick={() => { setSuggestText(s); setQueueing(true) }}
+                data-testid="card-queue-suggestion"
+                className="shrink-0 rounded border border-amber-500/25 px-1 text-[10px] leading-4 text-amber-300/90 transition-colors hover:bg-amber-500/20"
+                title="Make this its own card in Queued"
+              >
+                <ListPlus className="h-2.5 w-2.5" />
+              </button>
+            </div>
+          ))}
+          {queueing && (
+            <div className="space-y-1 pt-0.5">
               <textarea
                 autoFocus
                 value={suggestText}
@@ -294,18 +304,18 @@ function Card({
                 <button onClick={() => setQueueing(false)} className="px-1 text-[10px] text-zinc-600 hover:text-zinc-400">Cancel</button>
               </div>
             </div>
-          ) : (
+          )}
+          {!queueing && card.suggestions.length > 1 && (
             <button
-              onClick={() => { setSuggestText(card.suggestion ?? ''); setQueueing(true) }}
-              data-testid="card-queue-suggestion"
-              className="mt-1 inline-flex items-center gap-1 rounded border border-amber-500/25 px-1.5 py-0.5 text-[10px] text-amber-300/90 transition-colors hover:bg-amber-500/10"
-              title="Make this its own card in Queued"
+              onClick={() => card.suggestions?.forEach((s) => board.queueSuggestion(card.id, s))}
+              data-testid="card-queue-all"
+              className="inline-flex items-center gap-1 rounded border border-amber-500/25 px-1.5 py-0.5 text-[10px] text-amber-300/90 transition-colors hover:bg-amber-500/10"
             >
-              <ListPlus className="h-2.5 w-2.5" /> Queue this
+              <ListPlus className="h-2.5 w-2.5" /> Queue all {card.suggestions.length}
             </button>
           )}
         </div>
-      )}
+      ) : null}
 
       {card.column === 'review' && (
         <div className="mt-1.5">
