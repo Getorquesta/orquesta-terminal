@@ -18,6 +18,14 @@
   <a href="#features">Features</a>
 </p>
 
+<p align="center">
+  <img src="https://raw.githubusercontent.com/Getorquesta/orquesta-terminal/main/public/orquesta-terminal.gif" width="820" alt="Orquesta Terminal in action — multi-CLI grid, live timeline and plugin dock" />
+</p>
+
+<p align="center">
+  <sub>Three AI CLIs side by side in one workspace · shown at 2× speed — <a href="https://raw.githubusercontent.com/Getorquesta/orquesta-terminal/main/public/orquesta-terminal.mp4">watch the MP4</a></sub>
+</p>
+
 ---
 
 ## What is this?
