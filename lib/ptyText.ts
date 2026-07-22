@@ -24,14 +24,16 @@ const BOX = /[─-╿▀-▟]/g
  * a false positive here silently swallows the agent's answer.
  */
 const CHROME = [
-  /^\s*[>❯$#]\s*$/,                              // empty input prompt
-  /^\s*\?\s*for shortcuts/i,
-  /^\s*esc(ape)? to (interrupt|cancel)/i,
-  /^\s*(ctrl|shift|alt|cmd|⌘)\+/i,
-  /^\s*(auto-?accept|bypassing permissions|accept edits)/i,
-  /^\s*\(?\s*\d+[smh]?\s*·/,                     // "(12s · ↓ 1.4k tokens)"
-  /^\s*[✻✽✢·✳*]\s*\w+…/,                          // "✻ Thinking…" spinner frames
-  /^\s*\d+\s*(tokens?|lines?)\b/i,
+  /^[>❯$#]\s*$/,                                 // empty input prompt
+  /^\?\s*for shortcuts/i,
+  /^esc(ape)? to (interrupt|cancel)/i,
+  /^(ctrl|shift|alt|cmd|⌘)\+/i,
+  /^(auto-?accept|bypass\w*|accept edits)/i,
+  /^[⏵⏴▶▷]/,                                     // mode row: "⏵⏵ bypass permissions on"
+  /^[✻✽✢✳✶✷✸✹·*]\s/,                              // status row: "✻ Baked for 15s"
+  /^⚠\s*transcript saving/i,
+  /^\(?\s*\d+[smh]?\s*·/,                        // "(12s · ↓ 1.4k tokens)"
+  /^\d+\s*(tokens?|lines?)\b/i,
 ]
 
 /**
@@ -70,6 +72,14 @@ const BULLET = /^\s*(?:[-*•·◦▪‣]|\d+[.)])\s+(.{8,})$/
 /** Lead-ins that announce a list of actions rather than a sentence. */
 const LEAD_IN =
   /\b(wins?|steps?|options?|next|recommend\w*|suggest\w*|todo|ideas?|acciones|pasos|opciones|sugerencias|recomiendo|podr[íi]as?|puedo)\b/i
+
+/**
+ * How an agent hands the decision back without asking a literal question.
+ * "Dime si quieres que apague la VM." carries no '?', but it is exactly the
+ * thing the board exists to queue.
+ */
+const OFFER =
+  /^(dime |av[ií]same|d[ií]game|si quer[ée]s|si quieres|quieres que|puedo |te (puedo|sirvo)|¿|let me know|want me to|shall i|should i|i can |tell me (if|which)|would you like)/i
 
 /**
  * Split "a, b (x, y), and c" into three clauses. Commas inside brackets belong
@@ -132,6 +142,12 @@ export function pickSuggestions(clean: string, max = 5): string[] {
     if (!/[?？]\s*$/.test(lines[i])) continue
     const prev = i > 0 && !/[.!?:;•—]\s*$/.test(lines[i - 1]) && lines[i - 1].length < 120 ? lines[i - 1] : ''
     return [cap(prev ? `${prev} ${lines[i]}` : lines[i])]
+  }
+
+  // An offer to act, latest first: the same handover as a question, minus the
+  // question mark. Scanned after '?' so an explicit question still wins.
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (OFFER.test(lines[i]) && lines[i].length >= 24) return [cap(lines[i])]
   }
 
   if (bullets.length === 1) return [cap(bullets[0])]

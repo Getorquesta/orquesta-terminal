@@ -625,3 +625,49 @@ test('a list of "quickest wins" becomes one queued card per win', async ({ page 
   await page.getByTestId('card-queue-all').click()
   await expect(page.getByTestId('count-queued')).toHaveText('3')
 })
+
+test('the TUI footer never wins over what the agent offered to do', async ({ page }) => {
+  // Verbatim capture from the desktop app, taken out of its own localStorage
+  // after the user reported the card arriving with a useless suggestion on it.
+  // Claude Code's footer sits *below* the answer, so "the last line said" was
+  // the mode indicator; and the real handover ("Dime si quieres que…") carries
+  // no question mark, so nothing matched it either.
+  await page.addInitScript(seed([card({ id: 'k_footer', text: 'ver RAM' })]))
+  await page.goto('/')
+  await page.waitForSelector('header', { state: 'visible' })
+  await openLivePane(page)
+
+  await openBoard(page)
+  await page.getByTestId('card-run').first().click()
+  await expect(page.getByTestId('count-running')).toHaveText('1', { timeout: 10_000 })
+
+  await emit(page, 'session:output', {
+    sessionId: await liveSessionId(page),
+    data: [
+      'Consumo agrupado (RSS):',
+      'Proceso                 RAM',
+      'claude (varias instancias)       ~5,2 GB',
+      'chrome (varias pestanas)         ~4,1 GB',
+      'next-server                      969 MB',
+      'qemu-system-x86 (VM/multipass)   638 MB',
+      'Dime si quieres que identifique que sesiones de claude estan inactivas o que apague la VM.',
+      '\x1b[2m✻ Baked for 15s\x1b[0m',
+      '⚠ Transcript saving is off — inherited CLAUDE_CODE_CHILD_SESSION marker · restart with CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1',
+      '⏵⏵ bypass permissions on (shift+tab to cycle)',
+    ].join('\r\n') + '\r\n',
+  })
+  await expect(page.getByTestId('count-review')).toHaveText('1', { timeout: 25_000 })
+
+  const items = page.getByTestId('card-suggestion')
+  await expect(items).toHaveCount(1)
+  await expect(items.first()).toContainText('Dime si quieres que identifique')
+  await expect(items.first()).not.toContainText('bypass permissions')
+
+  // And the status furniture stays out of the output snapshot too.
+  await page.getByRole('button', { name: 'Agent output' }).click()
+  const out = page.getByTestId('card-result')
+  await expect(out).toContainText('qemu-system-x86')
+  await expect(out).not.toContainText('bypass permissions')
+  await expect(out).not.toContainText('Baked for')
+  await expect(out).not.toContainText('Transcript saving')
+})
