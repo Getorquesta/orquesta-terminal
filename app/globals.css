@@ -45,6 +45,10 @@
 :root {
   --background: #0a0c10;
   --foreground: #f5f7fa;
+  /* Tells the engine to render native chrome (form controls, popups, native
+     scrollbars) on the dark side — matters most for the <select> dropdown list,
+     which is an OS widget we can't style from here. */
+  color-scheme: dark;
 }
 
 body {
@@ -171,6 +175,29 @@ h1, h2, h3 {
 @keyframes caret-blink { 0%, 100% { opacity: 1 } 50% { opacity: 0 } }
 
 /* ── Chrome ───────────────────────────────────────────────────────────────── */
+
+/* Native <select> under WebKitGTK (the Tauri webview on Linux) is painted as a
+   GTK widget: it honours `color` but throws away `background-color`, so every
+   dark picker in the app rendered as a white pill with unreadable pale text.
+   Dropping the native appearance hands the background back to the bg-* utility
+   each select already carries; we redraw the chevron ourselves since removing
+   the appearance also removes the arrow. Deliberately unlayered so the
+   padding-right (chevron gutter) wins over the px-* utilities on each select. */
+select {
+  -webkit-appearance: none;
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23969eae' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 0.3rem center;
+  background-size: 0.6rem;
+  padding-right: 1.2rem;
+}
+select:hover { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23c3c9d4' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E"); }
+
+/* The popup list is an OS widget; these land in Chromium-family engines and are
+   harmless where they don't (WebKitGTK falls back to color-scheme: dark). */
+select option { background-color: #14171d; color: #cfd4de; }
+
 ::-webkit-scrollbar { width: 8px; height: 8px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: #2b313b; border-radius: 4px; border: 2px solid transparent; background-clip: padding-box; }
