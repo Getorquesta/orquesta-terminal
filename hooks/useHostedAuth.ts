@@ -5,6 +5,10 @@ import { hostedFetch } from '@/lib/tauri-proxy'
 
 const STORAGE_KEY = 'orquesta-hosted-auth'
 
+function hasTauri(): boolean {
+  return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
+}
+
 export interface HostedProject {
   id: string
   name: string
@@ -131,11 +135,24 @@ export function useHostedAuth() {
     const sessionId = crypto.randomUUID()
     const authPageUrl = `${url}/cli/auth?session=${sessionId}`
 
-    // Open popup
-    const popup = window.open(authPageUrl, 'orquesta-auth', 'width=500,height=650,popup=yes')
-    if (!popup) {
-      // Popup blocked — open in new tab
-      window.open(authPageUrl, '_blank')
+    let popup: Window | null = null
+
+    if (hasTauri()) {
+      try {
+        const { open } = await import('@tauri-apps/plugin-shell')
+        await open(authPageUrl)
+      } catch {
+        popup = window.open(authPageUrl, 'orquesta-auth', 'width=500,height=650,popup=yes')
+        if (!popup) window.open(authPageUrl, '_blank')
+      }
+    } else {
+      popup = window.open(authPageUrl, 'orquesta-auth', 'width=500,height=650,popup=yes')
+      if (!popup) {
+        const msg = 'Popup blocked — please allow popups for this site or use the token method below'
+        setError(msg)
+        setLoading(false)
+        throw new Error(msg)
+      }
     }
 
     try {

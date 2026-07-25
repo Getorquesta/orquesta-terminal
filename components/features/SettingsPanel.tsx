@@ -6,6 +6,7 @@
 // new terminals. Self-contained — loads on open, writes to localStorage on save.
 
 import { useEffect, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { X, Settings as SettingsIcon, Terminal as TerminalIcon } from 'lucide-react'
 import { loadSettings, saveSettings, YOLO_FLAGS, type OrqSettings } from '@/lib/cliSettings'
 
@@ -40,7 +41,7 @@ export function SettingsPanel({
 
   const save = () => { saveSettings(draft); onClose() }
 
-  return (
+  const panel = (
     <div
       className="fixed inset-0 z-[300] flex items-center justify-center bg-black/60 backdrop-blur-sm"
       onMouseDown={(e) => { if (e.target === e.currentTarget) onClose() }}
@@ -135,4 +136,5 @@ export function SettingsPanel({
       </div>
     </div>
   )
+  return createPortal(panel, document.body)
 }

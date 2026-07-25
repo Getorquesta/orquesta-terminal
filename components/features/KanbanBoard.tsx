@@ -404,7 +404,7 @@ function Column({
       }}
       // Columns share the width on a wide screen but never squeeze below
       // readable — past that the board scrolls sideways instead.
-      className={`flex h-full min-w-[264px] max-w-[420px] flex-1 flex-col rounded-xl border bg-zinc-950/60 transition-colors ${
+      className={`flex h-full min-w-[264px] flex-1 flex-col rounded-xl border bg-zinc-950/60 transition-colors ${
         over ? style.over : style.ring
       }`}
     >
@@ -508,7 +508,7 @@ export function KanbanBoard({
       </div>
 
       {/* Columns */}
-      <div className="flex flex-1 gap-2.5 overflow-x-auto p-3">
+      <div className="grid flex-1 gap-2.5 overflow-y-auto p-3" style={{ gridTemplateColumns: `repeat(${COLUMNS.length}, minmax(0, 1fr))` }}>
         {COLUMNS.map((id) => (
           <Column
             key={id}

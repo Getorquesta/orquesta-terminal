@@ -6,6 +6,7 @@ import Image from 'next/image'
 import { useRouter } from 'next/navigation'
 import { useTauri } from '@/hooks/useTauri'
 import { hostedFetch } from '@/lib/tauri-proxy'
+import pkg from '../package.json'
 import { AgentGrid, type AgentGridHandle, type ImportSpec, type PaneInfo } from '@/components/features/AgentGrid'
 import { KanbanBoard } from '@/components/features/KanbanBoard'
 import { useKanban } from '@/hooks/useKanban'
@@ -322,6 +323,9 @@ export default function TerminalWorkspacePage() {
             </span>
             <span className="rounded-full bg-green-500/12 px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider text-green-300 ring-1 ring-inset ring-green-500/25">
               workspace
+            </span>
+            <span className="rounded-full bg-white/5 px-1.5 py-0.5 font-mono text-[10px] leading-none text-zinc-500 ring-1 ring-inset ring-white/10">
+              v{pkg.version}
             </span>
           </div>
         </div>

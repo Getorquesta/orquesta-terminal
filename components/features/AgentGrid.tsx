@@ -2460,6 +2460,11 @@ function AgentGridInner({
       if (mod && e.shiftKey && k === 'o') { e.preventDefault(); toggleOverlay() }
       else if (mod && e.shiftKey && k === 'y') { e.preventDefault(); toggleLighting() }
       else if (mod && e.shiftKey && k === 'b') { e.preventDefault(); toggleSidebar() }
+      // Ctrl+← / Ctrl+→ cycle terminals
+      if ((e.ctrlKey) && !e.shiftKey && !e.altKey && !e.metaKey) {
+        if (e.key === 'ArrowLeft') { e.preventDefault(); e.stopImmediatePropagation(); cycleActive(-1); return }
+        if (e.key === 'ArrowRight') { e.preventDefault(); e.stopImmediatePropagation(); cycleActive(1); return }
+      }
     }
     window.addEventListener('keydown', onKey, true)
     return () => window.removeEventListener('keydown', onKey, true)
