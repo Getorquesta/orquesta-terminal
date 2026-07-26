@@ -515,7 +515,11 @@ pub async fn remote_list_agents(
     project_id: String,
 ) -> Result<Value, String> {
     let base = api_url.unwrap_or_else(|| "https://getorquesta.com".into());
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| e.to_string())?;
     let resp = client
         .get(format!("{base}/api/orquesta-cli/projects/{project_id}/agents"))
         .header("Authorization", format!("Bearer {token}"))
@@ -523,7 +527,19 @@ pub async fn remote_list_agents(
         .await
         .map_err(|e| e.to_string())?;
 
-    let body: Value = resp.json().await.map_err(|e| e.to_string())?;
+    // A server without this route answers 404 with an HTML page, which used to
+    // blow up in json() and reach the user as a bare "Failed to list agents".
+    // Report what actually happened instead.
+    let status = resp.status();
+    let body: Value = resp.json().await.unwrap_or(json!({}));
+    if !status.is_success() {
+        let msg = body["error"].as_str().map(str::to_string).unwrap_or_else(|| match status.as_u16() {
+            404 => format!("{base} has no agents API — the server needs updating"),
+            401 | 403 => "Not authorized for this project — sign in again".into(),
+            code => format!("Server returned {code}"),
+        });
+        return Ok(json!({ "ok": false, "error": msg }));
+    }
     Ok(body)
 }
 

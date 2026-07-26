@@ -88,7 +88,12 @@ export function RemoteSessionModal({
           return (new Date(b.lastSeen || 0).getTime()) - (new Date(a.lastSeen || 0).getTime())
         })
         setAgents(sorted)
-      }).catch(() => { setLoading(false); setError('Failed to list agents') })
+      }).catch((e: unknown) => {
+        setLoading(false)
+        // The Rust side already turns HTTP failures into a readable sentence;
+        // only a transport-level problem reaches here.
+        setError(typeof e === 'string' && e ? e : e instanceof Error ? e.message : 'Failed to list agents')
+      })
     })
   }, [socket, auth.apiUrl, auth.token])
 
