@@ -54,7 +54,17 @@ pub struct CloudConn {
     // Sender for frames to the cloud WebSocket (Phase 5: replace with rust_socketio client)
     pub tx: tokio::sync::mpsc::Sender<String>,
     pub refs: HashSet<String>,
+    /// Cleared by the socket's own tasks once it can no longer carry frames.
+    ///
+    /// Nothing else notices a dead connection: the reader and writer tasks just
+    /// exit, the entry stays in the map, and the bridge in between swallows the
+    /// send error — so every later frame vanishes and `remote_send` still
+    /// reports success. Callers must check this before reusing a cached conn.
+    pub alive: Alive,
 }
+
+/// Shared liveness flag for a cloud socket. See [`CloudConn::alive`].
+pub type Alive = Arc<std::sync::atomic::AtomicBool>;
 
 // ── Remote sessions ───────────────────────────────────────────────────────────
 

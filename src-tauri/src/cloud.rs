@@ -1,6 +1,7 @@
 // Phase 5: Full cloud WebSocket bridge via tokio-tungstenite + EIO4/Socket.io v4
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use futures_util::{SinkExt, StreamExt};
@@ -8,7 +9,7 @@ use serde_json::{json, Value};
 use tokio::sync::mpsc;
 use tokio_tungstenite::{connect_async_tls_with_config, tungstenite::Message};
 
-use crate::state::AppState;
+use crate::state::{Alive, AppState, CloudConn};
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -78,6 +79,33 @@ pub fn conn_key(api_url: &str, token: &str, project_id: &str) -> String {
     format!("{api_url}:{token}:{project_id}")
 }
 
+/// A fresh liveness flag for a socket that has just connected.
+fn new_alive() -> Alive {
+    Arc::new(AtomicBool::new(true))
+}
+
+/// Take a ref on the cached connection under `key`, if it is still usable.
+///
+/// Returns false when the caller has to build a new socket — either there was
+/// none, or the one we had is dead. Dead conns are evicted here because nothing
+/// else does it: a network drop or a relay restart only ends the socket's tasks,
+/// and reusing the leftover entry sends every frame into a void that reports
+/// success. That turned one lost connection into "remote sessions are broken
+/// until you restart the app".
+fn claim_live_conn(conns: &mut HashMap<String, CloudConn>, key: &str, session_id: &str) -> bool {
+    match conns.get_mut(key) {
+        Some(conn) if conn.alive.load(Ordering::Relaxed) => {
+            conn.refs.insert(session_id.to_string());
+            true
+        }
+        Some(_) => {
+            conns.remove(key);
+            false
+        }
+        None => false,
+    }
+}
+
 // ── CloudSocket ───────────────────────────────────────────────────────────────
 
 /// Handle to an active cloud WebSocket connection.
@@ -86,6 +114,8 @@ pub struct CloudSocket {
     pub tx: mpsc::Sender<Message>,
     /// Session IDs currently using this connection.
     pub refs: HashSet<String>,
+    /// Cleared by the reader/writer tasks when the socket dies. See [`Alive`].
+    pub alive: Alive,
 }
 
 // ── connect_socket ────────────────────────────────────────────────────────────
@@ -162,18 +192,22 @@ pub async fn connect_socket(
     // ── Spawn writer task ─────────────────────────────────────────────────────
 
     let (tx, mut rx) = mpsc::channel::<Message>(256);
+    let alive = new_alive();
 
+    let alive_writer = Arc::clone(&alive);
     tauri::async_runtime::spawn(async move {
         while let Some(msg) = rx.recv().await {
             if sink.send(msg).await.is_err() {
                 break;
             }
         }
+        alive_writer.store(false, Ordering::Relaxed);
     });
 
     // ── Spawn reader task ─────────────────────────────────────────────────────
 
     let tx_reader = tx.clone();
+    let alive_reader = Arc::clone(&alive);
     let project_id_owned = project_id.to_string();
     tauri::async_runtime::spawn(async move {
         while let Some(result) = stream.next().await {
@@ -204,9 +238,10 @@ pub async fn connect_socket(
                 Ok(_) => {} // binary / pong frames ignored
             }
         }
+        alive_reader.store(false, Ordering::Relaxed);
     });
 
-    Ok(CloudSocket { tx, refs: HashSet::new() })
+    Ok(CloudSocket { tx, refs: HashSet::new(), alive })
 }
 
 // ── handle_socketio_event ─────────────────────────────────────────────────────
@@ -372,10 +407,10 @@ pub async fn get_or_create_share_conn(
 ) -> Result<String, String> {
     let key = conn_key(api_url, cli_token, project_id);
 
-    // Check if we already have a live connection
+    // Reuse the connection we have — unless it died, in which case reconnect.
     let already_connected = {
-        let conns = state.cloud_conns.lock().unwrap();
-        conns.contains_key(&key)
+        let mut conns = state.cloud_conns.lock().unwrap();
+        claim_live_conn(&mut conns, &key, session_id)
     };
 
     if !already_connected {
@@ -394,10 +429,16 @@ pub async fn get_or_create_share_conn(
         // Bridge Message channel → String channel for CloudConn compatibility
         let (str_tx, mut str_rx) = mpsc::channel::<String>(256);
         let raw_tx = socket.tx.clone();
+        let alive_bridge = Arc::clone(&socket.alive);
 
         tauri::async_runtime::spawn(async move {
             while let Some(s) = str_rx.recv().await {
-                let _ = raw_tx.send(Message::Text(s.into())).await;
+                if raw_tx.send(Message::Text(s.into())).await.is_err() {
+                    // The writer task is gone — say so instead of silently
+                    // dropping this frame and every one after it.
+                    alive_bridge.store(false, Ordering::Relaxed);
+                    break;
+                }
             }
         });
 
@@ -407,17 +448,8 @@ pub async fn get_or_create_share_conn(
             refs.insert(session_id.to_string());
             conns.insert(
                 key.clone(),
-                crate::state::CloudConn {
-                    tx: str_tx,
-                    refs,
-                },
+                CloudConn { tx: str_tx, refs, alive: socket.alive },
             );
-        }
-    } else {
-        // Increment refs
-        let mut conns = state.cloud_conns.lock().unwrap();
-        if let Some(conn) = conns.get_mut(&key) {
-            conn.refs.insert(session_id.to_string());
         }
     }
 
@@ -712,8 +744,19 @@ async fn handle_remote_event(payload: &str, state: &Arc<AppState>) {
             let session_id = data["sessionId"].as_str().unwrap_or("").to_string();
             let _ = state.app_handle.emit("remote:ended", &data);
             if !session_id.is_empty() {
-                let mut remote_sessions = state.remote_sessions.lock().unwrap();
-                remote_sessions.remove(&session_id);
+                // Drop the connection ref as well. Forgetting only the session
+                // left the socket pinned open by a ref no one would ever
+                // release — the same cleanup an explicit End does.
+                let conn_key = {
+                    let remote_sessions = state.remote_sessions.lock().unwrap();
+                    remote_sessions.get(&session_id).map(|s| s.conn_key.clone())
+                };
+                match conn_key {
+                    Some(key) => remote_cleanup(&session_id, &key, state),
+                    None => {
+                        state.remote_sessions.lock().unwrap().remove(&session_id);
+                    }
+                }
             }
         }
         _ => {}
@@ -778,16 +821,20 @@ async fn connect_remote_socket(
     }
 
     let (tx, mut rx) = mpsc::channel::<Message>(256);
+    let alive = new_alive();
 
+    let alive_writer = Arc::clone(&alive);
     tauri::async_runtime::spawn(async move {
         while let Some(msg) = rx.recv().await {
             if sink.send(msg).await.is_err() {
                 break;
             }
         }
+        alive_writer.store(false, Ordering::Relaxed);
     });
 
     let tx_reader = tx.clone();
+    let alive_reader = Arc::clone(&alive);
     tauri::async_runtime::spawn(async move {
         while let Some(result) = stream.next().await {
             match result {
@@ -807,9 +854,10 @@ async fn connect_remote_socket(
                 Ok(_) => {}
             }
         }
+        alive_reader.store(false, Ordering::Relaxed);
     });
 
-    Ok(CloudSocket { tx, refs: HashSet::new() })
+    Ok(CloudSocket { tx, refs: HashSet::new(), alive })
 }
 
 /// The channel a project's agents live on. Everything about an interactive
@@ -831,9 +879,10 @@ pub async fn get_or_create_remote_conn(
     // Use a distinct key namespace so remote and share conns don't collide.
     let key = format!("remote::{}", conn_key(api_url, cli_token, project_id));
 
+    // Reuse the connection we have — unless it died, in which case reconnect.
     let already_connected = {
-        let conns = state.remote_conns.lock().unwrap();
-        conns.contains_key(&key)
+        let mut conns = state.remote_conns.lock().unwrap();
+        claim_live_conn(&mut conns, &key, session_id)
     };
 
     if !already_connected {
@@ -852,9 +901,13 @@ pub async fn get_or_create_remote_conn(
         // Bridge Message channel → String channel for CloudConn compatibility
         let (str_tx, mut str_rx) = mpsc::channel::<String>(256);
         let raw_tx = socket.tx.clone();
+        let alive_bridge = Arc::clone(&socket.alive);
         tauri::async_runtime::spawn(async move {
             while let Some(s) = str_rx.recv().await {
-                let _ = raw_tx.send(Message::Text(s.into())).await;
+                if raw_tx.send(Message::Text(s.into())).await.is_err() {
+                    alive_bridge.store(false, Ordering::Relaxed);
+                    break;
+                }
             }
         });
 
@@ -864,16 +917,8 @@ pub async fn get_or_create_remote_conn(
             refs.insert(session_id.to_string());
             conns.insert(
                 key.clone(),
-                crate::state::CloudConn {
-                    tx: str_tx,
-                    refs,
-                },
+                CloudConn { tx: str_tx, refs, alive: socket.alive },
             );
-        }
-    } else {
-        let mut conns = state.remote_conns.lock().unwrap();
-        if let Some(conn) = conns.get_mut(&key) {
-            conn.refs.insert(session_id.to_string());
         }
     }
 
@@ -899,11 +944,16 @@ pub async fn remote_send(
     ]));
     let tx = {
         let conns = state.remote_conns.lock().unwrap();
-        conns.get(conn_key).map(|c| c.tx.clone())
+        conns
+            .get(conn_key)
+            // A dead socket still accepts frames into the bridge for a moment;
+            // say the connection is gone rather than pretend this was sent.
+            .filter(|c| c.alive.load(Ordering::Relaxed))
+            .map(|c| c.tx.clone())
     };
     match tx {
         Some(tx) => tx.send(frame).await.map_err(|e| format!("remote_send {event}: {e}")),
-        None => Err(format!("No remote conn for key {conn_key}")),
+        None => Err(format!("Lost the connection to the cloud — reopen the session ({event})")),
     }
 }
 
@@ -962,6 +1012,42 @@ mod tests {
         assert_eq!(connect_frame("oclt_x"), r#"40{"cliToken":"oclt_x"}"#);
         // Quotes in a token would otherwise break out of the JSON.
         assert_eq!(connect_frame("a\"b"), r#"40{"cliToken":"a\"b"}"#);
+    }
+
+    /// A cached connection, alive or not.
+    fn conn(alive: bool) -> CloudConn {
+        CloudConn {
+            tx: mpsc::channel::<String>(1).0,
+            refs: HashSet::new(),
+            alive: Arc::new(AtomicBool::new(alive)),
+        }
+    }
+
+    #[test]
+    fn a_live_connection_is_reused_and_takes_the_ref() {
+        let mut conns = HashMap::new();
+        conns.insert("k".to_string(), conn(true));
+
+        assert!(claim_live_conn(&mut conns, "k", "sess-1"));
+        assert!(conns["k"].refs.contains("sess-1"));
+    }
+
+    #[test]
+    fn a_dead_connection_is_evicted_so_the_caller_reconnects() {
+        // Nothing else ever removes it: a network drop or a relay restart only
+        // ends the socket's tasks. Reusing the leftover entry is what made
+        // remote sessions stay broken until the app was restarted.
+        let mut conns = HashMap::new();
+        conns.insert("k".to_string(), conn(false));
+
+        assert!(!claim_live_conn(&mut conns, "k", "sess-1"));
+        assert!(!conns.contains_key("k"));
+    }
+
+    #[test]
+    fn an_unknown_key_means_connect() {
+        let mut conns = HashMap::new();
+        assert!(!claim_live_conn(&mut conns, "k", "sess-1"));
     }
 
     #[test]

@@ -539,16 +539,29 @@ pub async fn remote_list_agents(
     // blow up in json() and reach the user as a bare "Failed to list agents".
     // Report what actually happened instead.
     let status = resp.status();
-    let body: Value = resp.json().await.unwrap_or(json!({}));
+    let text = resp.text().await.map_err(|e| e.to_string())?;
+    let body: Option<Value> = serde_json::from_str(&text).ok();
     if !status.is_success() {
-        let msg = body["error"].as_str().map(str::to_string).unwrap_or_else(|| match status.as_u16() {
-            404 => format!("{base} has no agents API — the server needs updating"),
-            401 | 403 => "Not authorized for this project — sign in again".into(),
-            code => format!("Server returned {code}"),
-        });
+        let msg = body
+            .as_ref()
+            .and_then(|b| b["error"].as_str().map(str::to_string))
+            .unwrap_or_else(|| match status.as_u16() {
+                404 => format!("{base} has no agents API — the server needs updating"),
+                401 | 403 => "Not authorized for this project — sign in again".into(),
+                code => format!("Server returned {code}"),
+            });
         return Ok(json!({ "ok": false, "error": msg }));
     }
-    Ok(body)
+    // 200 with a body we can't read — a login page from a proxy, say. Without
+    // this it fell through as `{}`, and the UI printed the same generic line
+    // this whole function exists to avoid.
+    match body {
+        Some(b) => Ok(b),
+        None => Ok(json!({
+            "ok": false,
+            "error": format!("{base} answered {} with something that isn't JSON", status.as_u16()),
+        })),
+    }
 }
 
 #[tauri::command]
@@ -657,17 +670,11 @@ pub async fn remote_detach(
     session_id: String,
     state: State<'_, Arc<AppState>>,
 ) -> Result<(), String> {
-    let target = remote_target(&session_id, &state);
-    if let Some((key, channel)) = target {
-        // Notify the agent we are detaching
-        let _ = cloud::remote_send(
-            &key,
-            &channel,
-            "session:detach",
-            json!({ "sessionId": session_id }),
-            &state,
-        )
-        .await;
+    // Detaching is purely local: the point is to stop viewing while the agent
+    // keeps the PTY running. We used to broadcast `session:detach` here, but
+    // nothing in the cloud stack listens for it — the agent handles only
+    // start/input/resize/end/force_end — so it was a frame into the void.
+    if let Some((key, _channel)) = remote_target(&session_id, &state) {
         cloud::remote_cleanup(&session_id, &key, &state);
     }
     Ok(())
