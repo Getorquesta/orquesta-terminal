@@ -47,6 +47,24 @@ fn to_ws_url(api_url: &str) -> String {
     }
 }
 
+/// The EIO4 SOCKET_CONNECT frame carrying our credentials.
+///
+/// The packet's JSON payload *is* `socket.handshake.auth` — socket.io does not
+/// unwrap an "auth" key for you. Nesting one (`40{"auth":{"cliToken":…}}`) left
+/// the relay reading an undefined token and answering
+/// `44{"message":"No auth credentials"}`.
+fn connect_frame(cli_token: &str) -> String {
+    format!("40{}", json!({ "cliToken": cli_token }))
+}
+
+/// Turn a socket.io CONNECT_ERROR frame (`44{"message":"…"}`) into its message.
+fn connect_error_message(frame: &str) -> String {
+    serde_json::from_str::<Value>(frame.trim_start_matches("44"))
+        .ok()
+        .and_then(|v| v["message"].as_str().map(str::to_string))
+        .unwrap_or_else(|| frame.to_string())
+}
+
 /// Give up on a WebSocket that never completes its handshake.
 ///
 /// `connect_async` has no timeout of its own: pointed at an endpoint that
@@ -118,11 +136,8 @@ pub async fn connect_socket(
         return Err(format!("Unexpected EIO4 open frame: {open_text}"));
     }
 
-    // 2. Send SOCKET_CONNECT  `40{"auth":{"cliToken":"..."}}`
-    let connect_frame = format!(
-        r#"40{{"auth":{{"cliToken":"{}"}}}}"#,
-        cli_token.replace('"', "\\\"")
-    );
+    // 2. Send SOCKET_CONNECT  `40{"cliToken":"..."}`
+    let connect_frame = connect_frame(cli_token);
     sink.send(Message::Text(connect_frame.into()))
         .await
         .map_err(|e| format!("WS send SOCKET_CONNECT: {e}"))?;
@@ -138,7 +153,7 @@ pub async fn connect_socket(
         _ => return Err("Expected text for SOCKET_CONNECT_OK".into()),
     };
     if ok_text.starts_with("44") {
-        return Err(format!("Cloud auth rejected: {ok_text}"));
+        return Err(format!("Cloud auth rejected: {}", connect_error_message(&ok_text)));
     }
     if !ok_text.starts_with("40") {
         return Err(format!("Unexpected SOCKET_CONNECT frame: {ok_text}"));
@@ -740,10 +755,7 @@ async fn connect_remote_socket(
     }
 
     // 2. SOCKET_CONNECT
-    let connect_frame = format!(
-        r#"40{{"auth":{{"cliToken":"{}"}}}}"#,
-        cli_token.replace('"', "\\\"")
-    );
+    let connect_frame = connect_frame(cli_token);
     sink.send(Message::Text(connect_frame.into()))
         .await
         .map_err(|e| format!("Remote WS: send SOCKET_CONNECT: {e}"))?;
@@ -759,7 +771,7 @@ async fn connect_remote_socket(
         _ => return Err("Remote WS: expected text for SOCKET_CONNECT_OK".into()),
     };
     if ok_text.starts_with("44") {
-        return Err(format!("Remote cloud auth rejected: {ok_text}"));
+        return Err(format!("Remote cloud auth rejected: {}", connect_error_message(&ok_text)));
     }
     if !ok_text.starts_with("40") {
         return Err(format!("Remote WS: unexpected SOCKET_CONNECT frame: {ok_text}"));
@@ -941,5 +953,24 @@ mod tests {
     #[test]
     fn agents_share_one_channel_per_project() {
         assert_eq!(agent_channel("abc"), "agent:project-abc");
+    }
+
+    #[test]
+    fn credentials_sit_at_the_top_of_the_connect_packet() {
+        // socket.io hands the packet payload straight to handshake.auth. An
+        // "auth" wrapper made the relay answer "No auth credentials".
+        assert_eq!(connect_frame("oclt_x"), r#"40{"cliToken":"oclt_x"}"#);
+        // Quotes in a token would otherwise break out of the JSON.
+        assert_eq!(connect_frame("a\"b"), r#"40{"cliToken":"a\"b"}"#);
+    }
+
+    #[test]
+    fn a_rejected_connect_reads_as_its_message() {
+        assert_eq!(
+            connect_error_message(r#"44{"message":"Invalid CLI token"}"#),
+            "Invalid CLI token"
+        );
+        // Anything unparseable is passed through rather than swallowed.
+        assert_eq!(connect_error_message("44garbage"), "44garbage");
     }
 }
