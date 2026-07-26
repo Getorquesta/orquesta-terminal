@@ -692,6 +692,28 @@ pub async fn open_external_url(app: AppHandle, url: String) -> Result<(), String
     if url.chars().any(|c| c.is_control() || c.is_whitespace()) {
         return Err("invalid URL".into());
     }
+
+    // On Linux, run the opener ourselves with a cleaned environment: inside an
+    // AppImage the plugin's spawn inherits $APPDIR's library paths and the
+    // browser dies on launch. No shell is involved, and the URL is already
+    // known to be a whitespace-free http(s) string.
+    #[cfg(target_os = "linux")]
+    {
+        use std::process::{Command, Stdio};
+        for opener in ["xdg-open", "/usr/bin/xdg-open"] {
+            let mut cmd = Command::new(opener);
+            cmd.arg(&url)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .env_clear()
+                .envs(crate::pty::spawn_env());
+            if cmd.spawn().is_ok() {
+                return Ok(());
+            }
+        }
+    }
+
     tauri_plugin_shell::ShellExt::shell(&app)
         .open(url, None)
         .map_err(|e| e.to_string())

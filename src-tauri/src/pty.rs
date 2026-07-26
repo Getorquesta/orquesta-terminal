@@ -124,6 +124,15 @@ fn build_pty_env(env_extras: &[(String, String)]) -> Vec<(String, String)> {
     result
 }
 
+/// Environment for a child spawned outside a PTY — the browser opener, mainly.
+///
+/// Same cleanup as [`build_pty_env`]: a browser started with the AppImage
+/// runtime's `LD_LIBRARY_PATH` pointing into `/tmp/.mount_*` usually refuses to
+/// start at all, which would look exactly like "sign-in does nothing".
+pub fn spawn_env() -> Vec<(String, String)> {
+    build_pty_env(&[])
+}
+
 /// The "skip every permission prompt" flag for a CLI, where the CLI documents one.
 /// Only wired for CLIs whose flag is real & documented — everything else relies on
 /// the free-form Extra arguments in Settings instead of a guessed flag.
