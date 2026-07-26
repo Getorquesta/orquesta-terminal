@@ -50,6 +50,11 @@ jobs:
         working-directory: src-tauri
         run: cargo check --all-targets --locked
 
+      # cargo check only compiles the test targets; nothing was asserting.
+      - name: Test Rust backend
+        working-directory: src-tauri
+        run: cargo test --locked
+
       - name: Build Tauri bundle
         run: npm run build
 
