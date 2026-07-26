@@ -562,6 +562,41 @@ test('a real prompt typed into a shell pane still lands on the board', async ({ 
   await expect(page.getByTestId('count-running')).toHaveText('1', { timeout: 10_000 })
 })
 
+test('a pasted block of prose becomes one card, not one per line', async ({ page }) => {
+  // How a board reaches 700 cards in a day: the parser stripped the paste
+  // brackets and treated every newline inside the block as Enter, and the
+  // "one running card per pane" guard read a ref that only catches up on the
+  // next render — so a single paste opened a card per line, in one millisecond.
+  await page.goto('/')
+  await page.waitForSelector('header', { state: 'visible' })
+  await openLivePane(page)
+
+  // Bracketed paste is a terminal mode the CLI turns on; without this the pane
+  // would receive the block as plain keystrokes, which is a different bug.
+  await emit(page, 'session:output', { sessionId: await liveSessionId(page), data: '\x1b[?2004h' })
+
+  const block = [
+    'the auth middleware is double-reading the token',
+    'and it swallows the 401 instead of returning it',
+    'please fix both and add a test',
+  ].join('\n')
+  await page.evaluate((text) => {
+    const box = document.querySelector<HTMLTextAreaElement>('.xterm-helper-textarea')
+    if (!box) throw new Error('no terminal to paste into')
+    box.focus()
+    const dt = new DataTransfer()
+    dt.setData('text/plain', text)
+    box.dispatchEvent(new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: dt }))
+  }, block)
+  await page.keyboard.press('Enter')
+
+  await openBoard(page)
+  await expect(page.getByTestId('count-running')).toHaveText('1', { timeout: 10_000 })
+  // …and it's the whole paste on it, not just the line the Enter followed.
+  await expect(page.getByTestId('kanban-column-running')).toContainText('double-reading the token')
+  await expect(page.getByTestId('kanban-column-running')).toContainText('add a test')
+})
+
 test('the answer survives an agent that repaints its frame hundreds of times', async ({ page }) => {
   // Regression, straight from a real run: TUI agents (Ink) don't stream a
   // transcript, they redraw their whole frame on every tick. Reading back a

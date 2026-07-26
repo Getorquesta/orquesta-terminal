@@ -60,6 +60,7 @@ import type { CellStatus, DockItem, PluginDockItem } from './TerminalDock'
 import { PanelLeftOpen, Layers, Zap, Mail, MonitorSmartphone, Video, Radar, Mic, Dices, Shuffle, Skull, Settings } from 'lucide-react'
 import { SettingsPanel } from './SettingsPanel'
 import { launchConfigFor, loadSettings } from '@/lib/cliSettings'
+import { feedTypedBuffer, emptyTypedBuffer, MIN_TYPED_PROMPT, type TypedBuffer } from '@/lib/typedBuffer'
 import '@xterm/xterm/css/xterm.css'
 
 export interface HostedProject {
@@ -320,43 +321,6 @@ function CursorOverlay({ cursors }: { cursors: RemoteCursor[] }) {
   )
 }
 
-/**
- * Rebuild the line the human is typing from xterm's raw keystroke stream, so a
- * prompt sent by hand can show up on the board like a dispatched one.
- *
- * We only ever see what the user *sends*, never what the CLI echoes back, so
- * this has to reconstruct the line itself: honour backspace, drop escape
- * sequences (arrows, history recall, function keys), strip the paste brackets
- * xterm frames a paste with, and treat CR/LF as submit. Ctrl-C abandons the
- * line, same as the shell would.
- *
- * Returns the new buffer; `submit` fires once per completed line.
- */
-export function feedTypedBuffer(buf: string, data: string, submit: (line: string) => void): string {
-  let out = buf
-  const clean = data.replace(/\x1b\[20[01]~/g, '')
-  for (let i = 0; i < clean.length; i++) {
-    const ch = clean[i]
-    if (ch === '\r' || ch === '\n') { submit(out); out = ''; continue }
-    if (ch === '\x7f' || ch === '\b') { out = out.slice(0, -1); continue }
-    if (ch === '\x03') { out = ''; continue }
-    if (ch === '\x1b') {
-      // Skip to the sequence terminator rather than trying to parse it.
-      while (i < clean.length && !/[a-zA-Z~]/.test(clean[i])) i++
-      continue
-    }
-    if (ch < ' ') continue
-    out += ch
-  }
-  return out
-}
-
-/**
- * Below this, a submitted line is an answer rather than a prompt — "y", "no",
- * a menu pick. Cheap heuristic, and a wrong guess only costs a card you delete.
- */
-const MIN_TYPED_PROMPT = 4
-
 interface TerminalCellProps {
   cellId: string
   socket: TauriHandle | null
@@ -450,7 +414,7 @@ function TerminalCell({
   // end. Reporting that honestly lets the board keep the card instead of
   // parking it in Running against a prompt that was never sent.
   /** In-progress line the user is typing (see feedTypedBuffer). */
-  const typedRef = useRef('')
+  const typedRef = useRef<TypedBuffer>(emptyTypedBuffer())
   /**
    * What this pane currently has ON SCREEN, as text — the Kanban board reads it
    * the moment a card goes quiet so the agent's closing words (usually a
@@ -1512,6 +1476,16 @@ function FolderPicker({
   const [nativeBusy, setNativeBusy] = useState(false)
   const [nativeGone, setNativeGone] = useState(false)
 
+  // The parent hands us a fresh `onChoose` closure on every one of ITS renders
+  // (and it re-renders constantly — pane status, output ticks, timers). Keeping
+  // it in the effect's deps re-ran the effect mid-browse and re-listed
+  // `initialPath` — undefined for a new terminal, i.e. $HOME — so the folder you
+  // had just navigated to snapped back to home under you. Read both through refs
+  // and subscribe exactly once per mount instead.
+  const onChooseRef = useRef(onChoose)
+  onChooseRef.current = onChoose
+  const initialPathRef = useRef(initialPath)
+
   useEffect(() => {
     if (!socket) return
     const onResult = (r: any = {}) => {
@@ -1525,14 +1499,14 @@ function FolderPicker({
     }
     const onNative = (r: any = {}) => {
       setNativeBusy(false)
-      if (r.ok && r.path) { onChoose(r.path); return }
+      if (r.ok && r.path) { onChooseRef.current(r.path); return }
       // available:false => no native dialog binary; keep the browser list and
       // hide the button. A cancel (available:true) just closes the dialog.
       if (r.available === false) setNativeGone(true)
     }
     socket.on('fs:list-dir-result', onResult)
     socket.on('fs:native-pick-result', onNative)
-    socket.emit('fs:list-dir', { path: initialPath })
+    socket.emit('fs:list-dir', { path: initialPathRef.current })
     // If the server never answers (e.g. an older cockpit build without the
     // fs:list-dir handler), don't spin forever — surface a hint and fall back
     // to the editable path field / native picker.
@@ -1550,7 +1524,7 @@ function FolderPicker({
       socket.off('fs:list-dir-result', onResult)
       socket.off('fs:native-pick-result', onNative)
     }
-  }, [socket, initialPath, onChoose])
+  }, [socket])
 
   const browseNative = () => {
     if (!socket) return
@@ -2707,6 +2681,9 @@ function AgentGridInner({
         </div>
         {folderPicker && (
           <FolderPicker
+            // Re-target => remount, so the listing starts from the new pane's
+            // folder (the picker reads initialPath once, on mount).
+            key={folderPicker.cellId ?? 'new'}
             socket={socket}
             initialPath={folderPicker.initialPath}
             title="Open a terminal in…"
@@ -2895,6 +2872,9 @@ function AgentGridInner({
 
       {folderPicker && (
         <FolderPicker
+          // Re-target => remount, so the listing starts from the new pane's
+          // folder (the picker reads initialPath once, on mount).
+          key={folderPicker.cellId ?? 'new'}
           socket={socket}
           initialPath={folderPicker.initialPath}
           title={folderPicker.cellId ? 'Change working folder' : 'Open a terminal in…'}

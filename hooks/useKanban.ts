@@ -307,25 +307,30 @@ export function useKanban({
     const pane = panesRef.current.find((p) => p.id === paneId)
     if (!pane) return
     if (pane.cliType === 'shell' && !looksLikePrompt(text)) return
-    // A card already owns this pane — this line is an answer to it (a "yes", a
-    // menu pick, a follow-up), not a new piece of work.
-    if (cardsRef.current.some((c) => c.column === 'running' && c.paneId === paneId)) return
     const now = Date.now()
-    setCards((prev) => [
-      ...prev,
-      {
-        id: newId(),
-        text,
-        column: 'running',
-        paneId: pane.id,
-        paneName: pane.name,
-        tags: ['typed'],
-        createdAt: now,
-        dispatchedAt: now,
-        sawRunning: false,
-        order: topOrder(prev, 'running'),
-      },
-    ])
+    setCards((prev) => {
+      // A card already owns this pane — this line is an answer to it (a "yes", a
+      // menu pick, a follow-up), not a new piece of work. Checked against `prev`
+      // rather than the ref: several captures can land in a single tick (that's
+      // what a paste looks like), and a ref that only catches up on the next
+      // render lets every one of them through — 700 cards from a few pastes.
+      if (prev.some((c) => c.column === 'running' && c.paneId === paneId)) return prev
+      return [
+        ...prev,
+        {
+          id: newId(),
+          text,
+          column: 'running',
+          paneId: pane.id,
+          paneName: pane.name,
+          tags: ['typed'],
+          createdAt: now,
+          dispatchedAt: now,
+          sawRunning: false,
+          order: topOrder(prev, 'running'),
+        },
+      ]
+    })
   }, [])
 
   /**
