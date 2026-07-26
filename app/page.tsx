@@ -10,7 +10,7 @@ import pkg from '../package.json'
 import { AgentGrid, type AgentGridHandle, type ImportSpec, type PaneInfo } from '@/components/features/AgentGrid'
 import { KanbanBoard } from '@/components/features/KanbanBoard'
 import { useKanban } from '@/hooks/useKanban'
-import { useHostedAuth, type HostedAuth } from '@/hooks/useHostedAuth'
+import { useHostedAuth, openAuthPage, type HostedAuth } from '@/hooks/useHostedAuth'
 import { CommandPalette, type Command } from '@/components/features/CommandPalette'
 import { Button } from '@/components/ui/button'
 import {
@@ -1994,6 +1994,18 @@ interface ExternalSession {
   isActive: boolean
 }
 
+/**
+ * A machine that's been running Claude for a while has hundreds of transcripts
+ * on disk (357 here, 99 of them throwaway `/tmp` runs). Showing all of them
+ * makes the panel useless, so default to the last week and let search reach the
+ * rest.
+ */
+const EXTERNAL_RECENT_MS = 7 * 24 * 60 * 60 * 1000
+/** Rows rendered at once; the tail is reachable by narrowing the search. */
+const EXTERNAL_MAX_VISIBLE = 40
+/** Above this, "Import all" asks again — each one opens a terminal pane. */
+const EXTERNAL_CONFIRM_OVER = 6
+
 function ExternalSessionsButton({ socket, onImport }: {
   socket: ReturnType<typeof useTauri>['socket']
   onImport?: (specs: ImportSpec[]) => void
@@ -2001,6 +2013,9 @@ function ExternalSessionsButton({ socket, onImport }: {
   const [open, setOpen] = useState(false)
   const [sessions, setSessions] = useState<ExternalSession[]>([])
   const [loading, setLoading] = useState(false)
+  const [query, setQuery] = useState('')
+  const [showAll, setShowAll] = useState(false)
+  const [confirmAll, setConfirmAll] = useState(false)
   const [attached, setAttached] = useState<string | null>(null)
   const [transcript, setTranscript] = useState<Array<{ role?: string; type?: string; content?: string }>>([])
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -2078,9 +2093,29 @@ function ExternalSessionsButton({ socket, onImport }: {
     onImport?.([toSpec(s)])
     setOpen(false)
   }
+  /** What the list shows: recent (or searched) sessions, newest first. */
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase()
+    const cutoff = Date.now() - EXTERNAL_RECENT_MS
+    // Searching reaches the whole history; otherwise it's the recent window
+    // plus anything still running.
+    const recentEnough = (s: ExternalSession) =>
+      showAll || !!q || s.isActive || s.lastActivity >= cutoff
+    return sessions.filter(s => recentEnough(s) && (!q || s.cwd.toLowerCase().includes(q)))
+  }, [sessions, query, showAll])
+  const visible = filtered.slice(0, EXTERNAL_MAX_VISIBLE)
+
+  // A stale "import 37 panes?" prompt shouldn't survive a changed selection.
+  useEffect(() => { setConfirmAll(false) }, [query, showAll, sessions])
+
   const importAll = () => {
-    if (!sessions.length) return
-    onImport?.(sessions.map(toSpec))
+    if (!filtered.length) return
+    if (filtered.length > EXTERNAL_CONFIRM_OVER && !confirmAll) {
+      setConfirmAll(true)
+      return
+    }
+    onImport?.(filtered.map(toSpec))
+    setConfirmAll(false)
     setOpen(false)
   }
 
@@ -2088,7 +2123,8 @@ function ExternalSessionsButton({ socket, onImport }: {
     const s = Math.floor((Date.now() - ms) / 1000)
     if (s < 60) return `${s}s ago`
     if (s < 3600) return `${Math.floor(s / 60)}m ago`
-    return `${Math.floor(s / 3600)}h ago`
+    if (s < 86400) return `${Math.floor(s / 3600)}h ago`
+    return `${Math.floor(s / 86400)}d ago`
   }
 
   return (
@@ -2114,13 +2150,16 @@ function ExternalSessionsButton({ socket, onImport }: {
                 External Sessions
               </p>
               <div className="flex items-center gap-2">
-                {!attached && sessions.length > 0 && (
+                {!attached && filtered.length > 0 && (
                   <button
                     onClick={importAll}
-                    className="flex items-center gap-1 rounded bg-cyan-500/15 px-1.5 py-0.5 text-[10px] text-cyan-300 hover:bg-cyan-500/25"
-                    title="Open every detected session as a live terminal pane"
+                    className={`flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] ${confirmAll ? 'bg-amber-500/20 text-amber-300 hover:bg-amber-500/30' : 'bg-cyan-500/15 text-cyan-300 hover:bg-cyan-500/25'}`}
+                    title={confirmAll
+                      ? `Opens ${filtered.length} terminal panes — click again to confirm`
+                      : 'Open every listed session as a live terminal pane'}
                   >
-                    <Plus className="h-2.5 w-2.5" /> Import all ({sessions.length})
+                    <Plus className="h-2.5 w-2.5" />
+                    {confirmAll ? `Open ${filtered.length} panes?` : `Import all (${filtered.length})`}
                   </button>
                 )}
                 <button onClick={fetchSessions} className="text-[10px] text-zinc-500 hover:text-white">
@@ -2128,6 +2167,26 @@ function ExternalSessionsButton({ socket, onImport }: {
                 </button>
               </div>
             </div>
+
+            {!attached && sessions.length > 0 && (
+              <div className="mb-2 flex items-center gap-2">
+                <input
+                  value={query}
+                  onChange={e => setQuery(e.target.value)}
+                  placeholder="Search by folder…"
+                  className="h-7 flex-1 rounded-lg border border-white/10 bg-black/30 px-2 text-[11px] text-white placeholder:text-zinc-600 focus:border-cyan-600/60 focus:outline-none"
+                />
+                {!query && (
+                  <button
+                    onClick={() => setShowAll(v => !v)}
+                    className="whitespace-nowrap text-[10px] text-zinc-500 hover:text-white"
+                    title={showAll ? 'Show only the last 7 days' : `Show all ${sessions.length} sessions on disk`}
+                  >
+                    {showAll ? 'Recent only' : `All (${sessions.length})`}
+                  </button>
+                )}
+              </div>
+            )}
 
             {!attached ? (
               /* Session list */
@@ -2143,10 +2202,20 @@ function ExternalSessionsButton({ socket, onImport }: {
                       Run <code className="text-zinc-500">claude</code> in any terminal and it will appear here.
                     </p>
                   </div>
+                ) : filtered.length === 0 ? (
+                  <div className="py-6 text-center text-xs text-zinc-600">
+                    Nothing matches.
+                    <p className="mt-1 text-[10px] text-zinc-700">
+                      {query
+                        ? `No session folder contains “${query}”.`
+                        : `No session in the last 7 days — ${sessions.length} older ones on disk.`}
+                    </p>
+                  </div>
                 ) : (
-                  sessions.map(s => (
+                  visible.map(s => (
                     <div
                       key={s.id}
+                      data-testid="external-session"
                       className="group rounded-lg border border-zinc-800 bg-zinc-900/60 px-2.5 py-2 hover:border-cyan-700/50 transition-colors"
                     >
                       <div className="flex items-center gap-2">
@@ -2180,6 +2249,11 @@ function ExternalSessionsButton({ socket, onImport }: {
                       </div>
                     </div>
                   ))
+                )}
+                {filtered.length > visible.length && (
+                  <p className="py-2 text-center text-[10px] text-zinc-600">
+                    +{filtered.length - visible.length} more — narrow the search to see them
+                  </p>
                 )}
               </div>
             ) : (
@@ -2330,6 +2404,22 @@ function HostedHookPanel({
                         <><Cloud className="h-3.5 w-3.5" /> Sign in with browser</>
                       )}
                     </button>
+                    {hosted.pendingAuthUrl && (
+                      <div className="mt-1.5 flex items-center justify-between gap-2">
+                        <button
+                          onClick={() => openAuthPage(hosted.pendingAuthUrl!)}
+                          className="text-[10px] text-zinc-400 underline decoration-dotted hover:text-white"
+                        >
+                          Browser didn&apos;t open? Try again
+                        </button>
+                        <button
+                          onClick={hosted.cancelBrowserLogin}
+                          className="text-[10px] text-zinc-500 hover:text-zinc-300"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    )}
                     <div className="mt-2.5 flex items-center gap-2">
                       <div className="h-px flex-1 bg-white/10" />
                       <span className="text-[9px] uppercase tracking-wider text-zinc-600">or token</span>

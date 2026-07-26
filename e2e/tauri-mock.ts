@@ -34,6 +34,7 @@ export const TAURI_MOCK_SCRIPT = `
     'remote_end':                 null,
     'hosted_proxy':               {},
     'hosted_upload':              { ok: true },
+    'open_external_url':          null,
     // plugins
     'plugin:clipboard-manager|write_text': null,
     'plugin:clipboard-manager|read_text':  '',
@@ -42,6 +43,10 @@ export const TAURI_MOCK_SCRIPT = `
   // Every IPC call is recorded so tests can assert what the UI actually sent
   // (e.g. that a Kanban card dispatch really wrote the prompt + Enter to a PTY).
   window.__tauriCalls = [];
+
+  // Lets a test stand in a different backend answer — e.g. a machine with 300
+  // Claude transcripts on disk — before the UI asks for it.
+  window.__tauriSet = function (cmd, value) { responses[cmd] = value; };
 
   // ── Event bus ────────────────────────────────────────────────────────────
   // @tauri-apps/api's listen() goes through transformCallback + the

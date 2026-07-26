@@ -2065,6 +2065,10 @@ function AgentGridInner({
     const defaultCli = (loadSettings().defaultCli ?? 'shell') as CliType
     const newCell: GridCell = { id, cliType: defaultCli, name: '', ...init }
     const newCells = [...cellsRef.current, newCell]
+    // The ref only catches up on the next render, so several addCell() calls in
+    // one tick would each start from the same list and the last write would win
+    // — importing 5 sessions opened exactly one pane. Advance it here.
+    cellsRef.current = newCells
     setCells(newCells)
     setLayouts((prev) => ({ ...prev, lg: buildTidyLayout(newCells) }))
     // In overlay mode the new pane needs a floating slot right away; grid mode

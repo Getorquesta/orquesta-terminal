@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { hostedFetch } from '@/lib/tauri-proxy'
 
 const STORAGE_KEY = 'orquesta-hosted-auth'
@@ -32,6 +32,35 @@ const POLL_INTERVAL_MS = 2000
 const POLL_TIMEOUT_MS = 5 * 60 * 1000 // 5 minutes
 
 /**
+ * Send the user to the authorization page in their real browser.
+ *
+ * Inside Tauri this has to go through our own `open_external_url` command: the
+ * webview isn't granted `shell:allow-open`, so `@tauri-apps/plugin-shell`'s
+ * `open()` is rejected — and `window.open()` is a no-op in the WebKitGTK
+ * webview, so the fallback silently did nothing and sign-in sat on "Waiting…"
+ * until it timed out. Returns the popup handle (browsers only) or `false` when
+ * nothing could be opened, so the caller can offer the link by hand.
+ */
+export async function openAuthPage(url: string): Promise<Window | null | false> {
+  if (hasTauri()) {
+    try {
+      const { invoke } = await import('@tauri-apps/api/core')
+      await invoke('open_external_url', { url })
+      return null
+    } catch {}
+    try {
+      const { open } = await import('@tauri-apps/plugin-shell')
+      await open(url)
+      return null
+    } catch {}
+    return false
+  }
+  const popup = window.open(url, 'orquesta-auth', 'width=500,height=650,popup=yes')
+  if (popup) return popup
+  return window.open(url, '_blank') || false
+}
+
+/**
  * Shared hook that manages authentication against a hosted Orquesta instance.
  * Stores token + fetched projects in localStorage so every component
  * (login page, terminal panel, grid cells) can read them without re-fetching.
@@ -43,6 +72,9 @@ export function useHostedAuth() {
   const [auth, setAuth] = useState<HostedAuth | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  /** Authorization page for the sign-in currently in flight, if any. */
+  const [pendingAuthUrl, setPendingAuthUrl] = useState<string | null>(null)
+  const cancelRef = useRef(false)
 
   // Load from localStorage on mount
   useEffect(() => {
@@ -135,25 +167,22 @@ export function useHostedAuth() {
     const sessionId = crypto.randomUUID()
     const authPageUrl = `${url}/cli/auth?session=${sessionId}`
 
-    let popup: Window | null = null
+    // Surfaced by the UI while we wait, so the user can reach the page by hand
+    // if their browser didn't come up.
+    setPendingAuthUrl(authPageUrl)
+    cancelRef.current = false
 
-    if (hasTauri()) {
-      try {
-        const { open } = await import('@tauri-apps/plugin-shell')
-        await open(authPageUrl)
-      } catch {
-        popup = window.open(authPageUrl, 'orquesta-auth', 'width=500,height=650,popup=yes')
-        if (!popup) window.open(authPageUrl, '_blank')
-      }
-    } else {
-      popup = window.open(authPageUrl, 'orquesta-auth', 'width=500,height=650,popup=yes')
-      if (!popup) {
-        const msg = 'Popup blocked — please allow popups for this site or use the token method below'
-        setError(msg)
-        setLoading(false)
-        throw new Error(msg)
-      }
+    const opened = await openAuthPage(authPageUrl)
+    if (opened === false) {
+      const msg = hasTauri()
+        ? "Couldn't open your browser — use the sign-in link below"
+        : 'Popup blocked — please allow popups for this site or use the token method below'
+      setError(msg)
+      setLoading(false)
+      setPendingAuthUrl(null)
+      throw new Error(msg)
     }
+    const popup: Window | null = opened
 
     try {
       // Poll for result
@@ -162,6 +191,12 @@ export function useHostedAuth() {
 
       while (Date.now() < deadline) {
         await new Promise(r => setTimeout(r, POLL_INTERVAL_MS))
+
+        if (cancelRef.current) {
+          const msg = 'Sign-in cancelled'
+          setError(null)
+          throw new Error(msg)
+        }
 
         try {
           // Poll through Tauri invoke to avoid CORS with ws.orquesta.live
@@ -197,22 +232,30 @@ export function useHostedAuth() {
       // Now use the token to fetch projects (same as login())
       return await login(token, url)
     } catch (err) {
-      if (err instanceof Error && !error) {
+      if (err instanceof Error && !error && err.message !== 'Sign-in cancelled') {
         setError(err.message)
       }
       throw err
     } finally {
       setLoading(false)
+      setPendingAuthUrl(null)
     }
   }, [login, error])
+
+  /** Stop waiting for the browser — the poll loop bails on its next tick. */
+  const cancelBrowserLogin = useCallback(() => {
+    cancelRef.current = true
+  }, [])
 
   return {
     auth,
     isLoggedIn: !!auth,
     loading,
     error,
+    pendingAuthUrl,
     login,
     loginWithBrowser,
+    cancelBrowserLogin,
     logout,
   }
 }

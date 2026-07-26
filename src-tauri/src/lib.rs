@@ -71,6 +71,7 @@ pub fn run() {
             ipc::remote_detach,
             ipc::remote_end,
             // Hosted proxy
+            ipc::open_external_url,
             ipc::hosted_proxy,
             ipc::hosted_upload,
         ])

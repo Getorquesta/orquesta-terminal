@@ -673,6 +673,30 @@ pub async fn remote_end(
     Ok(())
 }
 
+// ── External browser ──────────────────────────────────────────────────────────
+
+/// Open an http(s) URL in the user's real browser.
+///
+/// The shell plugin is deliberately *not* exposed over IPC (see
+/// `capabilities/default.json`): `shell:allow-open` hands the OS opener whatever
+/// string the webview passes, files and executables included. Browser sign-in
+/// still needs a browser, so this command does that one job and refuses
+/// anything that isn't a plain web URL.
+#[tauri::command]
+#[allow(deprecated)] // Shell::open is fine here; tauri-plugin-opener isn't a dep yet.
+pub async fn open_external_url(app: AppHandle, url: String) -> Result<(), String> {
+    let lower = url.to_ascii_lowercase();
+    if !(lower.starts_with("http://") || lower.starts_with("https://")) {
+        return Err("only http(s) URLs can be opened".into());
+    }
+    if url.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return Err("invalid URL".into());
+    }
+    tauri_plugin_shell::ShellExt::shell(&app)
+        .open(url, None)
+        .map_err(|e| e.to_string())
+}
+
 // ── Hosted Proxy ──────────────────────────────────────────────────────────────
 
 #[tauri::command]
@@ -683,7 +707,14 @@ pub async fn hosted_proxy(
     body: Option<Value>,
 ) -> Result<Value, String> {
     let method = method.unwrap_or_else(|| "GET".into());
-    let client = reqwest::Client::new();
+    // Every caller awaits this from the UI thread, and sign-in polls it in a
+    // loop — a request that never comes back would leave the button spinning
+    // forever, so give the whole exchange a hard ceiling.
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| e.to_string())?;
 
     let mut req = match method.to_uppercase().as_str() {
         "POST"   => client.post(&url),
