@@ -12,10 +12,32 @@ use crate::state::AppState;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
+/// The cloud's realtime relay. Hosted Orquesta splits the two services:
+/// getorquesta.com answers REST only — its /socket.io just hits Next, whose
+/// server never handles the upgrade, so the connection hangs open until the
+/// user gives up. Self-hosted OSS serves both from one origin, so only the
+/// cloud host is remapped.
+const CLOUD_WS_URL: &str = "wss://ws.orquesta.live";
+
+/// Host part of a base URL, without scheme, path or trailing slash.
+fn url_host(url: &str) -> &str {
+    url.trim_end_matches('/')
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .split('/')
+        .next()
+        .unwrap_or("")
+}
+
 /// Derive the WebSocket URL from an API base URL.
+/// "https://getorquesta.com"  → "wss://ws.orquesta.live"  (see CLOUD_WS_URL)
 /// "https://ws.orquesta.live" → "wss://ws.orquesta.live"
 /// "http://localhost:3000"    → "ws://localhost:3000"
 fn to_ws_url(api_url: &str) -> String {
+    if matches!(url_host(api_url), "getorquesta.com" | "www.getorquesta.com") {
+        return CLOUD_WS_URL.to_string();
+    }
+    let api_url = api_url.trim_end_matches('/');
     if let Some(rest) = api_url.strip_prefix("https://") {
         format!("wss://{rest}")
     } else if let Some(rest) = api_url.strip_prefix("http://") {
@@ -24,6 +46,14 @@ fn to_ws_url(api_url: &str) -> String {
         api_url.to_string()
     }
 }
+
+/// Give up on a WebSocket that never completes its handshake.
+///
+/// `connect_async` has no timeout of its own: pointed at an endpoint that
+/// accepts the TCP+TLS connection and then never answers the upgrade (which is
+/// exactly what an API host fronted by nginx does), it waits forever and the
+/// awaiting IPC call never resolves.
+const WS_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// Build a canonical connection key from the base parameters.
 pub fn conn_key(api_url: &str, token: &str, project_id: &str) -> String {
@@ -62,9 +92,13 @@ pub async fn connect_socket(
     let ws_base = to_ws_url(api_url);
     let url = format!("{ws_base}/socket.io/?EIO=4&transport=websocket");
 
-    let (ws_stream, _) = connect_async_tls_with_config(&url, None, false, None)
-        .await
-        .map_err(|e| format!("WS connect failed: {e}"))?;
+    let (ws_stream, _) = tokio::time::timeout(
+        WS_CONNECT_TIMEOUT,
+        connect_async_tls_with_config(&url, None, false, None),
+    )
+    .await
+    .map_err(|_| format!("WS connect timed out: {ws_base}"))?
+    .map_err(|e| format!("WS connect failed: {e}"))?;
 
     let (mut sink, mut stream) = ws_stream.split();
 
@@ -654,6 +688,10 @@ async fn handle_remote_event(payload: &str, state: &Arc<AppState>) {
         "session:output" | "remote:output" => {
             let _ = state.app_handle.emit("remote:output", &data);
         }
+        // The agent refused or failed to spawn — relay so the UI stops waiting
+        "session:error" | "remote:error" => {
+            let _ = state.app_handle.emit("remote:error", &data);
+        }
         // Session ended on the agent side — relay and clean up
         "session:ended" | "remote:ended" => {
             let session_id = data["sessionId"].as_str().unwrap_or("").to_string();
@@ -677,9 +715,13 @@ async fn connect_remote_socket(
     let ws_base = to_ws_url(api_url);
     let url = format!("{ws_base}/socket.io/?EIO=4&transport=websocket");
 
-    let (ws_stream, _) = connect_async_tls_with_config(&url, None, false, None)
-        .await
-        .map_err(|e| format!("Remote WS connect: {e}"))?;
+    let (ws_stream, _) = tokio::time::timeout(
+        WS_CONNECT_TIMEOUT,
+        connect_async_tls_with_config(&url, None, false, None),
+    )
+    .await
+    .map_err(|_| format!("Remote WS connect timed out: {ws_base}"))?
+    .map_err(|e| format!("Remote WS connect: {e}"))?;
 
     let (mut sink, mut stream) = ws_stream.split();
 
@@ -758,8 +800,15 @@ async fn connect_remote_socket(
     Ok(CloudSocket { tx, refs: HashSet::new() })
 }
 
+/// The channel a project's agents live on. Everything about an interactive
+/// session — start, input, resize, end, and the output coming back — travels
+/// on it; the dashboard's own InteractiveSession uses the same one.
+pub fn agent_channel(project_id: &str) -> String {
+    format!("agent:project-{project_id}")
+}
+
 /// Return the conn_key for the remote (viewer) connection, creating it if needed.
-/// Subscribes to `cockpit:project-{project_id}` channel on first connect.
+/// Subscribes to `agent:project-{project_id}` channel on first connect.
 pub async fn get_or_create_remote_conn(
     api_url: &str,
     cli_token: &str,
@@ -778,8 +827,9 @@ pub async fn get_or_create_remote_conn(
     if !already_connected {
         let socket = connect_remote_socket(api_url, cli_token, Arc::clone(state)).await?;
 
-        // Subscribe to the cockpit channel for this project
-        let channel = format!("cockpit:project-{project_id}");
+        // Join the agents' channel — being in the room is what makes the relay
+        // deliver session:started / session:output back to us.
+        let channel = agent_channel(project_id);
         let sub_frame = socketio_frame(&json!(["subscribe", { "channel": channel }]));
         socket
             .tx
@@ -818,14 +868,23 @@ pub async fn get_or_create_remote_conn(
     Ok(key)
 }
 
-/// Send an event to the cloud via an active remote (viewer) connection.
+/// Send an event to a project's agents via an active remote (viewer) connection.
+///
+/// The relay is a plain pub/sub: it only understands `subscribe` / `broadcast`
+/// / `presence:*` and silently drops anything else. Emitting `session:start`
+/// as a bare event — which is what this used to do — therefore reached nobody,
+/// and the modal waited on a reply that could never come.
 pub async fn remote_send(
     conn_key: &str,
+    channel: &str,
     event: &str,
     data: Value,
     state: &Arc<AppState>,
 ) -> Result<(), String> {
-    let frame = socketio_frame(&json!([event, data]));
+    let frame = socketio_frame(&json!([
+        "broadcast",
+        { "channel": channel, "event": event, "payload": data, "self": false }
+    ]));
     let tx = {
         let conns = state.remote_conns.lock().unwrap();
         conns.get(conn_key).map(|c| c.tx.clone())
@@ -855,5 +914,32 @@ pub fn remote_cleanup(session_id: &str, conn_key: &str, state: &Arc<AppState>) {
     if should_remove {
         let mut conns = state.remote_conns.lock().unwrap();
         conns.remove(conn_key);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cloud_api_host_maps_to_the_relay() {
+        // getorquesta.com/socket.io never answers the upgrade — pointing the
+        // socket there is what left "Open" spinning forever.
+        assert_eq!(to_ws_url("https://getorquesta.com"), CLOUD_WS_URL);
+        assert_eq!(to_ws_url("https://getorquesta.com/"), CLOUD_WS_URL);
+        assert_eq!(to_ws_url("https://www.getorquesta.com"), CLOUD_WS_URL);
+        assert_eq!(to_ws_url("https://ws.orquesta.live"), CLOUD_WS_URL);
+    }
+
+    #[test]
+    fn self_hosted_origins_are_left_alone() {
+        // OSS serves REST and socket.io from one origin.
+        assert_eq!(to_ws_url("http://localhost:3000"), "ws://localhost:3000");
+        assert_eq!(to_ws_url("https://orquesta.example.com"), "wss://orquesta.example.com");
+    }
+
+    #[test]
+    fn agents_share_one_channel_per_project() {
+        assert_eq!(agent_channel("abc"), "agent:project-abc");
     }
 }

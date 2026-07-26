@@ -508,6 +508,14 @@ pub fn sessions_external_detach(
 
 // ── Remote Sessions ───────────────────────────────────────────────────────────
 
+/// (connection, channel) for a live remote session, or None once it is gone.
+fn remote_target(session_id: &str, state: &Arc<AppState>) -> Option<(String, String)> {
+    let remote_sessions = state.remote_sessions.lock().unwrap();
+    remote_sessions
+        .get(session_id)
+        .map(|s| (s.conn_key.clone(), s.channel.clone()))
+}
+
 #[tauri::command]
 pub async fn remote_list_agents(
     api_url: Option<String>,
@@ -564,9 +572,12 @@ pub async fn remote_start(
     )
     .await?;
 
-    // Ask the remote agent to start a session
+    // Ask the remote agent to start a session. Every agent on the project's
+    // channel sees this; `targetAgentTokenId` is what makes the chosen one act.
+    let channel = cloud::agent_channel(&project_id);
     cloud::remote_send(
         &conn_key,
+        &channel,
         "session:start",
         json!({
             "sessionId": session_id,
@@ -589,7 +600,7 @@ pub async fn remote_start(
             crate::state::RemoteSession {
                 session_id: session_id.clone(),
                 project_id: project_id.clone(),
-                channel: format!("cockpit:project-{project_id}"),
+                channel,
                 conn_key,
             },
         );
@@ -604,15 +615,15 @@ pub async fn remote_input(
     input: String,
     state: State<'_, Arc<AppState>>,
 ) -> Result<(), String> {
-    let conn_key = {
-        let remote_sessions = state.remote_sessions.lock().unwrap();
-        remote_sessions.get(&session_id).map(|s| s.conn_key.clone())
-    };
-    if let Some(key) = conn_key {
+    let target = remote_target(&session_id, &state);
+    if let Some((key, channel)) = target {
         cloud::remote_send(
             &key,
+            &channel,
             "session:input",
-            json!({ "sessionId": session_id, "data": input }),
+            // `input` + `raw` is the agent's contract (sendSessionInput);
+            // anything under `data` was read as undefined and typed nothing.
+            json!({ "sessionId": session_id, "input": input, "raw": true }),
             &state,
         )
         .await?;
@@ -627,13 +638,11 @@ pub async fn remote_resize(
     rows: u16,
     state: State<'_, Arc<AppState>>,
 ) -> Result<(), String> {
-    let conn_key = {
-        let remote_sessions = state.remote_sessions.lock().unwrap();
-        remote_sessions.get(&session_id).map(|s| s.conn_key.clone())
-    };
-    if let Some(key) = conn_key {
+    let target = remote_target(&session_id, &state);
+    if let Some((key, channel)) = target {
         cloud::remote_send(
             &key,
+            &channel,
             "session:resize",
             json!({ "sessionId": session_id, "cols": cols, "rows": rows }),
             &state,
@@ -648,14 +657,12 @@ pub async fn remote_detach(
     session_id: String,
     state: State<'_, Arc<AppState>>,
 ) -> Result<(), String> {
-    let conn_key = {
-        let remote_sessions = state.remote_sessions.lock().unwrap();
-        remote_sessions.get(&session_id).map(|s| s.conn_key.clone())
-    };
-    if let Some(key) = conn_key {
+    let target = remote_target(&session_id, &state);
+    if let Some((key, channel)) = target {
         // Notify the agent we are detaching
         let _ = cloud::remote_send(
             &key,
+            &channel,
             "session:detach",
             json!({ "sessionId": session_id }),
             &state,
@@ -671,14 +678,12 @@ pub async fn remote_end(
     session_id: String,
     state: State<'_, Arc<AppState>>,
 ) -> Result<(), String> {
-    let conn_key = {
-        let remote_sessions = state.remote_sessions.lock().unwrap();
-        remote_sessions.get(&session_id).map(|s| s.conn_key.clone())
-    };
-    if let Some(key) = conn_key {
+    let target = remote_target(&session_id, &state);
+    if let Some((key, channel)) = target {
         // Ask the agent to terminate the session
         let _ = cloud::remote_send(
             &key,
+            &channel,
             "session:end",
             json!({ "sessionId": session_id }),
             &state,

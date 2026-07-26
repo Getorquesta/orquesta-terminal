@@ -73,6 +73,8 @@ export function RemoteSessionModal({
   const termRef = useRef<import('@xterm/xterm').Terminal | null>(null)
   const fitRef = useRef<import('@xterm/addon-fit').FitAddon | null>(null)
   const sessionIdRef = useRef<string | null>(null)
+  const startingRef = useRef(false)
+  startingRef.current = starting
 
   const listAgents = useCallback((pid: string) => {
     if (!socket || !pid) return
@@ -200,6 +202,7 @@ export function RemoteSessionModal({
   const startSession = (agent: RemoteAgent) => {
     if (!socket || !projectId || starting) return
     setStarting(true)
+    startingRef.current = true
     setActiveAgent(agent)
     setStatus('starting…')
     const cols = 120, rows = 34
@@ -210,13 +213,23 @@ export function RemoteSessionModal({
         if (!r?.ok) { setError(r?.error || 'Failed to start'); setStarting(false); setActiveAgent(null); setStatus(''); return }
         sessionIdRef.current = r.sessionId
         setSessionId(r.sessionId)
-        // Safety: if no session:started within 15s, surface a hint.
+        // Safety: if no session:started within 15s, say so. `starting` from the
+        // enclosing render is always false here — this closure is created in the
+        // same tick that sets it — so the hint never printed; ask the ref, which
+        // onStarted clears.
         setTimeout(() => {
-          if (sessionIdRef.current === r.sessionId && starting) {
+          if (sessionIdRef.current === r.sessionId && startingRef.current) {
             termRef.current?.write(`\r\n\x1b[33m[waiting] agent hasn't responded — it may be offline or busy.\x1b[0m\r\n`)
           }
         }, 15000)
-      }).catch(() => { setError('Failed to start remote session'); setStarting(false); setActiveAgent(null) })
+      }).catch((e: unknown) => {
+        // Rust already phrases connection failures ("Remote WS connect timed
+        // out: …"); passing it through beats a generic line the user can't act on.
+        setError(typeof e === 'string' && e ? e : e instanceof Error ? e.message : 'Failed to start remote session')
+        setStarting(false)
+        setActiveAgent(null)
+        setStatus('')
+      })
     })
   }
 
