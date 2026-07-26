@@ -55,16 +55,22 @@ jobs:
             \( -name '*.AppImage' -o -name '*.deb' \) -exec cp {} dist-release/ \;
           ls -la dist-release
 
-      # Create/replace a draft GitHub Release for this tag and upload the
-      # Linux installers. `gh` is preinstalled on the runner.
+      # Create the draft GitHub Release for this tag (if no other job made it
+      # yet) and upload the Linux installers. `gh` is preinstalled on the runner.
       - name: Publish draft release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG="${GITHUB_REF_NAME}"
-          gh release delete "$TAG" --yes --cleanup-tag=false 2>/dev/null || true
-          gh release create "$TAG" \
-            --draft \
-            --title "Orquesta Terminal $TAG" \
-            --notes "Linux installers below (.AppImage / .deb). Windows & macOS: use the web version for now." \
-            dist-release/*
+          # The three release jobs finish in any order, so whichever gets here
+          # first creates the draft; the rest just wait for it to exist. (This
+          # used to be a delete+create in the Linux job, which raced: v0.1.18's
+          # macOS upload hit "release not found".)
+          for i in $(seq 1 30); do
+            gh release view "$TAG" >/dev/null 2>&1 && break
+            gh release create "$TAG" --draft \
+              --title "Orquesta Terminal $TAG" \
+              --notes "Installers below (.AppImage / .deb / .exe / .dmg)." && break
+            sleep 10
+          done
+          gh release upload "$TAG" dist-release/* --clobber
