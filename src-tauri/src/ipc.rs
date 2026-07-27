@@ -225,9 +225,33 @@ pub async fn hook_init_project(
             ("Stop", json!([{ "hooks": [{ "type": "command", "command": hook_cmd("stop") }] }])),
         ];
 
+        // Merge, never replace: another tool (TrustOps, a user's own script) may
+        // already own this event. Skipping the whole event when it exists — the
+        // old behaviour — is why a project with a TrustOps PostToolUse hook never
+        // reported tool use to the dashboard.
         for (event, entry) in &entries {
-            if !hooks.contains_key(*event) {
-                hooks.insert(event.to_string(), entry.clone());
+            match hooks.get_mut(*event).and_then(|v| v.as_array_mut()) {
+                Some(existing) => {
+                    let already = existing.iter().any(|e| {
+                        e["hooks"]
+                            .as_array()
+                            .map(|hs| {
+                                hs.iter().any(|h| {
+                                    h["command"]
+                                        .as_str()
+                                        .map(|c| c.contains("orquesta-agent hook"))
+                                        .unwrap_or(false)
+                                })
+                            })
+                            .unwrap_or(false)
+                    });
+                    if !already {
+                        existing.extend(entry.as_array().cloned().unwrap_or_default());
+                    }
+                }
+                None => {
+                    hooks.insert(event.to_string(), entry.clone());
+                }
             }
         }
 

@@ -5,26 +5,118 @@ use tauri::Emitter;
 use crate::state::{AppState, DaemonInfo};
 
 /// Resolve the orquesta-agent binary path.
+///
+/// `which()` alone is not enough: an app launched from the desktop (dock, .desktop
+/// file, Spotlight) inherits a bare PATH that knows nothing about nvm, volta, fnm
+/// or homebrew — so an `npm i -g orquesta-agent` that works fine in the user's
+/// terminal is invisible here, and hook enrollment silently skips writing the
+/// Claude hooks. So we also ask a login shell (same PATH as their terminal) and
+/// finally look inside the version managers' install dirs ourselves.
 pub fn resolve_orquesta_agent_bin() -> Option<String> {
-    // Try which first
+    // Explicit override always wins.
+    if let Ok(p) = std::env::var("ORQUESTA_AGENT_BIN") {
+        if !p.is_empty() && std::path::Path::new(&p).exists() {
+            return Some(p);
+        }
+    }
+
     if let Ok(path) = which::which("orquesta-agent") {
         return Some(path.to_string_lossy().to_string());
     }
 
-    // Fallback candidates
-    let candidates = [
-        "/usr/local/bin/orquesta-agent",
-        "/usr/bin/orquesta-agent",
-    ];
+    if let Some(path) = probe_login_shell() {
+        return Some(path);
+    }
 
-    for candidate in &candidates {
-        if std::path::Path::new(candidate).exists() {
-            return Some(candidate.to_string());
+    for dir in candidate_bin_dirs() {
+        let candidate = dir.join(BIN_NAME);
+        if candidate.exists() {
+            return Some(candidate.to_string_lossy().to_string());
         }
     }
 
-    // Try env var
-    std::env::var("ORQUESTA_AGENT_BIN").ok()
+    None
+}
+
+#[cfg(target_os = "windows")]
+const BIN_NAME: &str = "orquesta-agent.cmd";
+#[cfg(not(target_os = "windows"))]
+const BIN_NAME: &str = "orquesta-agent";
+
+/// Ask the user's login shell where the binary is — it sources their profile,
+/// so nvm/volta/asdf shims are on its PATH even when ours is bare.
+#[cfg(not(target_os = "windows"))]
+fn probe_login_shell() -> Option<String> {
+    use std::process::Command;
+
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".into());
+    let out = Command::new(&shell)
+        .args(["-lc", "command -v orquesta-agent"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let path = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    if path.is_empty() || !std::path::Path::new(&path).exists() {
+        return None;
+    }
+    Some(path)
+}
+
+#[cfg(target_os = "windows")]
+fn probe_login_shell() -> Option<String> {
+    None
+}
+
+/// Directories a global npm install can land in, most specific first.
+fn candidate_bin_dirs() -> Vec<std::path::PathBuf> {
+    let mut dirs: Vec<std::path::PathBuf> = Vec::new();
+
+    if let Some(home) = dirs::home_dir() {
+        for rel in [
+            ".local/bin",
+            ".npm-global/bin",
+            ".npm-packages/bin",
+            ".volta/bin",
+            ".bun/bin",
+            ".yarn/bin",
+            "n/bin",
+            "AppData/Roaming/npm",
+        ] {
+            dirs.push(home.join(rel));
+        }
+
+        // Version managers keep one bin dir per installed node — newest first.
+        for (root, suffix) in [
+            (home.join(".nvm/versions/node"), ""),
+            (home.join(".local/share/fnm/node-versions"), "installation"),
+            (home.join(".asdf/installs/nodejs"), ""),
+        ] {
+            let Ok(entries) = std::fs::read_dir(&root) else {
+                continue;
+            };
+            let mut versions: Vec<std::path::PathBuf> =
+                entries.filter_map(|e| e.ok()).map(|e| e.path()).collect();
+            versions.sort();
+            for version in versions.into_iter().rev() {
+                dirs.push(version.join(suffix).join("bin"));
+            }
+        }
+    }
+
+    dirs.extend(
+        ["/usr/local/bin", "/usr/bin", "/opt/homebrew/bin"]
+            .iter()
+            .map(std::path::PathBuf::from),
+    );
+
+    dirs
 }
 
 /// Check preflight status before starting a daemon.
