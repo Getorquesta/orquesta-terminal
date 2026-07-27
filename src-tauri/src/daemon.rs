@@ -157,7 +157,8 @@ pub async fn preflight(
 
     let client = reqwest::Client::new();
     let resp = client
-        .post(format!("{base}/api/orquesta-cli/projects/{project_id}/agent-tokens"))
+        // Singular. The plural spelling 404s — it was never a route.
+        .post(format!("{base}/api/orquesta-cli/projects/{project_id}/agent-token"))
         .header("Authorization", format!("Bearer {cli_token}"))
         .json(&json!({ "name": "daemon-preflight" }))
         .send()
@@ -201,7 +202,7 @@ pub async fn start_daemon(
 
     let client = reqwest::Client::new();
     let token_resp = client
-        .post(format!("{base}/api/orquesta-cli/projects/{project_id}/agent-tokens"))
+        .post(format!("{base}/api/orquesta-cli/projects/{project_id}/agent-token"))
         .header("Authorization", format!("Bearer {cli_token}"))
         .json(&json!({ "name": format!("daemon-{project_id}") }))
         .send()
