@@ -42,18 +42,18 @@ Orquesta Terminal ships as a **native desktop app** (built with [Tauri](https://
 
 | Platform | Download |
 |----------|----------|
-| **Linux** · AppImage | [Orquesta.Terminal_0.1.20_amd64.AppImage](https://github.com/Getorquesta/orquesta-terminal/releases/download/v0.1.20/Orquesta.Terminal_0.1.20_amd64.AppImage) |
-| **Linux** · Debian/Ubuntu `.deb` | [Orquesta.Terminal_0.1.20_amd64.deb](https://github.com/Getorquesta/orquesta-terminal/releases/download/v0.1.20/Orquesta.Terminal_0.1.20_amd64.deb) |
-| **Windows** · installer `.exe` | [Orquesta.Terminal_0.1.20_x64-setup.exe](https://github.com/Getorquesta/orquesta-terminal/releases/download/v0.1.20/Orquesta.Terminal_0.1.20_x64-setup.exe) |
-| **macOS** · Universal `.dmg` | [Orquesta.Terminal_0.1.20_universal.dmg](https://github.com/Getorquesta/orquesta-terminal/releases/download/v0.1.20/Orquesta.Terminal_0.1.20_universal.dmg) |
+| **Linux** · AppImage | [Orquesta.Terminal_0.1.23_amd64.AppImage](https://github.com/Getorquesta/orquesta-terminal/releases/download/v0.1.23/Orquesta.Terminal_0.1.23_amd64.AppImage) |
+| **Linux** · Debian/Ubuntu `.deb` | [Orquesta.Terminal_0.1.23_amd64.deb](https://github.com/Getorquesta/orquesta-terminal/releases/download/v0.1.23/Orquesta.Terminal_0.1.23_amd64.deb) |
+| **Windows** · installer `.exe` | [Orquesta.Terminal_0.1.23_x64-setup.exe](https://github.com/Getorquesta/orquesta-terminal/releases/download/v0.1.23/Orquesta.Terminal_0.1.23_x64-setup.exe) |
+| **macOS** · Universal `.dmg` | [Orquesta.Terminal_0.1.23_universal.dmg](https://github.com/Getorquesta/orquesta-terminal/releases/download/v0.1.23/Orquesta.Terminal_0.1.23_universal.dmg) |
 
 Latest builds are always on the [Releases page](https://github.com/Getorquesta/orquesta-terminal/releases/latest).
 
 Running the AppImage:
 
 ```bash
-chmod +x Orquesta.Terminal_0.1.20_amd64.AppImage
-./Orquesta.Terminal_0.1.20_amd64.AppImage
+chmod +x Orquesta.Terminal_0.1.23_amd64.AppImage
+./Orquesta.Terminal_0.1.23_amd64.AppImage
 ```
 
 ## Quick Start
