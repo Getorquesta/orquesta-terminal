@@ -6,6 +6,7 @@ mod fs;
 mod ipc;
 mod pty;
 mod state;
+mod updater;
 
 use std::sync::Arc;
 use state::AppState;
@@ -74,6 +75,8 @@ pub fn run() {
             ipc::open_external_url,
             ipc::hosted_proxy,
             ipc::hosted_upload,
+            // Updates
+            updater::check_for_update,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

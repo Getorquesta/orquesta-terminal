@@ -23,6 +23,7 @@ import {
   Columns3,
 } from 'lucide-react'
 import { RemoteSessionModal } from '@/components/features/RemoteSessionModal'
+import { UpdateNotice } from '@/components/features/UpdateNotice'
 
 interface Project {
   id: string
@@ -617,6 +618,9 @@ export default function TerminalWorkspacePage() {
       {remoteOpen && hosted.isLoggedIn && hosted.auth && (
         <RemoteSessionModal socket={socket} auth={hosted.auth} onClose={() => setRemoteOpen(false)} />
       )}
+
+      {/* Offers the newest release once, shortly after launch */}
+      <UpdateNotice />
 
       {/* ── Status bar ── */}
       <footer className="glass relative z-20 flex items-center justify-between gap-3 px-4 py-1.5 text-[11px]">
