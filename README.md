@@ -91,7 +91,7 @@ Sign in to Orquesta Cloud with one click (OAuth popup) or a CLI token. Each term
 ### 🧩 Plugins
 Integrations with companion tools:
 - **SudoSudo** — Autonomous server monitoring & remediation
-- **RogerThat** — Voice calls, meet, and agent coordination
+- **Apuchat** — Voice calls, meet, and agent coordination
 - **Apumail** — Agent-native email inbox with OTP extraction
 - **TrustOps** — Policy enforcement and cryptographic audit
 
@@ -161,7 +161,7 @@ a vulnerability? Email security@getorquesta.com instead of opening an issue.
 - [orquesta-oss](https://github.com/Getorquesta/orquesta-oss) — Self-hosted backend
 - [getorquesta.com](https://getorquesta.com) — Hosted platform
 - [sudosudo.dev](https://sudosudo.dev) — Monitoring plugin
-- [rogerthat.chat](https://rogerthat.chat) — Voice & coordination plugin
+- [apuchat.com](https://apuchat.com) — Voice & coordination plugin
 - [apumail.com](https://apumail.com) — Agent email plugin
 - [trustops.eu](https://trustops.eu) — Policy & audit plugin
 

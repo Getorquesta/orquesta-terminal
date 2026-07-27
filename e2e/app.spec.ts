@@ -127,7 +127,7 @@ test('plugins panel opens and shows 2-column grid', async ({ page }) => {
   await page.locator('[title="Plugins & Integrations"]').click()
   await expect(page.locator('text=Plugins & Integrations').first()).toBeVisible({ timeout: 3_000 })
   // All 6 plugins should be present
-  for (const name of ['SudoSudo', 'RogerThat', 'Apumail', 'TrustOps', 'Prowl', 'Notlogin']) {
+  for (const name of ['SudoSudo', 'Apuchat', 'Apumail', 'TrustOps', 'Prowl', 'Notlogin']) {
     await expect(page.locator(`text=${name}`).first()).toBeVisible({ timeout: 3_000 })
   }
 })

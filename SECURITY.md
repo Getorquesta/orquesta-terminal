@@ -56,7 +56,7 @@ style-src   'self' 'unsafe-inline';
 img-src     'self' data: https:;
 connect-src 'self' https://getorquesta.com https://ws.orquesta.live
             https://apumail.com https://sudosudo.dev
-            https://rogerthat.chat https://trustops.eu
+            https://apuchat.com https://trustops.eu
 ```
 
 `connect-src` is an allowlist: the UI can only reach Orquesta and the plugin

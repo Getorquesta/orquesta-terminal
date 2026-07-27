@@ -52,6 +52,6 @@ repo's point of view it is just the REST + WebSocket API documented above.
 
 The terminal integrates with companion products:
 - **SudoSudo** (sudosudo.dev) — Monitoring & remediation
-- **RogerThat** (rogerthat.chat) — Voice, meet & coordination
+- **Apuchat** (apuchat.com) — Voice, meet & coordination
 - **Apumail** (apumail.com) — Agent email inbox
 - **TrustOps** (trustops.eu) — Policy & audit
