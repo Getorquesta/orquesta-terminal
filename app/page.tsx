@@ -582,6 +582,7 @@ export default function TerminalWorkspacePage() {
             hostedProjects={hosted.auth?.projects}
             onPanesChange={onPanesChange}
             onPromptTyped={onPromptTyped}
+            onOpenRemotePicker={hosted.isLoggedIn ? () => setRemoteOpen(true) : undefined}
           />
         </div>
 
@@ -614,9 +615,14 @@ export default function TerminalWorkspacePage() {
         )}
       </main>
 
-      {/* Remote interactive session on a cloud agent */}
+      {/* Cloud-agent picker — the session itself opens as a pane in the grid */}
       {remoteOpen && hosted.isLoggedIn && hosted.auth && (
-        <RemoteSessionModal socket={socket} auth={hosted.auth} onClose={() => setRemoteOpen(false)} />
+        <RemoteSessionModal
+          socket={socket}
+          auth={hosted.auth}
+          onOpen={(target) => gridRef.current?.openRemote(target)}
+          onClose={() => setRemoteOpen(false)}
+        />
       )}
 
       {/* Offers the newest release once, shortly after launch */}

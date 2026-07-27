@@ -9,7 +9,7 @@
 // (Overlay mode is handled by the grid engine itself — no floating wrapper here.)
 
 import { useRef, useState, useEffect } from 'react'
-import { Plus, X, GripVertical, PanelLeftClose, Terminal as TerminalIcon, Circle } from 'lucide-react'
+import { Plus, X, GripVertical, PanelLeftClose, Terminal as TerminalIcon, Circle, Server } from 'lucide-react'
 
 export type CellStatus = 'running' | 'idle'
 
@@ -197,6 +197,10 @@ export interface DockItem {
   name: string
   cliType: string
   label: string
+  /** 'remote' panes stream a PTY from a cloud agent — shown apart, in white. */
+  kind?: 'local' | 'remote'
+  /** Secondary line for remote rows (host / cli of the agent). */
+  detail?: string
 }
 
 // ── PluginDock ───────────────────────────────────────────────────────────────
@@ -295,8 +299,10 @@ export function TerminalSwitcherDock({
         const big = active || hover
         const attention = finishedIds.has(it.id)
         const status = statuses[it.id] ?? 'idle'
-        const accent = accentFor(it.cliType)
-        const code = cliLabelFor(it.cliType).slice(0, 2).toUpperCase()
+        const accent = itemAccent(it)
+        const code = it.kind === 'remote'
+          ? (it.name || 'Remote').slice(0, 2).toUpperCase()
+          : cliLabelFor(it.cliType).slice(0, 2).toUpperCase()
         return (
           <button
             key={it.id}
@@ -375,8 +381,17 @@ const CLI_ACCENT: Record<string, string> = {
   shell: '#8b93a1',
 }
 
+// Remote panes get their own accent — white — so a cloud session never reads as
+// a local one at a glance.
+const REMOTE_ACCENT = '#f5f7fa'
+
 function accentFor(cli: string): string {
   return CLI_ACCENT[cli] ?? CLI_ACCENT.shell
+}
+
+/** Accent for a dock/rail row: white for remote panes, CLI colour otherwise. */
+function itemAccent(it: DockItem): string {
+  return it.kind === 'remote' ? REMOTE_ACCENT : accentFor(it.cliType)
 }
 
 // Human-readable CLI name for the rail badge.
@@ -394,7 +409,7 @@ function cliLabelFor(cli: string): string {
 }
 
 export function TerminalListSidebar({
-  items, activeId, statuses, finishedIds, onFocus, onClose, onReorder, onAdd, onCollapse,
+  items, activeId, statuses, finishedIds, onFocus, onClose, onReorder, onAdd, onCollapse, onAddRemote,
 }: {
   items: DockItem[]
   activeId: string | null
@@ -405,8 +420,80 @@ export function TerminalListSidebar({
   onReorder: (fromId: string, toId: string) => void
   onAdd: () => void
   onCollapse: () => void
+  /** Opens the cloud-agent picker. Omitted when not signed in to Orquesta Cloud. */
+  onAddRemote?: () => void
 }) {
   const dragId = useRef<string | null>(null)
+  const local = items.filter((it) => it.kind !== 'remote')
+  const remote = items.filter((it) => it.kind === 'remote')
+
+  // One row of the rail. Local and remote sections share it; only the accent,
+  // icon and the subtitle line differ.
+  const row = (it: DockItem) => {
+    const active = it.id === activeId
+    const status = statuses[it.id] ?? 'idle'
+    const attention = finishedIds.has(it.id)
+    const isRemote = it.kind === 'remote'
+    const accent = itemAccent(it)
+    return (
+      <div
+        key={it.id}
+        draggable
+        onDragStart={() => { dragId.current = it.id }}
+        onDragOver={(e) => e.preventDefault()}
+        onDrop={(e) => {
+          e.preventDefault()
+          if (dragId.current && dragId.current !== it.id) onReorder(dragId.current, it.id)
+          dragId.current = null
+        }}
+        onClick={() => onFocus(it.id)}
+        className={`group mx-1 mb-0.5 flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-sm transition-colors ${
+          active
+            ? isRemote ? 'bg-white/15 text-white ring-1 ring-white/30' : 'bg-zinc-800/90 text-zinc-100'
+            : attention
+              ? 'bg-emerald-500/10 text-emerald-100 ring-1 ring-emerald-500/40'
+              : isRemote
+                ? 'text-white/80 hover:bg-white/10 hover:text-white'
+                : 'text-zinc-400 hover:bg-zinc-800/50 hover:text-zinc-200'
+        }`}
+        title={it.detail || it.label}
+      >
+        <GripVertical className="h-3.5 w-3.5 shrink-0 cursor-grab text-zinc-700 opacity-0 group-hover:opacity-100 active:cursor-grabbing" />
+        <span className="shrink-0" style={{ color: accent }}>
+          {isRemote ? <Server className="h-3.5 w-3.5" /> : <TerminalIcon className="h-3.5 w-3.5" />}
+        </span>
+        {/* Name on top, the CLI (or the remote host) underneath. */}
+        <span className="flex min-w-0 flex-1 flex-col leading-tight">
+          <span className="truncate">{it.name || it.label}</span>
+          <span
+            className="truncate text-[10px] font-medium uppercase tracking-wide opacity-80"
+            style={{ color: accent }}
+          >
+            {isRemote ? (it.detail || 'Remote') : cliLabelFor(it.cliType)}
+          </span>
+        </span>
+        {/* Status: pulsing emerald = just finished a prompt (needs attention),
+            solid amber = actively producing output, hollow = idle. */}
+        {attention ? (
+          <span className="relative flex h-2 w-2 shrink-0">
+            <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75" />
+            <span className="relative inline-flex h-2 w-2 rounded-full bg-emerald-400" />
+          </span>
+        ) : status === 'running' ? (
+          <Circle className="h-2 w-2 shrink-0 fill-amber-400 text-amber-400" />
+        ) : (
+          <Circle className="h-2 w-2 shrink-0 text-zinc-700" />
+        )}
+        <button
+          onClick={(e) => { e.stopPropagation(); onClose(it.id) }}
+          className="shrink-0 rounded p-0.5 text-zinc-600 opacity-0 hover:bg-zinc-700 hover:text-zinc-200 group-hover:opacity-100"
+          title={isRemote ? 'Close pane (detaches, keeps it running)' : 'Close terminal'}
+        >
+          <X className="h-3 w-3" />
+        </button>
+      </div>
+    )
+  }
 
   return (
     <aside className="flex h-full w-full flex-col overflow-hidden rounded-md border border-zinc-800 bg-zinc-950/60 backdrop-blur-sm">
@@ -431,70 +518,38 @@ export function TerminalListSidebar({
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto py-1">
-        {items.length === 0 && (
+        {local.length === 0 && (
           <p className="px-3 py-4 text-center text-xs text-zinc-600">No terminals yet.</p>
         )}
-        {items.map((it) => {
-          const active = it.id === activeId
-          const status = statuses[it.id] ?? 'idle'
-          const attention = finishedIds.has(it.id)
-          return (
-            <div
-              key={it.id}
-              draggable
-              onDragStart={() => { dragId.current = it.id }}
-              onDragOver={(e) => e.preventDefault()}
-              onDrop={(e) => {
-                e.preventDefault()
-                if (dragId.current && dragId.current !== it.id) onReorder(dragId.current, it.id)
-                dragId.current = null
-              }}
-              onClick={() => onFocus(it.id)}
-              className={`group mx-1 mb-0.5 flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-sm transition-colors ${
-                active
-                  ? 'bg-zinc-800/90 text-zinc-100'
-                  : attention
-                    ? 'bg-emerald-500/10 text-emerald-100 ring-1 ring-emerald-500/40'
-                    : 'text-zinc-400 hover:bg-zinc-800/50 hover:text-zinc-200'
-              }`}
-              title={it.label}
-            >
-              <GripVertical className="h-3.5 w-3.5 shrink-0 cursor-grab text-zinc-700 opacity-0 group-hover:opacity-100 active:cursor-grabbing" />
-              <span className="shrink-0" style={{ color: accentFor(it.cliType) }}>
-                <TerminalIcon className="h-3.5 w-3.5" />
+        {local.map(row)}
+
+        {/* ── Remote ── cloud-agent sessions, kept apart from the local PTYs. */}
+        {(remote.length > 0 || onAddRemote) && (
+          <>
+            <div className="mt-2 flex items-center justify-between border-t border-zinc-800/80 px-2.5 pb-1 pt-2">
+              <span className="flex items-center gap-1.5 text-[11px] font-medium uppercase tracking-wide text-white/60">
+                <Server className="h-3 w-3" /> Remote
+                {remote.length > 0 && (
+                  <span className="rounded bg-white/10 px-1 font-mono text-[9px] text-white/70">{remote.length}</span>
+                )}
               </span>
-              {/* Name on top, the CLI running in this terminal underneath. */}
-              <span className="flex min-w-0 flex-1 flex-col leading-tight">
-                <span className="truncate">{it.name || it.label}</span>
-                <span
-                  className="truncate text-[10px] font-medium uppercase tracking-wide opacity-80"
-                  style={{ color: accentFor(it.cliType) }}
+              {onAddRemote && (
+                <button
+                  onClick={onAddRemote}
+                  className="rounded p-1 text-white/50 hover:bg-white/10 hover:text-white"
+                  title="Open a session on a cloud agent"
                 >
-                  {cliLabelFor(it.cliType)}
-                </span>
-              </span>
-              {/* Status: pulsing emerald = just finished a prompt (needs attention),
-                  solid amber = actively producing output, hollow = idle. */}
-              {attention ? (
-                <span className="relative flex h-2 w-2 shrink-0">
-                  <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75" />
-                  <span className="relative inline-flex h-2 w-2 rounded-full bg-emerald-400" />
-                </span>
-              ) : status === 'running' ? (
-                <Circle className="h-2 w-2 shrink-0 fill-amber-400 text-amber-400" />
-              ) : (
-                <Circle className="h-2 w-2 shrink-0 text-zinc-700" />
+                  <Plus className="h-3.5 w-3.5" />
+                </button>
               )}
-              <button
-                onClick={(e) => { e.stopPropagation(); onClose(it.id) }}
-                className="shrink-0 rounded p-0.5 text-zinc-600 opacity-0 hover:bg-zinc-700 hover:text-zinc-200 group-hover:opacity-100"
-                title="Close terminal"
-              >
-                <X className="h-3 w-3" />
-              </button>
             </div>
-          )
-        })}
+            {remote.length === 0 ? (
+              <p className="px-3 pb-2 text-center text-[11px] text-zinc-600">No remote sessions.</p>
+            ) : (
+              remote.map(row)
+            )}
+          </>
+        )}
       </div>
     </aside>
   )

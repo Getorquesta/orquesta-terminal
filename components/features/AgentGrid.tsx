@@ -57,6 +57,8 @@ import { Plus, X, Maximize2, GitBranch, LayoutGrid, Pencil, Cloud, Share2, Eye, 
 import { TerminalSidebar } from './TerminalSidebar'
 import { TerminalListSidebar, PluginDock, TerminalSwitcherDock } from './TerminalDock'
 import type { CellStatus, DockItem, PluginDockItem } from './TerminalDock'
+import { RemoteCell } from './RemoteCell'
+import type { RemoteTarget } from './RemoteCell'
 import { PanelLeftOpen, Layers, Zap, Mail, MonitorSmartphone, Video, Radar, Mic, Dices, Shuffle, Skull, Settings } from 'lucide-react'
 import { SettingsPanel } from './SettingsPanel'
 import { launchConfigFor, loadSettings } from '@/lib/cliSettings'
@@ -78,6 +80,13 @@ interface GridCell {
   cwd?: string
   /** For imported CLI sessions: resume this session id (e.g. `claude --resume <id>`). */
   resumeId?: string
+  /**
+   * Set when this pane streams a PTY from a CLOUD agent instead of running one
+   * locally. Such a pane renders <RemoteCell/> and ignores cliType/cwd — the
+   * session lives on the agent's machine. Never persisted (see the persist
+   * effect): a reload can't reattach, so remote panes are session-scoped.
+   */
+  remote?: RemoteTarget
 }
 
 /** One external session to import as a live terminal pane. */
@@ -1178,6 +1187,8 @@ export interface AgentGridHandle {
   closeActive: () => void
   /** Create one live terminal pane per external session, then tidy the grid. */
   importSessions: (specs: ImportSpec[]) => void
+  /** Open a cloud agent's interactive session as a pane in the main workspace. */
+  openRemote: (target: RemoteTarget) => string
   /** Flip between the tiling grid and free-floating overlay windows. */
   toggleOverlay: () => void
   /** Toggle "lighting": auto-surface whichever terminal last finished a prompt. */
@@ -1203,6 +1214,7 @@ export interface AgentGridHandle {
 /** Human label for a pane: its given name, else its folder, else its CLI. */
 function paneLabel(c: GridCell): string {
   return (c.name && c.name.trim())
+    || (c.remote ? c.remote.agentName : '')
     || folderLabel(c.cwd)
     || (CLI_OPTIONS.find((o) => o.value === c.cliType)?.label ?? c.cliType)
 }
@@ -1239,6 +1251,11 @@ interface AgentGridProps {
   onPanesChange?: (panes: PaneInfo[]) => void
   /** A prompt was typed by hand into a pane (not dispatched by the board). */
   onPromptTyped?: (cellId: string, text: string) => void
+  /**
+   * Opens the cloud-agent picker (the host page owns it, since it needs the
+   * hosted auth). When omitted, the rail's Remote section hides its + button.
+   */
+  onOpenRemotePicker?: () => void
 }
 
 interface PersistShape {
@@ -1706,7 +1723,7 @@ function DaemonTakeoverModal({
 
 function AgentGridInner({
   socket, containerWidth, containerHeight, storageKey, terminalOpacity = 1, hostedApiUrl, hostedToken, hostedUserId, hostedProjects,
-  onPanesChange, onPromptTyped, apiRef,
+  onPanesChange, onPromptTyped, onOpenRemotePicker, apiRef,
 }: AgentGridProps & { containerWidth: number; containerHeight: number; apiRef: React.MutableRefObject<AgentGridHandle> }) {
   const key = storageKey || STORAGE_KEY
   // Held in a ref so a new callback identity can't restart a pane's terminal.
@@ -2054,7 +2071,12 @@ function AgentGridInner({
     if (!loadedRef.current) return
     if (persistKeyRef.current !== key) { persistKeyRef.current = key; return }
     try {
-      const payload: PersistShape = { v: 5, cells, layouts, viewMode, floatGeom, lighting, sidebarOpen }
+      // Remote panes are session-scoped: their PTY lives on a cloud agent and a
+      // reload can't reattach to it, so persisting them would restore a pane
+      // that immediately starts a SECOND session. Drop them here.
+      const payload: PersistShape = {
+        v: 5, cells: cells.filter((c) => !c.remote), layouts, viewMode, floatGeom, lighting, sidebarOpen,
+      }
       localStorage.setItem(key, JSON.stringify(payload))
     } catch {}
   }, [key, cells, layouts, viewMode, floatGeom, lighting, sidebarOpen])
@@ -2077,6 +2099,20 @@ function AgentGridInner({
     setTimeout(() => cellApiRef.current.forEach((a) => a?.fit()), 80)
     return id
   }, [])
+
+  // Open a cloud agent as a pane in the main workspace (no modal): the pane
+  // itself starts the session and streams it, exactly like a local terminal.
+  const openRemote = useCallback((target: RemoteTarget) => {
+    const id = addCell({ name: '', remote: target })
+    setTimeout(() => {
+      setLayouts((prev) => ({ ...prev, lg: buildTidyLayout(cellsRef.current) }))
+      setTimeout(() => cellApiRef.current.forEach((a) => a.fit()), 80)
+    }, 60)
+    setActive(id)
+    return id
+    // addCell/setActive are stable; declared for lint completeness.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [addCell])
 
   // Import external sessions: one live pane each, resumed in its own cwd.
   const importSessions = useCallback((specs: ImportSpec[]) => {
@@ -2451,7 +2487,7 @@ function AgentGridInner({
   // Expose imperative controls to the host page (palette / buttons).
   useEffect(() => {
     apiRef.current = {
-      addTerminal: () => addCell(), arrange, closeActive, importSessions,
+      addTerminal: () => addCell(), arrange, closeActive, importSessions, openRemote,
       toggleOverlay, toggleLighting, toggleSidebar, cycleTerminal: cycleActive,
       dispatchPrompt: (cellId, text) => {
         const api = cellApiRef.current.get(cellId)
@@ -2471,7 +2507,7 @@ function AgentGridInner({
         return typeof api?.tail === 'function' ? api.tail() : ''
       },
     }
-  }, [apiRef, addCell, arrange, closeActive, importSessions, toggleOverlay, toggleLighting, toggleSidebar, cycleActive, setActive])
+  }, [apiRef, addCell, arrange, closeActive, importSessions, openRemote, toggleOverlay, toggleLighting, toggleSidebar, cycleActive, setActive])
 
   // Grid-level keyboard shortcuts for when NO terminal is focused (the focused
   // case is handled inside the pane so the keys don't reach the shell).
@@ -2587,7 +2623,30 @@ function AgentGridInner({
   }, [cells, statuses, onPanesChange])
 
   // Shared cell renderer so grid + overlay modes stay in lockstep on props.
-  const renderTerminalCell = (cell: GridCell) => (
+  // A pane bound to a cloud agent renders the remote variant — same window
+  // chrome and geometry, different wire protocol (remote:* instead of session:*).
+  const renderTerminalCell = (cell: GridCell) => cell.remote ? (
+    <RemoteCell
+      cellId={cell.id}
+      socket={socket}
+      target={cell.remote}
+      name={cell.name}
+      fontSize={fontSize}
+      opacity={terminalOpacity}
+      apiUrl={hostedApiUrl}
+      token={hostedToken}
+      attention={finishedIds.has(cell.id)}
+      onClose={() => removeCell(cell.id)}
+      onRename={(v) => setCellName(cell.id, v)}
+      onFocusCell={() => setActive(cell.id)}
+      onActivity={() => markActivity(cell.id)}
+      onFinished={() => markFinished(cell.id)}
+      registerApi={(api) => {
+        if (api) cellApiRef.current.set(cell.id, api)
+        else cellApiRef.current.delete(cell.id)
+      }}
+    />
+  ) : (
     <TerminalCell
       cellId={cell.id}
       socket={socket}
@@ -2647,7 +2706,14 @@ function AgentGridInner({
   // Left rail as tabs — shown alongside both modes.
   const dockItems: DockItem[] = cells.map((c) => {
     const disp = paneLabel(c)
-    return { id: c.id, name: disp, cliType: c.cliType, label: disp }
+    return {
+      id: c.id,
+      name: disp,
+      cliType: c.cliType,
+      label: disp,
+      kind: c.remote ? 'remote' : 'local',
+      detail: c.remote ? (c.remote.host || c.remote.cli || 'Remote') : undefined,
+    }
   })
   const sidebarEl = sidebarOpen ? (
     <div style={{ width: SIDEBAR_W }} className="shrink-0">
@@ -2661,6 +2727,7 @@ function AgentGridInner({
         onReorder={reorderCells}
         onAdd={() => addCell()}
         onCollapse={() => setSidebarOpen(false)}
+        onAddRemote={onOpenRemotePicker}
       />
     </div>
   ) : null
@@ -2981,12 +3048,13 @@ function AgentGridInner({
 }
 
 export const AgentGrid = forwardRef<AgentGridHandle, AgentGridProps>(function AgentGrid(
-  { socket, storageKey, terminalOpacity, hostedApiUrl, hostedToken, hostedUserId, hostedProjects, onPanesChange, onPromptTyped }, ref,
+  { socket, storageKey, terminalOpacity, hostedApiUrl, hostedToken, hostedUserId, hostedProjects, onPanesChange, onPromptTyped, onOpenRemotePicker }, ref,
 ) {
   const { containerRef, width } = useContainerWidth()
   const [height, setHeight] = useState(0)
   const apiRef = useRef<AgentGridHandle>({
     addTerminal() {}, arrange() {}, closeActive() {}, importSessions() {},
+    openRemote: () => '',
     toggleOverlay() {}, toggleLighting() {}, toggleSidebar() {}, cycleTerminal() {},
     dispatchPrompt: () => false,
     paneTail: () => '',
@@ -2996,6 +3064,7 @@ export const AgentGrid = forwardRef<AgentGridHandle, AgentGridProps>(function Ag
     arrange: () => apiRef.current.arrange(),
     closeActive: () => apiRef.current.closeActive(),
     importSessions: (specs) => apiRef.current.importSessions(specs),
+    openRemote: (target) => apiRef.current.openRemote(target),
     toggleOverlay: () => apiRef.current.toggleOverlay(),
     toggleLighting: () => apiRef.current.toggleLighting(),
     toggleSidebar: () => apiRef.current.toggleSidebar(),
@@ -3038,6 +3107,7 @@ export const AgentGrid = forwardRef<AgentGridHandle, AgentGridProps>(function Ag
           hostedProjects={hostedProjects}
           onPanesChange={onPanesChange}
           onPromptTyped={onPromptTyped}
+          onOpenRemotePicker={onOpenRemotePicker}
           apiRef={apiRef}
         />
       )}
