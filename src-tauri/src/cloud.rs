@@ -267,7 +267,14 @@ async fn handle_socketio_event(
     match event.as_str() {
         "session:input" => {
             let session_id = data["sessionId"].as_str().unwrap_or("").to_string();
-            let input = data["data"].as_str().unwrap_or("").to_string();
+            // The dashboard viewer sends the bytes as `input`; the local cockpit
+            // (and older bridges) send them as `data`. Accept either — reading
+            // only one of them silently swallowed every remote keystroke.
+            let input = data["input"]
+                .as_str()
+                .or_else(|| data["data"].as_str())
+                .unwrap_or("")
+                .to_string();
 
             // Check allow_control before writing
             let allow = {
@@ -307,11 +314,7 @@ async fn handle_socketio_event(
 
         "session:viewer_join" => {
             let session_id = data["sessionId"].as_str().unwrap_or("").to_string();
-            let viewer_id = data["viewerId"].as_str().unwrap_or("").to_string();
-            let viewer_name = data["viewerName"]
-                .as_str()
-                .unwrap_or("Anonymous")
-                .to_string();
+            let (viewer_id, viewer_name) = viewer_identity(&data);
 
             if session_id.is_empty() || viewer_id.is_empty() {
                 return;
@@ -328,27 +331,13 @@ async fn handle_socketio_event(
 
             emit_viewers_update(&session_id, state);
 
-            // Send scrollback to the joining viewer
-            let buf = {
-                let shared = state.shared_terminals.lock().unwrap();
-                shared.get(&session_id).map(|i| i.buffer.clone())
-            };
-            if let Some(scrollback) = buf {
-                let frame = socketio_frame(&json!([
-                    "session:sync",
-                    {
-                        "sessionId": session_id,
-                        "viewerId": viewer_id,
-                        "data": scrollback
-                    }
-                ]));
-                let _ = tx.send(Message::Text(frame.into())).await;
-            }
+            // Replay our scrollback so the joiner starts with a full screen.
+            send_scrollback(&session_id, &viewer_id, tx, state).await;
         }
 
         "session:viewer_leave" => {
             let session_id = data["sessionId"].as_str().unwrap_or("").to_string();
-            let viewer_id = data["viewerId"].as_str().unwrap_or("").to_string();
+            let (viewer_id, _) = viewer_identity(&data);
 
             if session_id.is_empty() || viewer_id.is_empty() {
                 return;
@@ -366,32 +355,93 @@ async fn handle_socketio_event(
 
         "session:sync_request" => {
             let session_id = data["sessionId"].as_str().unwrap_or("").to_string();
-            let viewer_id = data["viewerId"].as_str().unwrap_or("").to_string();
+            let (viewer_id, _) = viewer_identity(&data);
 
-            let buf = {
+            send_scrollback(&session_id, &viewer_id, tx, state).await;
+        }
+
+        // A dashboard watcher's pointer — hand it to the cockpit UI, which draws
+        // the peer cursors over the pane.
+        "terminal:cursor" => {
+            let session_id = data["sessionId"].as_str().unwrap_or("").to_string();
+            if session_id.is_empty() {
+                return;
+            }
+            let is_shared = {
                 let shared = state.shared_terminals.lock().unwrap();
-                shared.get(&session_id).map(|i| i.buffer.clone())
+                shared.contains_key(&session_id)
             };
-            if let Some(scrollback) = buf {
-                let frame = socketio_frame(&json!([
-                    "broadcast",
-                    {
-                        "channel": format!("agent:session-{session_id}"),
-                        "event": "session:sync",
-                        "payload": {
-                            "sessionId": session_id,
-                            "viewerId": viewer_id,
-                            "data": scrollback
-                        },
-                        "self": false
-                    }
-                ]));
-                let _ = tx.send(Message::Text(frame.into())).await;
+            if is_shared {
+                use tauri::Emitter;
+                let _ = state.app_handle.emit("terminal:cursor", data.clone());
             }
         }
 
         _ => {} // unknown event, ignore
     }
+}
+
+/// Pull a viewer's id/name out of an event payload.
+///
+/// The dashboard viewer nests them (`{viewer: {id, name}}`); the local cockpit
+/// sends them flat (`viewerId`/`viewerName`). Reading only the flat form made
+/// every dashboard `viewer_join` bail on an empty id — no presence badge, and
+/// (worse) no scrollback replay, so the remote terminal stayed blank.
+fn viewer_identity(data: &Value) -> (String, String) {
+    let id = data["viewerId"]
+        .as_str()
+        .or_else(|| data["viewer"]["id"].as_str())
+        .or_else(|| data["id"].as_str())
+        .unwrap_or("")
+        .to_string();
+    let name = data["viewerName"]
+        .as_str()
+        .or_else(|| data["viewer"]["name"].as_str())
+        .or_else(|| data["name"].as_str())
+        .unwrap_or("Anonymous")
+        .to_string();
+    (id, name)
+}
+
+/// Replay a shared terminal's captured scrollback to a (re)joining viewer.
+///
+/// Goes out as a normal `broadcast` on the SAME project channel the live output
+/// uses — a mid-stream joiner has no history otherwise, and an idle pane emits
+/// nothing new, so without this the viewer just shows an empty black box.
+/// `viewerId` is echoed back so each viewer can ignore somebody else's replay.
+async fn send_scrollback(
+    session_id: &str,
+    viewer_id: &str,
+    tx: &mpsc::Sender<Message>,
+    state: &Arc<AppState>,
+) {
+    if session_id.is_empty() {
+        return;
+    }
+    let info = {
+        let shared = state.shared_terminals.lock().unwrap();
+        shared
+            .get(session_id)
+            .map(|i| (i.channel.clone(), i.buffer.clone()))
+    };
+    let (channel, scrollback) = match info {
+        Some(v) => v,
+        None => return,
+    };
+    let frame = socketio_frame(&json!([
+        "broadcast",
+        {
+            "channel": channel,
+            "event": "session:sync",
+            "payload": {
+                "sessionId": session_id,
+                "viewerId": viewer_id,
+                "data": scrollback
+            },
+            "self": false
+        }
+    ]));
+    let _ = tx.send(Message::Text(frame.into())).await;
 }
 
 // ── get_or_create_share_conn ──────────────────────────────────────────────────
@@ -467,6 +517,7 @@ pub async fn register_share(
     label: Option<&str>,
     cli_type: &str,
     cwd: Option<&str>,
+    allow_control: bool,
 ) -> Result<(), String> {
     let url = format!("{api_url}/api/orquesta-cli/projects/{project_id}/shared-terminals");
     let body = json!({
@@ -474,6 +525,7 @@ pub async fn register_share(
         "label": label.unwrap_or(session_id),
         "cliType": cli_type,
         "cwd": cwd.unwrap_or(""),
+        "allowControl": allow_control,
         "status": "active",
     });
 
@@ -493,6 +545,158 @@ pub async fn register_share(
     }
 
     Ok(())
+}
+
+// ── patch_share ───────────────────────────────────────────────────────────────
+
+/// PATCH a shared-terminal row: refresh its heartbeat, flip control, or close it.
+///
+/// The endpoint is the COLLECTION route with `sessionId` in the body — there is
+/// no `/shared-terminals/{sessionId}` sub-route. Addressing one (as the close
+/// path used to) 404s, which is why a stopped share stayed `active` in the
+/// dashboard forever.
+pub async fn patch_share(
+    api_url: &str,
+    cli_token: &str,
+    project_id: &str,
+    session_id: &str,
+    allow_control: Option<bool>,
+    status: Option<&str>,
+) -> Result<(), String> {
+    let url = format!("{api_url}/api/orquesta-cli/projects/{project_id}/shared-terminals");
+    let mut body = json!({ "sessionId": session_id });
+    if let Some(allow) = allow_control {
+        body["allowControl"] = json!(allow);
+    }
+    if let Some(s) = status {
+        body["status"] = json!(s);
+    }
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .patch(&url)
+        .header("Authorization", format!("Bearer {cli_token}"))
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("patch_share REST: {e}"))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(format!("patch_share {status}: {text}"));
+    }
+
+    Ok(())
+}
+
+// ── heartbeat_shares ──────────────────────────────────────────────────────────
+
+/// Keep every active share's `last_active_at` fresh.
+///
+/// Without this the row's timestamp only ever moved when the share was created,
+/// so the dashboard could not tell a live terminal from one whose cockpit was
+/// quit, crashed or rebooted — every share it ever saw stayed green forever.
+/// The dashboard treats a share with no heartbeat for a few minutes as offline.
+pub async fn heartbeat_shares(state: &Arc<AppState>) {
+    let shares: Vec<(String, String, String, String)> = {
+        let shared = state.shared_terminals.lock().unwrap();
+        shared
+            .values()
+            .map(|i| {
+                (
+                    i.api_url.clone(),
+                    i.cli_token.clone(),
+                    i.project_id.clone(),
+                    i.session_id.clone(),
+                )
+            })
+            .collect()
+    };
+
+    for (api_url, cli_token, project_id, session_id) in shares {
+        let _ = patch_share(&api_url, &cli_token, &project_id, &session_id, None, None).await;
+
+        // A dropped socket is silent: the PTY keeps running, the row keeps
+        // heartbeating, and the watchers just never see another byte. Rebuild it
+        // here (get_or_create_share_conn evicts the dead entry and re-subscribes).
+        let key = conn_key(&api_url, &cli_token, &project_id);
+        let alive = {
+            let conns = state.cloud_conns.lock().unwrap();
+            conns
+                .get(&key)
+                .map(|c| c.alive.load(Ordering::Relaxed))
+                .unwrap_or(false)
+        };
+        if !alive {
+            let _ =
+                get_or_create_share_conn(&api_url, &cli_token, &project_id, &session_id, state)
+                    .await;
+        }
+    }
+}
+
+// ── maybe_broadcast_cursor ────────────────────────────────────────────────────
+
+/// Mirror this cockpit's own pointer to the watchers, if the pane is shared.
+///
+/// The dashboard viewer already broadcasts (and renders) `terminal:cursor`, so
+/// without this half the multiplayer cursors only worked watcher↔watcher and
+/// the person actually driving the terminal was invisible.
+pub fn maybe_broadcast_cursor(
+    session_id: &str,
+    id: &str,
+    name: &str,
+    color: &str,
+    x: f64,
+    y: f64,
+    state: &Arc<AppState>,
+) {
+    let info_opt = {
+        let shared = state.shared_terminals.lock().unwrap();
+        shared.get(session_id).map(|i| {
+            (
+                i.channel.clone(),
+                i.api_url.clone(),
+                i.cli_token.clone(),
+                i.project_id.clone(),
+            )
+        })
+    };
+
+    let (channel, api_url, cli_token, project_id) = match info_opt {
+        Some(v) => v,
+        None => return,
+    };
+
+    let key = conn_key(&api_url, &cli_token, &project_id);
+    let frame = socketio_frame(&json!([
+        "broadcast",
+        {
+            "channel": channel,
+            "event": "terminal:cursor",
+            "payload": {
+                "sessionId": session_id,
+                "id": id,
+                "name": name,
+                "color": color,
+                "x": x,
+                "y": y
+            },
+            "self": false
+        }
+    ]));
+
+    let state_clone = Arc::clone(state);
+    tauri::async_runtime::spawn(async move {
+        let tx_opt = {
+            let conns = state_clone.cloud_conns.lock().unwrap();
+            conns.get(&key).map(|c| c.tx.clone())
+        };
+        if let Some(tx) = tx_opt {
+            let _ = tx.send(frame).await;
+        }
+    });
 }
 
 // ── maybe_broadcast_output ────────────────────────────────────────────────────
@@ -621,17 +825,8 @@ pub async fn stop_share(session_id: &str, state: &Arc<AppState>) -> Result<(), S
     };
 
     if let Some((api_url, cli_token, project_id, sid)) = info_opt {
-        // PATCH status=closed
-        let url = format!(
-            "{api_url}/api/orquesta-cli/projects/{project_id}/shared-terminals/{sid}"
-        );
-        let client = reqwest::Client::new();
-        let _ = client
-            .patch(&url)
-            .header("Authorization", format!("Bearer {cli_token}"))
-            .json(&json!({ "status": "closed" }))
-            .send()
-            .await;
+        // PATCH status=closed so the dashboard drops it from the live list.
+        let _ = patch_share(&api_url, &cli_token, &project_id, &sid, None, Some("closed")).await;
 
         // Decrement refs; disconnect if refs == 0
         let key = conn_key(&api_url, &cli_token, &project_id);

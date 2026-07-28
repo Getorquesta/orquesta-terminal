@@ -34,6 +34,19 @@ pub fn run() {
                 }
             });
 
+            // Background: heartbeat every shared terminal every 60s, so the
+            // dashboard can tell a live share from one whose cockpit is gone.
+            let state_shares = Arc::clone(&app_state);
+            tauri::async_runtime::spawn(async move {
+                let mut interval = tokio::time::interval(
+                    std::time::Duration::from_secs(60),
+                );
+                loop {
+                    interval.tick().await;
+                    cloud::heartbeat_shares(&state_shares).await;
+                }
+            });
+
             app.manage(app_state);
             Ok(())
         })

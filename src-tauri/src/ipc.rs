@@ -349,6 +349,7 @@ pub async fn terminal_share(
         label.as_deref(),
         &cli_type_str,
         cwd.as_deref(),
+        allow_control.unwrap_or(false),
     )
     .await;
 
@@ -418,10 +419,36 @@ pub async fn terminal_share_control(
     allow_control: bool,
     state: State<'_, Arc<AppState>>,
 ) -> Result<(), String> {
-    let mut shared = state.shared_terminals.lock().unwrap();
-    if let Some(info) = shared.get_mut(&session_id) {
-        info.allow_control = allow_control;
+    // Flip it locally (this is what gates remote input), then mirror it to the
+    // cloud row — otherwise the dashboard kept showing "view-only" and the
+    // viewer never got its compose bar.
+    let target = {
+        let mut shared = state.shared_terminals.lock().unwrap();
+        match shared.get_mut(&session_id) {
+            Some(info) => {
+                info.allow_control = allow_control;
+                Some((
+                    info.api_url.clone(),
+                    info.cli_token.clone(),
+                    info.project_id.clone(),
+                ))
+            }
+            None => None,
+        }
+    };
+
+    if let Some((api_url, cli_token, project_id)) = target {
+        let _ = crate::cloud::patch_share(
+            &api_url,
+            &cli_token,
+            &project_id,
+            &session_id,
+            Some(allow_control),
+            None,
+        )
+        .await;
     }
+
     Ok(())
 }
 
@@ -447,7 +474,7 @@ pub fn terminal_cursor(
         session_viewers.insert(id.clone(), (name.clone(), now));
     }
 
-    // TODO Phase 5: broadcast cursor to cloud viewers
+    crate::cloud::maybe_broadcast_cursor(&session_id, &id, &name, &color, x, y, &state);
     Ok(())
 }
 
