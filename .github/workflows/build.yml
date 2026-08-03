@@ -55,8 +55,11 @@ jobs:
         working-directory: src-tauri
         run: cargo test --locked
 
+      # No updater artifacts here: signing them needs the private key, which a
+      # pull request from a fork cannot see. Signed builds are the release
+      # workflows' job — this one only has to prove the bundle still builds.
       - name: Build Tauri bundle
-        run: npm run build
+        run: npx tauri build --config '{"bundle":{"createUpdaterArtifacts":false}}'
 
       - name: Upload bundle artifacts
         uses: actions/upload-artifact@v4
