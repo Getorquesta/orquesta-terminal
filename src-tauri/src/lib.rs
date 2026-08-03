@@ -12,7 +12,23 @@ use std::sync::Arc;
 use state::AppState;
 use tauri::Manager;
 
+/// WebKitGTK's DMABUF renderer paints a black window on many Linux setups
+/// (NVIDIA proprietary drivers, VMs, some Mesa versions). The app runs fine —
+/// it just never composites — so fall back to the shared-memory path.
+/// Set WEBKIT_DISABLE_DMABUF_RENDERER=0 to keep the DMABUF renderer.
+#[cfg(target_os = "linux")]
+fn apply_linux_webkit_workarounds() {
+    if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
+        std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn apply_linux_webkit_workarounds() {}
+
 pub fn run() {
+    apply_linux_webkit_workarounds();
+
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())

@@ -3,7 +3,9 @@ set -e
 
 echo "Installing Tauri system dependencies for Linux..."
 
-sudo apt-get update -qq
+# A broken third-party repo (bad GPG key, unreachable host) must not block us —
+# the packages below usually resolve from the lists already on disk.
+sudo apt-get update -qq || echo "apt-get update failed; continuing with cached package lists"
 
 sudo apt-get install -y \
   libwebkit2gtk-4.1-dev \
