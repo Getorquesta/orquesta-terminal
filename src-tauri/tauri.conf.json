@@ -33,6 +33,7 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "createUpdaterArtifacts": true,
     "icon": [
       "icons/512x512.png",
       "icons/128x128@2x.png",
@@ -50,6 +51,12 @@
     "shell": {
       "open": true
     },
-    "fs": {}
+    "fs": {},
+    "updater": {
+      "endpoints": [
+        "https://github.com/Getorquesta/orquesta-terminal/releases/latest/download/latest.json"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEU2Q0UyNDRCM0VENjQ0ODUKUldTRlJOWStTeVRPNWlvRVo0QmsyZkFEUlNlRjMzeVVwNWlKNkpMei9MN2QxTmxOWi9EblJpRE4K"
+    }
   }
 }

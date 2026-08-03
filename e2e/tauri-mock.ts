@@ -36,6 +36,9 @@ export const TAURI_MOCK_SCRIPT = `
     'hosted_upload':              { ok: true },
     'open_external_url':          null,
     'check_for_update':           { updateAvailable: false, current: '0.0.0', latest: null, url: '', notes: null, publishedAt: null },
+    // A browser is never an AppImage/NSIS/.app install, so the update dialog
+    // takes the "report only" path and never touches the updater plugin.
+    'can_self_update':            false,
     // plugins
     'plugin:clipboard-manager|write_text': null,
     'plugin:clipboard-manager|read_text':  '',

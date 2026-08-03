@@ -46,13 +46,20 @@ jobs:
       # Build the full Tauri bundle (.AppImage + .deb). `npm run build`
       # runs `tauri build`, which runs next-build via beforeBuildCommand.
       - name: Build Tauri bundle
+        env:
+          # Signs the AppImage so the in-app updater will accept it. Without
+          # these the build still succeeds — it just ships no .sig, and
+          # updater-manifest leaves Linux out of latest.json.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: npm run build
 
       - name: Collect installers
         run: |
           mkdir -p dist-release
           find src-tauri/target/release/bundle -type f \
-            \( -name '*.AppImage' -o -name '*.deb' \) -exec cp {} dist-release/ \;
+            \( -name '*.AppImage' -o -name '*.AppImage.sig' -o -name '*.deb' \) \
+            -exec cp {} dist-release/ \;
           ls -la dist-release
 
       # Create the draft GitHub Release for this tag (if no other job made it

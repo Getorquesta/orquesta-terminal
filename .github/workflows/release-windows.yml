@@ -45,13 +45,18 @@ jobs:
       # tooling (Tauri fetches NSIS itself), unlike MSI which needs WiX.
       # `tauri build` runs next-build first via beforeBuildCommand.
       - name: Build Tauri bundle (NSIS)
+        env:
+          # Signs the installer so the in-app updater will accept it.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: npx tauri build --bundles nsis
 
       - name: Collect installer
         shell: bash
         run: |
           mkdir -p dist-release
-          find src-tauri/target/release/bundle/nsis -name '*-setup.exe' -exec cp {} dist-release/ \;
+          find src-tauri/target/release/bundle/nsis \
+            \( -name '*-setup.exe' -o -name '*-setup.exe.sig' \) -exec cp {} dist-release/ \;
           ls -la dist-release
 
       - name: Upload to the release

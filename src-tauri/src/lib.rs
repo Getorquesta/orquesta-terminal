@@ -34,6 +34,8 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_clipboard_manager::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .setup(|app| {
             let handle = app.handle().clone();
             let app_state = AppState::new(handle);
@@ -106,6 +108,7 @@ pub fn run() {
             ipc::hosted_upload,
             // Updates
             updater::check_for_update,
+            updater::can_self_update,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -49,6 +49,17 @@ Orquesta Terminal ships as a **native desktop app** (built with [Tauri](https://
 
 Latest builds are always on the [Releases page](https://github.com/Getorquesta/orquesta-terminal/releases/latest).
 
+### Updating
+
+The app checks for a new release at launch and offers **Update & restart**: it
+downloads the installer for your platform, verifies its signature against the
+key baked into the build, and relaunches on the new version — no manual
+download. This covers the AppImage, the Windows installer and the macOS app.
+
+The `.deb` and `.rpm` packages are owned by your package manager, so those
+installs are only told that a new version exists and are pointed at the release
+page.
+
 Running the AppImage:
 
 ```bash

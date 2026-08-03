@@ -1,0 +1,33 @@
+name: updater-manifest
+
+# Publishes latest.json — the manifest the in-app updater reads from
+# https://github.com/Getorquesta/orquesta-terminal/releases/latest/download/latest.json
+#
+# It runs when a release is published, i.e. after the three build jobs have
+# uploaded their installers and their .sig files to the draft. Publishing the
+# release is what makes the new version visible to running apps.
+on:
+  release:
+    types: [published]
+  # Re-run by hand if a build was re-uploaded after the release went out.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g. v0.1.25)'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  manifest:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build and upload latest.json
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ github.event.inputs.tag || github.event.release.tag_name }}"
+          bash scripts/build-updater-manifest.sh "$TAG"

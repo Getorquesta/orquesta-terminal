@@ -74,13 +74,21 @@ jobs:
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
           APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
           APPLE_API_KEY_PATH: ${{ runner.temp }}/authkey.p8
-        run: npx tauri build --target universal-apple-darwin --bundles dmg
+          # Signs the .app.tar.gz the in-app updater swaps in. This is Tauri's
+          # own update signature, unrelated to the Apple codesigning above.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        # `app` is what produces the updater artifact; `dmg` is what people
+        # download. Building both keeps one universal, notarized .app behind both.
+        run: npx tauri build --target universal-apple-darwin --bundles app,dmg
 
       - name: Collect installer
         shell: bash
         run: |
           mkdir -p dist-release
-          find src-tauri/target -name '*.dmg' -exec cp {} dist-release/ \;
+          find src-tauri/target \
+            \( -name '*.dmg' -o -name '*.app.tar.gz' -o -name '*.app.tar.gz.sig' \) \
+            -exec cp {} dist-release/ \;
           ls -la dist-release
 
       - name: Upload to the release

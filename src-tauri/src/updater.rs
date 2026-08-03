@@ -1,10 +1,16 @@
 //! Startup update check.
 //!
-//! Asks GitHub for the latest *published* release of orquesta-terminal and
-//! compares its tag with the running build. It only reports — installing stays
-//! with the user, because each OS ships its own signed installer on the release
-//! page. Drafts and pre-releases are invisible to `/releases/latest`, so a tag
-//! that CI has built but nobody published yet never nags anyone.
+//! The app installs updates itself through `tauri-plugin-updater`: it reads the
+//! `latest.json` published with each release, downloads the installer for this
+//! platform, verifies its minisign signature and restarts. What lives here is
+//! the fallback for builds the updater cannot replace — a `.deb`/`.rpm` install
+//! owns its files through the package manager, so there we only *report* the
+//! new version and send the user to the release page.
+//!
+//! `check_for_update` asks GitHub for the latest *published* release and
+//! compares its tag with the running build. Drafts and pre-releases are
+//! invisible to `/releases/latest`, so a tag that CI has built but nobody
+//! published yet never nags anyone.
 
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -57,6 +63,20 @@ fn is_newer(latest: &str, current: &str) -> bool {
         }
     }
     false
+}
+
+/// Whether this build can replace itself in place.
+///
+/// On Linux the updater rewrites the running AppImage, so a `.deb`/`.rpm`
+/// install — no `APPIMAGE` in the environment — has to go through apt/dnf or a
+/// fresh download instead. Windows (NSIS) and macOS (.app) always can.
+#[tauri::command]
+pub fn can_self_update() -> bool {
+    if cfg!(target_os = "linux") {
+        std::env::var_os("APPIMAGE").is_some()
+    } else {
+        true
+    }
 }
 
 #[tauri::command]
