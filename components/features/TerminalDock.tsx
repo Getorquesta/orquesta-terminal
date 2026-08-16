@@ -300,9 +300,7 @@ export function TerminalSwitcherDock({
         const attention = finishedIds.has(it.id)
         const status = statuses[it.id] ?? 'idle'
         const accent = itemAccent(it)
-        const code = it.kind === 'remote'
-          ? (it.name || 'Remote').slice(0, 2).toUpperCase()
-          : cliLabelFor(it.cliType).slice(0, 2).toUpperCase()
+        const code = chipCode(it)
         return (
           <button
             key={it.id}
@@ -389,6 +387,23 @@ function accentFor(cli: string): string {
   return CLI_ACCENT[cli] ?? CLI_ACCENT.shell
 }
 
+/**
+ * Two-character tile code for the rail.
+ *
+ * It used to be the CLI's first two letters, which turned a row of four shells
+ * into four identical "SH" tiles — the one place in the UI where you're meant to
+ * pick a pane out at a glance. Keep the ordinal when the name carries one
+ * ("Shell 3" → "S3"); otherwise the first letters of the name, so a pane named
+ * after its folder reads as that folder.
+ */
+function chipCode(it: DockItem): string {
+  const n = (it.name || it.label || '').trim()
+  const numbered = /^(\S).*?(\d+)$/.exec(n)
+  if (numbered) return (numbered[1] + numbered[2]).toUpperCase().slice(0, 3)
+  if (n) return n.slice(0, 2).toUpperCase()
+  return (it.kind === 'remote' ? 'Remote' : cliLabelFor(it.cliType)).slice(0, 2).toUpperCase()
+}
+
 /** Accent for a dock/rail row: white for remote panes, CLI colour otherwise. */
 function itemAccent(it: DockItem): string {
   return it.kind === 'remote' ? REMOTE_ACCENT : accentFor(it.cliType)
@@ -435,6 +450,13 @@ export function TerminalListSidebar({
     const attention = finishedIds.has(it.id)
     const isRemote = it.kind === 'remote'
     const accent = itemAccent(it)
+    const shown = it.name || it.label
+    const cli = cliLabelFor(it.cliType)
+    // Drop a subtitle that only repeats the name — "Shell" over "SHELL", or a
+    // pane numbered off its own CLI ("Claude 2" over "CLAUDE").
+    const subtitle = isRemote
+      ? (it.detail || 'Remote')
+      : (shown.toLowerCase().startsWith(cli.toLowerCase()) ? '' : cli)
     return (
       <div
         key={it.id}
@@ -447,7 +469,9 @@ export function TerminalListSidebar({
           dragId.current = null
         }}
         onClick={() => onFocus(it.id)}
-        className={`group mx-1 mb-0.5 flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-sm transition-colors ${
+        // min-h keeps one-line rows (no subtitle) the same height as two-line
+        // ones, so a mixed list doesn't come out ragged.
+        className={`group mx-1 mb-0.5 flex min-h-[2.6rem] cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-sm transition-colors ${
           active
             ? isRemote ? 'bg-white/15 text-white ring-1 ring-white/30' : 'bg-zinc-800/90 text-zinc-100'
             : attention
@@ -462,15 +486,20 @@ export function TerminalListSidebar({
         <span className="shrink-0" style={{ color: accent }}>
           {isRemote ? <Server className="h-3.5 w-3.5" /> : <TerminalIcon className="h-3.5 w-3.5" />}
         </span>
-        {/* Name on top, the CLI (or the remote host) underneath. */}
+        {/* Name on top, the CLI (or the remote host) underneath — but only when
+            the subtitle says something the name doesn't. An unnamed shell pane
+            is called "Shell", and stacking "SHELL" under it is noise, not
+            information; the accent colour already carries the CLI. */}
         <span className="flex min-w-0 flex-1 flex-col leading-tight">
           <span className="truncate">{it.name || it.label}</span>
-          <span
-            className="truncate text-[10px] font-medium uppercase tracking-wide opacity-80"
-            style={{ color: accent }}
-          >
-            {isRemote ? (it.detail || 'Remote') : cliLabelFor(it.cliType)}
-          </span>
+          {subtitle && (
+            <span
+              className="truncate text-[10px] font-medium uppercase tracking-wide opacity-80"
+              style={{ color: accent }}
+            >
+              {subtitle}
+            </span>
+          )}
         </span>
         {/* Status: pulsing emerald = just finished a prompt (needs attention),
             solid amber = actively producing output, hollow = idle. */}
@@ -519,7 +548,7 @@ export function TerminalListSidebar({
 
       <div className="min-h-0 flex-1 overflow-y-auto py-1">
         {local.length === 0 && (
-          <p className="px-3 py-4 text-center text-xs text-zinc-600">No terminals yet.</p>
+          <p className="px-3 py-4 text-center text-xs text-zinc-500">No terminals yet.</p>
         )}
         {local.map(row)}
 
@@ -544,7 +573,7 @@ export function TerminalListSidebar({
               )}
             </div>
             {remote.length === 0 ? (
-              <p className="px-3 pb-2 text-center text-[11px] text-zinc-600">No remote sessions.</p>
+              <p className="px-3 pb-2 text-center text-[11px] text-zinc-500">No remote sessions.</p>
             ) : (
               remote.map(row)
             )}

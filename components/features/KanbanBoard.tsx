@@ -19,6 +19,7 @@ import {
 } from 'lucide-react'
 import { COLUMNS, COLUMN_META, type ColumnId, type KanbanCard, type UseKanban } from '@/hooks/useKanban'
 import type { PaneInfo } from './AgentGrid'
+import { useKeyLabels } from '@/lib/platform'
 
 /** Per-column chrome. Kept as literal class strings so Tailwind can see them. */
 const COLUMN_STYLE: Record<ColumnId, { dot: string; text: string; ring: string; over: string }> = {
@@ -169,7 +170,7 @@ function Card({
       {/* Meta row */}
       <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-[10px] text-zinc-500">
         {card.paneName && (
-          <span className={`inline-flex items-center gap-1 rounded px-1 ${pane ? 'bg-zinc-800 text-zinc-300' : 'bg-zinc-800/50 text-zinc-600 line-through'}`}>
+          <span className={`inline-flex items-center gap-1 rounded px-1 ${pane ? 'bg-zinc-800 text-zinc-300' : 'bg-zinc-800/50 text-zinc-500 line-through'}`}>
             <TerminalIcon className="h-2.5 w-2.5" />
             {card.paneName}
           </span>
@@ -181,7 +182,7 @@ function Card({
           </span>
         )}
         {card.column !== 'running' && card.dispatchedAt && card.finishedAt && (
-          <span className="font-mono tabular-nums text-zinc-600">ran {duration(card.dispatchedAt, card.finishedAt)}</span>
+          <span className="font-mono tabular-nums text-zinc-500">ran {duration(card.dispatchedAt, card.finishedAt)}</span>
         )}
         {card.tags.map((t) => (
           <span key={t} className="rounded bg-zinc-800 px-1 text-zinc-400">{t}</span>
@@ -218,7 +219,7 @@ function Card({
                     Any idle agent
                   </button>
                   {panes.length === 0 && (
-                    <p className="px-2 py-1 text-[10px] text-zinc-600">No terminals open</p>
+                    <p className="px-2 py-1 text-[10px] text-zinc-500">No terminals open</p>
                   )}
                   {panes.map((p) => (
                     <button
@@ -228,7 +229,7 @@ function Card({
                     >
                       <span className={`h-1.5 w-1.5 rounded-full ${p.status === 'running' ? 'bg-cyan-400' : 'bg-zinc-600'}`} />
                       <span className="truncate">{p.name}</span>
-                      <span className="ml-auto text-zinc-600">{p.cliType}</span>
+                      <span className="ml-auto text-zinc-500">{p.cliType}</span>
                     </button>
                   ))}
                 </div>
@@ -291,7 +292,7 @@ function Card({
                 }}
                 rows={2}
                 placeholder="What should the agent do next?"
-                className="w-full resize-none rounded border border-zinc-800 bg-zinc-950 px-1.5 py-1 text-[10px] text-zinc-200 outline-none placeholder:text-zinc-600 focus:border-amber-500/40"
+                className="w-full resize-none rounded border border-zinc-800 bg-zinc-950 px-1.5 py-1 text-[10px] text-zinc-200 outline-none placeholder:text-zinc-500 focus:border-amber-500/40"
               />
               <div className="flex items-center gap-1">
                 <button
@@ -331,7 +332,7 @@ function Card({
                 }}
                 placeholder="What should the agent change?"
                 rows={2}
-                className="w-full resize-none rounded border border-zinc-800 bg-zinc-950 px-1.5 py-1 text-[10px] text-zinc-200 outline-none placeholder:text-zinc-600 focus:border-violet-500/40"
+                className="w-full resize-none rounded border border-zinc-800 bg-zinc-950 px-1.5 py-1 text-[10px] text-zinc-200 outline-none placeholder:text-zinc-500 focus:border-violet-500/40"
               />
               <div className="flex items-center gap-1">
                 <button
@@ -437,7 +438,7 @@ function Column({
 
       <div className="flex-1 space-y-1.5 overflow-y-auto p-2">
         {cards.length === 0 ? (
-          <p className="px-1 py-4 text-center text-[10px] leading-relaxed text-zinc-700">{meta.hint}</p>
+          <p className="px-1 py-4 text-center text-[10px] leading-relaxed text-zinc-500">{meta.hint}</p>
         ) : (
           cards.map((c) => <Card key={c.id} card={c} panes={panes} board={board} onToast={onToast} />)
         )}
@@ -457,6 +458,7 @@ export function KanbanBoard({
 }) {
   const [composing, setComposing] = useState(false)
   const [draft, setDraft] = useState('')
+  const keys = useKeyLabels()
   const [toast, setToast] = useState<string | null>(null)
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
@@ -485,7 +487,7 @@ export function KanbanBoard({
         <span className="flex items-center gap-1.5 text-xs font-medium text-zinc-200">
           <Sparkles className="h-3.5 w-3.5 text-violet-400" /> Prompt board
         </span>
-        <span className="hidden font-mono text-[10px] text-zinc-600 sm:inline">
+        <span className="hidden font-mono text-[10px] text-zinc-500 sm:inline">
           {panes.length} agent{panes.length === 1 ? '' : 's'}
           {running > 0 && <span className="text-cyan-400"> · {running} running</span>}
           {waiting > 0 && <span className="text-violet-300"> · {waiting} awaiting approval</span>}
@@ -528,7 +530,7 @@ export function KanbanBoard({
           <div className="fixed inset-0 z-40 bg-black/50" onClick={() => setComposing(false)} />
           <div className="fixed left-1/2 top-1/4 z-50 w-[min(36rem,90vw)] -translate-x-1/2 rounded-xl border border-zinc-800 bg-zinc-950 p-3 shadow-2xl">
             <p className="mb-2 text-[11px] text-zinc-400">
-              New prompt — one card per paragraph. <kbd className="rounded border border-white/10 bg-white/5 px-1">⌘↵</kbd> to add.
+              New prompt — one card per paragraph. <kbd className="rounded border border-white/10 bg-white/5 px-1">{keys.combo(keys.mod, keys.enter)}</kbd> to add.
             </p>
             <textarea
               autoFocus
@@ -541,7 +543,7 @@ export function KanbanBoard({
               rows={6}
               data-testid="kanban-composer"
               placeholder={'Refactor the auth middleware to use the new session store\n\nAdd tests for the retry path'}
-              className="w-full resize-none rounded-lg border border-zinc-800 bg-zinc-900 px-2.5 py-2 text-xs text-zinc-100 outline-none placeholder:text-zinc-600 focus:border-violet-500/40"
+              className="w-full resize-none rounded-lg border border-zinc-800 bg-zinc-900 px-2.5 py-2 text-xs text-zinc-100 outline-none placeholder:text-zinc-500 focus:border-violet-500/40"
             />
             <div className="mt-2 flex items-center justify-end gap-2">
               <button onClick={() => setComposing(false)} className="px-2 py-1 text-xs text-zinc-500 hover:text-zinc-300">Cancel</button>

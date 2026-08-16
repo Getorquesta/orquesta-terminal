@@ -20,10 +20,11 @@ import {
   Cloud, ExternalLink, Loader2, CheckCircle2, AlertCircle, Clock,
   Star, Tag, MessageSquare, Send, Monitor, Puzzle,
   Activity, ScrollText, Server, Layers, Zap, PanelLeft, ArrowRightLeft,
-  Columns3,
+  Columns3, Search,
 } from 'lucide-react'
 import { RemoteSessionModal } from '@/components/features/RemoteSessionModal'
 import { UpdateNotice } from '@/components/features/UpdateNotice'
+import { useKeyLabels } from '@/lib/platform'
 
 interface Project {
   id: string
@@ -189,6 +190,10 @@ export default function TerminalWorkspacePage() {
     return () => window.removeEventListener('keydown', onKey)
   }, [projects])
 
+  // Shortcut labels for THIS platform — the handlers already take either
+  // modifier, only the printed keycaps were stuck on macOS glyphs.
+  const keys = useKeyLabels()
+
   // Command palette actions — projects, terminal, background, navigation.
   const commands: Command[] = useMemo(() => {
     const list: Command[] = []
@@ -211,15 +216,15 @@ export default function TerminalWorkspacePage() {
         icon: ArrowRightLeft, run: () => gridRef.current?.cycleTerminal(1),
       },
       {
-        id: 'term-overlay', group: 'Terminal', label: 'Toggle overlay windows', hint: '⌘⇧O',
+        id: 'term-overlay', group: 'Terminal', label: 'Toggle overlay windows', hint: keys.combo(keys.mod, keys.shift, 'O'),
         icon: Layers, keepOpen: true, run: () => gridRef.current?.toggleOverlay(),
       },
       {
-        id: 'term-lighting', group: 'Terminal', label: 'Toggle lighting (surface finished)', hint: '⌘⇧Y',
+        id: 'term-lighting', group: 'Terminal', label: 'Toggle lighting (surface finished)', hint: keys.combo(keys.mod, keys.shift, 'Y'),
         icon: Zap, keepOpen: true, run: () => gridRef.current?.toggleLighting(),
       },
       {
-        id: 'term-sidebar', group: 'Terminal', label: 'Toggle terminal list sidebar', hint: '⌘⇧B',
+        id: 'term-sidebar', group: 'Terminal', label: 'Toggle terminal list sidebar', hint: keys.combo(keys.mod, keys.shift, 'B'),
         icon: PanelLeft, keepOpen: true, run: () => gridRef.current?.toggleSidebar(),
       },
     )
@@ -230,7 +235,7 @@ export default function TerminalWorkspacePage() {
         group: 'Switch project',
         label: p.name,
         hint: p.agentOnline ? 'online' : 'offline',
-        keys: i < 9 ? `⌘${i + 1}` : undefined,
+        keys: i < 9 ? keys.combo(keys.mod, String(i + 1)) : undefined,
         icon: p.agentOnline ? Wifi : WifiOff,
         run: () => setProjectId(p.id),
       })
@@ -259,7 +264,7 @@ export default function TerminalWorkspacePage() {
       group: 'Navigate',
       label: 'Toggle Kanban board',
       hint: 'prompts as cards',
-      keys: '⌘⇧K',
+      keys: keys.combo(keys.mod, keys.shift, 'K'),
       icon: Columns3,
       run: () => setBoardOpen(o => !o),
     })
@@ -281,7 +286,7 @@ export default function TerminalWorkspacePage() {
     }
 
     return list
-  }, [projects, projectId, updateBg, router, online])
+  }, [projects, projectId, updateBg, router, online, keys])
 
   // Cards sitting in Review — the count badge on the Board button is the whole
   // point of the mode: "N agent results need your approval".
@@ -378,8 +383,8 @@ export default function TerminalWorkspacePage() {
             className="flex items-center gap-1.5 rounded-lg border border-white/10 bg-white/5 px-2.5 py-1.5 text-xs text-zinc-300 transition-colors hover:bg-white/10 hover:text-white"
             title="Command palette"
           >
-            <CommandIcon className="h-3.5 w-3.5" />
-            <kbd className="hidden font-mono text-[10px] text-zinc-500 sm:inline">⌘K</kbd>
+            {keys.mod === '⌘' ? <CommandIcon className="h-3.5 w-3.5" /> : <Search className="h-3.5 w-3.5" />}
+            <kbd className="hidden font-mono text-[10px] text-zinc-500 sm:inline">{keys.combo(keys.mod, 'K')}</kbd>
           </button>
 
           {/* Background customizer */}
@@ -442,7 +447,7 @@ export default function TerminalWorkspacePage() {
                     value={bg.url.startsWith('data:') ? '' : bg.url}
                     onChange={e => updateBg({ url: e.target.value })}
                     placeholder={bg.url.startsWith('data:') ? 'Local image loaded' : 'https://…/wallpaper.jpg'}
-                    className="h-8 w-full rounded-lg border border-white/10 bg-black/30 px-2.5 text-xs text-white placeholder:text-zinc-600 focus:border-green-600/60 focus:outline-none focus:ring-1 focus:ring-green-600/40"
+                    className="h-8 w-full rounded-lg border border-white/10 bg-black/30 px-2.5 text-xs text-white placeholder:text-zinc-500 focus:border-green-600/60 focus:outline-none focus:ring-1 focus:ring-green-600/40"
                   />
                   <input
                     ref={fileInputRef}
@@ -498,7 +503,7 @@ export default function TerminalWorkspacePage() {
                     onChange={e => updateBg({ termOpacity: Number(e.target.value) })}
                     className="mt-1 w-full accent-green-500"
                   />
-                  <p className="mt-1 text-[10px] text-zinc-600">Lower it to let the wallpaper glow through the panes.</p>
+                  <p className="mt-1 text-[10px] text-zinc-500">Lower it to let the wallpaper glow through the panes.</p>
                 </div>
               </>
             )}
@@ -513,7 +518,7 @@ export default function TerminalWorkspacePage() {
                 ? 'border-violet-500/30 bg-violet-500/10 text-violet-300'
                 : 'border-white/10 bg-white/5 text-zinc-300 hover:bg-white/10 hover:text-white'
             }`}
-            title="Kanban mode — prompts as cards (⌘⇧K)"
+            title={`Kanban mode — prompts as cards (${keys.combo(keys.mod, keys.shift, 'K')})`}
           >
             <Columns3 className="h-3.5 w-3.5" />
             <span className="hidden sm:inline">Board</span>
@@ -639,10 +644,10 @@ export default function TerminalWorkspacePage() {
           </span>
           {activeProject && (
             <span className="font-mono text-zinc-500">
-              <span className="text-zinc-600">project</span> {activeProject.name}
+              <span className="text-zinc-500">project</span> {activeProject.name}
             </span>
           )}
-          <span className="hidden font-mono text-zinc-600 sm:inline">
+          <span className="hidden font-mono text-zinc-500 sm:inline">
             {WALLPAPERS.find(w => w.id === bg.wallpaper)?.label || 'Custom'}
             {bg.url ? ' · image' : ''}
           </span>
@@ -651,9 +656,9 @@ export default function TerminalWorkspacePage() {
           onClick={() => setPaletteOpen(true)}
           className="flex items-center gap-1.5 font-mono text-zinc-500 transition-colors hover:text-zinc-300"
         >
-          <CommandIcon className="h-3 w-3" />
+          {keys.mod === '⌘' ? <CommandIcon className="h-3 w-3" /> : <Search className="h-3 w-3" />}
           <span>commands</span>
-          <kbd className="rounded border border-white/10 bg-white/5 px-1 text-[10px]">⌘K</kbd>
+          <kbd className="rounded border border-white/10 bg-white/5 px-1 text-[10px]">{keys.combo(keys.mod, 'K')}</kbd>
         </button>
       </footer>
 
@@ -788,14 +793,14 @@ function PromptCard({
               <span className="rounded bg-zinc-800 px-1 text-zinc-400">{p.cliType}</span>
             )}
             {p.model && (
-              <span className="truncate max-w-[6rem] text-zinc-600">{p.model}</span>
+              <span className="truncate max-w-[6rem] text-zinc-500">{p.model}</span>
             )}
             {p.projectName && auth.projects.length > 1 && !selectedProjectId && (
               <span className="truncate max-w-[6rem] text-cyan-400/70">{p.projectName}</span>
             )}
           </div>
           {p.createdByName && (
-            <p className="mt-0.5 text-[10px] text-zinc-600 truncate">{p.createdByName}</p>
+            <p className="mt-0.5 text-[10px] text-zinc-500 truncate">{p.createdByName}</p>
           )}
 
           {/* Tags */}
@@ -849,7 +854,7 @@ function PromptCard({
                 onChange={e => setTagInput(e.target.value)}
                 onKeyDown={e => { if (e.key === 'Enter') addTag() }}
                 placeholder="tag…"
-                className="flex-1 h-5 rounded bg-zinc-800 border border-zinc-700 px-1.5 text-[10px] text-white placeholder:text-zinc-600 outline-none focus:border-green-600/50"
+                className="flex-1 h-5 rounded bg-zinc-800 border border-zinc-700 px-1.5 text-[10px] text-white placeholder:text-zinc-500 outline-none focus:border-green-600/50"
               />
               <button
                 onClick={addTag}
@@ -1159,7 +1164,7 @@ function TeamChatTab({ auth, selectedProjectId }: { auth: HostedAuth; selectedPr
                 <div className={`flex min-w-0 flex-col ${mine ? 'items-end' : 'items-start'}`}>
                   <div className="flex items-baseline gap-1.5 px-0.5">
                     {!mine && <span className="text-[10px] font-semibold text-zinc-400">{name}</span>}
-                    <span className="text-[9px] text-zinc-600">
+                    <span className="text-[9px] text-zinc-500">
                       {new Date(m.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                     </span>
                   </div>
@@ -1226,7 +1231,7 @@ function TeamChatTab({ auth, selectedProjectId }: { auth: HostedAuth; selectedPr
             }}
             placeholder="Message the team…  (@ to mention · Enter to send)"
             rows={1}
-            className="max-h-24 flex-1 resize-none rounded-lg bg-zinc-800 px-2.5 py-1.5 text-xs text-zinc-200 outline-none placeholder:text-zinc-600 focus:ring-1 focus:ring-green-600/40"
+            className="max-h-24 flex-1 resize-none rounded-lg bg-zinc-800 px-2.5 py-1.5 text-xs text-zinc-200 outline-none placeholder:text-zinc-500 focus:ring-1 focus:ring-green-600/40"
           />
           <button
             onClick={send}
@@ -1549,7 +1554,7 @@ function ChannelChat({ auth, projectId, channelId }: { auth: HostedAuth; project
           onKeyDown={e => { if (e.key === 'Enter') send() }}
           disabled={!sessionId || sending}
           placeholder="Message…"
-          className="flex-1 bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-[10px] text-white placeholder:text-zinc-600 outline-none focus:border-cyan-500/50 disabled:opacity-50"
+          className="flex-1 bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-[10px] text-white placeholder:text-zinc-500 outline-none focus:border-cyan-500/50 disabled:opacity-50"
         />
         <button
           onClick={send}
@@ -1746,7 +1751,7 @@ function PluginsPanel() {
           <p className="text-[11px] leading-relaxed text-zinc-400">{selected.description}</p>
 
           <div>
-            <p className="text-[9px] uppercase tracking-wider text-zinc-600 mb-1">Features</p>
+            <p className="text-[9px] uppercase tracking-wider text-zinc-500 mb-1">Features</p>
             <div className="flex flex-wrap gap-1">
               {selected.features.map(f => (
                 <span key={f} className="rounded bg-zinc-800 px-1.5 py-0.5 text-[9px] text-zinc-400">{f}</span>
@@ -1755,7 +1760,7 @@ function PluginsPanel() {
           </div>
 
           <div>
-            <p className="text-[9px] uppercase tracking-wider text-zinc-600 mb-1">Example prompts</p>
+            <p className="text-[9px] uppercase tracking-wider text-zinc-500 mb-1">Example prompts</p>
             <div className="space-y-1">
               {selected.prompts.map(p => (
                 <button
@@ -1764,7 +1769,7 @@ function PluginsPanel() {
                   className="w-full rounded border border-zinc-800 bg-zinc-900 px-2 py-1.5 text-left text-[10px] text-zinc-300 hover:border-zinc-700 hover:text-white transition-colors group"
                 >
                   <span className="line-clamp-2">{p}</span>
-                  <span className={`block mt-0.5 text-[9px] ${copiedPrompt === p ? textColorMap[selected.color] : 'text-zinc-600 group-hover:text-zinc-500'}`}>
+                  <span className={`block mt-0.5 text-[9px] ${copiedPrompt === p ? textColorMap[selected.color] : 'text-zinc-500 group-hover:text-zinc-400'}`}>
                     {copiedPrompt === p ? '✓ Copied' : 'Click to copy'}
                   </span>
                 </button>
@@ -1969,7 +1974,7 @@ function MonitorCard({ session }: { session: MonitorSession }) {
           <span className={`h-1.5 w-1.5 rounded-full ${session.active ? 'bg-green-400 animate-pulse' : 'bg-zinc-600'}`} />
           <span className="font-mono">{session.cli}</span>
         </span>
-        <span className="text-[9px] text-zinc-600 font-mono">
+        <span className="text-[9px] text-zinc-500 font-mono">
           {session.pid ? `PID ${session.pid}` : session.id.slice(0, 8)}
         </span>
       </div>
@@ -2184,7 +2189,7 @@ function ExternalSessionsButton({ socket, onImport }: {
                   value={query}
                   onChange={e => setQuery(e.target.value)}
                   placeholder="Search by folder…"
-                  className="h-7 flex-1 rounded-lg border border-white/10 bg-black/30 px-2 text-[11px] text-white placeholder:text-zinc-600 focus:border-cyan-600/60 focus:outline-none"
+                  className="h-7 flex-1 rounded-lg border border-white/10 bg-black/30 px-2 text-[11px] text-white placeholder:text-zinc-500 focus:border-cyan-600/60 focus:outline-none"
                 />
                 {!query && (
                   <button
@@ -2233,11 +2238,11 @@ function ExternalSessionsButton({ socket, onImport }: {
                         <span className="text-[11px] text-zinc-200 font-mono truncate flex-1">
                           {s.cwd.split('/').slice(-2).join('/')}
                         </span>
-                        <span className="text-[9px] text-zinc-600">{relTime(s.lastActivity)}</span>
+                        <span className="text-[9px] text-zinc-500">{relTime(s.lastActivity)}</span>
                       </div>
                       <p className="mt-0.5 text-[9px] text-zinc-500 truncate font-mono">{s.cwd}</p>
                       <div className="mt-1 flex items-center justify-between">
-                        <span className="text-[9px] text-zinc-600">
+                        <span className="text-[9px] text-zinc-500">
                           {s.isActive ? '● active' : '○ idle'} · {Math.round(s.size / 1024)}KB
                         </span>
                         <div className="flex items-center gap-1.5">
@@ -2442,14 +2447,14 @@ function HostedHookPanel({
                       type="password"
                       placeholder="oclt_…"
                       autoComplete="off"
-                      className="mt-2 h-8 w-full rounded-lg border border-white/10 bg-black/30 px-2.5 font-mono text-xs text-white placeholder:text-zinc-600 focus:border-green-600/60 focus:outline-none focus:ring-1 focus:ring-green-600/40"
+                      className="mt-2 h-8 w-full rounded-lg border border-white/10 bg-black/30 px-2.5 font-mono text-xs text-white placeholder:text-zinc-500 focus:border-green-600/60 focus:outline-none focus:ring-1 focus:ring-green-600/40"
                     />
                     {showUrl ? (
                       <input
                         value={apiUrl}
                         onChange={e => setApiUrl(e.target.value)}
                         placeholder="https://getorquesta.com"
-                        className="mt-1.5 h-8 w-full rounded-lg border border-white/10 bg-black/30 px-2.5 text-xs text-white placeholder:text-zinc-600 focus:border-green-600/60 focus:outline-none focus:ring-1 focus:ring-green-600/40"
+                        className="mt-1.5 h-8 w-full rounded-lg border border-white/10 bg-black/30 px-2.5 text-xs text-white placeholder:text-zinc-500 focus:border-green-600/60 focus:outline-none focus:ring-1 focus:ring-green-600/40"
                       />
                     ) : (
                       <button onClick={() => setShowUrl(true)} className="mt-1 text-[10px] text-zinc-600 hover:text-zinc-400">Custom URL? →</button>

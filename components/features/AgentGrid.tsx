@@ -64,6 +64,7 @@ import { SettingsPanel } from './SettingsPanel'
 import { launchConfigFor, loadSettings } from '@/lib/cliSettings'
 import { feedTypedBuffer, emptyTypedBuffer, MIN_TYPED_PROMPT, type TypedBuffer } from '@/lib/typedBuffer'
 import { attachRenderer } from '@/lib/xterm-renderer'
+import { useKeyLabels } from '@/lib/platform'
 import '@xterm/xterm/css/xterm.css'
 
 export interface HostedProject {
@@ -138,6 +139,22 @@ const CLI_OPTIONS = [
 ] as const
 
 type CliType = (typeof CLI_OPTIONS)[number]['value']
+
+// One colour per CLI, shared with the dock rail (TerminalDock's CLI_ACCENT) so
+// a pane reads the same in the grid and in the sidebar. Purely an identity cue:
+// with four shells open the header text alone doesn't tell them apart.
+const CLI_TINT: Record<string, string> = {
+  claude: '#d0752b',
+  orquesta: '#14c48a',
+  kimi: '#b892ff',
+  kiro: '#4c8dff',
+  opencode: '#3bc9db',
+  shell: '#8b93a1',
+}
+
+function cliTint(cli: string): string {
+  return CLI_TINT[cli] ?? CLI_TINT.shell
+}
 
 const MIN_FONT = 9
 const MAX_FONT = 24
@@ -336,6 +353,9 @@ interface TerminalCellProps {
   socket: TauriHandle | null
   cliType: CliType
   name: string
+  /** Grid-wide default name for this pane when the user hasn't set one — see
+   *  autoPaneNames(). Disambiguates panes that would otherwise share a label. */
+  autoName?: string
   fontSize: number
   /** 0..1 — pane translucency so the wallpaper shows through. */
   opacity: number
@@ -386,7 +406,7 @@ interface TerminalCellProps {
 }
 
 function TerminalCell({
-  cellId, socket, cliType, name, fontSize, opacity, hostedApiUrl, hostedToken, hostedUserId,
+  cellId, socket, cliType, name, autoName, fontSize, opacity, hostedApiUrl, hostedToken, hostedUserId,
   hostedProjects, hostedProjectId, cwd, resumeId, daemonRunning,
   onClose, onCliTypeChange, onRename, onHostedProjectChange, onMakeAgent, onPickFolder, onFocusCell, onNew, onArrange, onZoom, registerApi,
   onActivity, onFinished, onUserInput, onSubmit, onPromptTyped, attention,
@@ -984,9 +1004,11 @@ function TerminalCell({
   }
 
   const cliLabel = CLI_OPTIONS.find((o) => o.value === cliType)?.label ?? cliType
-  // Display name precedence: user-set name → folder the agent runs in → CLI name.
+  // Display name precedence: user-set name → the grid-wide default (folder, or
+  // the CLI numbered against its siblings) → the bare CLI name as a last resort.
   const folderName = folderLabel(cwd)
-  const displayName = name || folderName || cliLabel
+  const displayName = name || autoName || folderName || cliLabel
+  const tint = cliTint(cliType)
 
   return (
     <div
@@ -1014,6 +1036,14 @@ function TerminalCell({
     >
       <div className="flex items-center justify-between gap-2 border-b border-zinc-800/80 px-2.5 py-1.5 drag-handle cursor-grab active:cursor-grabbing">
         <div className="flex min-w-0 items-center gap-2">
+          {/* CLI tint — the same colour the dock rail uses for this pane, so a
+              glance at the header answers "which agent is this?" before you've
+              read a word. */}
+          <span
+            aria-hidden
+            className="h-1.5 w-1.5 shrink-0 rounded-full"
+            style={{ backgroundColor: tint }}
+          />
           {editing ? (
             <input
               autoFocus
@@ -1043,7 +1073,10 @@ function TerminalCell({
             value={cliType}
             onChange={(e) => onCliTypeChange(e.target.value as CliType)}
             onMouseDown={(e) => e.stopPropagation()}
-            className="rounded bg-zinc-800 px-1.5 py-0.5 text-xs font-mono text-zinc-300 outline-none hover:bg-zinc-700 focus:ring-1 focus:ring-green-600/50"
+            // Sits next to the pane name, so it's styled a tier down — smaller
+            // and tinted — to read as a type chip rather than a second title.
+            className="rounded bg-zinc-800/60 px-1.5 py-0.5 text-[10px] font-mono outline-none hover:bg-zinc-700 focus:ring-1 focus:ring-green-600/50"
+            style={{ color: tint }}
             title="CLI hosted in this pane"
           >
             {CLI_OPTIONS.map((opt) => (
@@ -1244,9 +1277,42 @@ export interface AgentGridHandle {
   paneTail: (cellId: string) => string
 }
 
-/** Human label for a pane: its given name, else its folder, else its CLI. */
-function paneLabel(c: GridCell): string {
+/**
+ * Default names for the panes the user hasn't renamed.
+ *
+ * A pane can't work this out on its own: "Shell" is a perfectly good name until
+ * there are three of them, and the ordinal that tells them apart only exists
+ * relative to the rest of the grid. So it's derived once over all the cells and
+ * handed down. Panes with a cwd take the folder — more meaningful than any
+ * number — and the rest are numbered within their own CLI, but only when that
+ * CLI actually repeats, so a lone shell stays "Shell" rather than "Shell 1".
+ */
+function autoPaneNames(cells: GridCell[]): Map<string, string> {
+  const base = new Map<string, string>()
+  const count = new Map<string, number>()
+  for (const c of cells) {
+    const label = c.remote
+      ? c.remote.agentName
+      : folderLabel(c.cwd) || (CLI_OPTIONS.find((o) => o.value === c.cliType)?.label ?? c.cliType)
+    base.set(c.id, label)
+    count.set(label, (count.get(label) ?? 0) + 1)
+  }
+  const nth = new Map<string, number>()
+  const out = new Map<string, string>()
+  for (const c of cells) {
+    const label = base.get(c.id)!
+    if ((count.get(label) ?? 0) < 2) { out.set(c.id, label); continue }
+    const n = (nth.get(label) ?? 0) + 1
+    nth.set(label, n)
+    out.set(c.id, `${label} ${n}`)
+  }
+  return out
+}
+
+/** Human label for a pane: its given name, else the grid-wide default above. */
+function paneLabel(c: GridCell, auto?: Map<string, string>): string {
   return (c.name && c.name.trim())
+    || auto?.get(c.id)
     || (c.remote ? c.remote.agentName : '')
     || folderLabel(c.cwd)
     || (CLI_OPTIONS.find((o) => o.value === c.cliType)?.label ?? c.cliType)
@@ -2664,16 +2730,24 @@ function AgentGridInner({
     seedWhenReady(target, item.prompt)
   }, [setActive, seedWhenReady, addCell])
 
+  // Shortcut keycaps for this platform (⌘ only on macOS).
+  const keys = useKeyLabels()
+
+  // Default names, resolved across the whole grid — the header, the dock rail
+  // and the board all read from this one map so a pane is called the same thing
+  // everywhere.
+  const autoNames = useMemo(() => autoPaneNames(cells), [cells])
+
   // Publish the pane roster + busy/idle to the host page (Kanban mode).
   useEffect(() => {
     if (!onPanesChange) return
     onPanesChange(cells.map((c) => ({
       id: c.id,
-      name: paneLabel(c),
+      name: paneLabel(c, autoNames),
       cliType: c.cliType,
       status: statuses[c.id] === 'running' ? 'running' : 'idle',
     })))
-  }, [cells, statuses, onPanesChange])
+  }, [cells, statuses, onPanesChange, autoNames])
 
   // Shared cell renderer so grid + overlay modes stay in lockstep on props.
   // A pane bound to a cloud agent renders the remote variant — same window
@@ -2705,6 +2779,7 @@ function AgentGridInner({
       socket={socket}
       cliType={cell.cliType}
       name={cell.name}
+      autoName={autoNames.get(cell.id)}
       fontSize={fontSize}
       opacity={terminalOpacity}
       hostedApiUrl={hostedApiUrl}
@@ -2758,7 +2833,7 @@ function AgentGridInner({
 
   // Left rail as tabs — shown alongside both modes.
   const dockItems: DockItem[] = cells.map((c) => {
-    const disp = paneLabel(c)
+    const disp = paneLabel(c, autoNames)
     return {
       id: c.id,
       name: disp,
@@ -2793,7 +2868,7 @@ function AgentGridInner({
         </div>
         <p className="text-zinc-400 font-medium">Terminal Grid</p>
         <p className="mt-1 text-sm text-zinc-600 max-w-xs">
-          Add terminal panes to run CLIs side by side. <span className="font-mono text-zinc-500">Alt+T</span> new · <span className="font-mono text-zinc-500">Ctrl+P</span> arrange.
+          Add terminal panes to run CLIs side by side. <span className="font-mono text-zinc-400">{keys.combo(keys.alt, 'T')}</span> new · <span className="font-mono text-zinc-400">{keys.combo(keys.mod, 'P')}</span> arrange.
         </p>
         <div className="mt-6 flex gap-2">
           <Button onClick={() => addCell()} size="sm">
@@ -2876,7 +2951,7 @@ function AgentGridInner({
                 >
                   <Layers className="h-4 w-4" /> <span className="flex-1">Overlay windows</span>
                   {viewMode === 'overlay' && <Check className="h-3.5 w-3.5" />}
-                  <span className="font-mono text-[10px] text-zinc-500">⌘⇧O</span>
+                  <span className="font-mono text-[10px] text-zinc-400">{keys.combo(keys.mod, keys.shift, 'O')}</span>
                 </button>
                 <button
                   onClick={() => { toggleLighting(); setViewMenuOpen(false) }}
@@ -2884,7 +2959,7 @@ function AgentGridInner({
                 >
                   <Zap className="h-4 w-4" /> <span className="flex-1">Lighting</span>
                   {lighting && <Check className="h-3.5 w-3.5" />}
-                  <span className="font-mono text-[10px] text-zinc-500">⌘⇧Y</span>
+                  <span className="font-mono text-[10px] text-zinc-400">{keys.combo(keys.mod, keys.shift, 'Y')}</span>
                 </button>
                 <button
                   onClick={() => { arrange(); setViewMenuOpen(false) }}
@@ -2892,7 +2967,7 @@ function AgentGridInner({
                   className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs text-zinc-200 hover:bg-white/5 disabled:opacity-40"
                 >
                   <LayoutGrid className="h-4 w-4" /> <span className="flex-1">Arrange &amp; fit</span>
-                  <span className="font-mono text-[10px] text-zinc-500">⌘P</span>
+                  <span className="font-mono text-[10px] text-zinc-400">{keys.combo(keys.mod, 'P')}</span>
                 </button>
               </div>
             </>
@@ -2901,7 +2976,7 @@ function AgentGridInner({
 
         {/* Add split-button — click adds a terminal; caret offers "open in a folder". */}
         <div className="relative flex items-center">
-          <Button onClick={() => addCell()} size="sm" title="New terminal (Alt+T)" className="rounded-r-none">
+          <Button onClick={() => addCell()} size="sm" title={`New terminal (${keys.combo(keys.alt, 'T')})`} className="rounded-r-none">
             <Plus className="h-4 w-4" /> Add Terminal
           </Button>
           <Button
@@ -2921,7 +2996,7 @@ function AgentGridInner({
                   className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs text-zinc-200 hover:bg-white/5"
                 >
                   <Plus className="h-4 w-4" /> <span className="flex-1">New terminal</span>
-                  <span className="font-mono text-[10px] text-zinc-500">Alt+T</span>
+                  <span className="font-mono text-[10px] text-zinc-400">{keys.combo(keys.alt, 'T')}</span>
                 </button>
                 <button
                   onClick={() => { setFolderPicker({ cellId: null }); setAddMenuOpen(false) }}
