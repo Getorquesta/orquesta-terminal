@@ -360,7 +360,7 @@ function emitSessionMeta(sessionId) {
   })
 }
 
-socket.on('session:start', ({ sessionId, cellId, rows = 24, cols = 80, cliType = 'shell', cwd, hostedApiUrl, hostedToken }) => {
+socket.on('session:start', ({ sessionId, cellId, rows = 24, cols = 80, cliType = 'shell', cwd, hostedApiUrl, hostedToken, hostedUserId }) => {
   try {
     const pty = ptyModule
     if (!pty) throw new Error('no PTY binding')
@@ -378,6 +378,12 @@ socket.on('session:start', ({ sessionId, cellId, rows = 24, cols = 80, cliType =
     const sessionEnv = { ...process.env }
     if (hostedApiUrl) sessionEnv.ORQUESTA_API_URL = hostedApiUrl
     if (hostedToken) sessionEnv.ORQUESTA_TOKEN = hostedToken
+    // Attribute self-reported prompts to the human signed in to THIS cockpit.
+    // Both reporters (orquesta-cli's config-sync and the Claude Code hook) read
+    // this name; without it the server attributes to the reporting token's
+    // created_by, which is a different person whenever the CLI is logged in
+    // with a shared/machine token.
+    if (hostedUserId) sessionEnv.ORQUESTA_REPORT_USER_ID = hostedUserId
 
     const term = pty.spawn(command, finalArgs, {
       name: 'xterm-color',

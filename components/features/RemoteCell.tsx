@@ -12,6 +12,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { X, Server, LogOut, Square, Pencil, Loader2 } from 'lucide-react'
 import type { TauriHandle } from '@/hooks/useTauri'
+import { attachRenderer } from '@/lib/xterm-renderer'
 import '@xterm/xterm/css/xterm.css'
 
 /** The cloud agent a remote pane is attached to. */
@@ -124,6 +125,9 @@ export function RemoteCell({
       const fit = new FitAddon()
       term.loadAddon(fit)
       term.open(hostRef.current)
+      // Same GPU/canvas upgrade the local panes get — a mirrored remote agent
+      // repaints just as often as a local one.
+      void attachRenderer(term)
       try { fit.fit() } catch {}
       termRef.current = term
       fitRef.current = fit

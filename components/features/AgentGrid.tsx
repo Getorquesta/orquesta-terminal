@@ -63,6 +63,7 @@ import { PanelLeftOpen, Layers, Zap, Mail, MonitorSmartphone, Video, Radar, Mic,
 import { SettingsPanel } from './SettingsPanel'
 import { launchConfigFor, loadSettings } from '@/lib/cliSettings'
 import { feedTypedBuffer, emptyTypedBuffer, MIN_TYPED_PROMPT, type TypedBuffer } from '@/lib/typedBuffer'
+import { attachRenderer } from '@/lib/xterm-renderer'
 import '@xterm/xterm/css/xterm.css'
 
 export interface HostedProject {
@@ -407,9 +408,20 @@ function TerminalCell({
   // Type a picked task's story into the LIVE pty for review-before-send. Wrap
   // in bracketed-paste markers so multi-line bodies land as ONE paste (claude/
   // orquesta interactive enable DECSET 2004) instead of each newline submitting.
+  // A seed that arrives before the PTY is up (pane just opened, or the session
+  // ended and is waiting on a keypress to restart) used to be dropped on the
+  // floor — the plugin dock looked like it "sometimes doesn't work". Hold the
+  // last one here instead and flush it once a session exists.
+  const pendingSeedRef = useRef<string | null>(null)
+
   const seedInput = useCallback((text: string) => {
+    if (!text) return
     const sid = sessionIdRef.current
-    if (!sid || !socket || !text) return
+    if (!sid || !socket) {
+      // No live PTY yet — remember it; startSession() flushes on connect.
+      pendingSeedRef.current = text
+      return
+    }
     const wrapped = `\x1b[200~${text}\x1b[201~`
     socket.emit('session:input', { sessionId: sid, data: wrapped })
     try { termRef.current?.focus() } catch {}
@@ -550,6 +562,10 @@ function TerminalCell({
       term.loadAddon(fitAddon)
       term.loadAddon(webLinksAddon)
       term.open(containerRef.current)
+      // GPU (or at least canvas) painting instead of xterm's default DOM
+      // renderer — see lib/xterm-renderer.ts. Fire-and-forget: the pane is
+      // already usable, this just upgrades how it repaints.
+      void attachRenderer(term)
       fitAddon.fit()
       termRef.current = term
       fitAddonRef.current = fitAddon
@@ -700,6 +716,20 @@ function TerminalCell({
           hostedUserId: hostedRef.current.userId,
           cwd: importRef.current.cwd, resumeId: importRef.current.resumeId,
         })
+        // Flush a plugin-dock prompt that was clicked before this PTY existed.
+        // The CLI needs a moment to draw its input box before it will accept a
+        // paste, so this waits rather than firing into a half-booted TUI.
+        const queued = pendingSeedRef.current
+        if (queued) {
+          pendingSeedRef.current = null
+          setTimeout(() => {
+            if (sessionIdRef.current !== sessionId) return // pane moved on
+            socket?.emit('session:input', {
+              sessionId, data: `\x1b[200~${queued}\x1b[201~`,
+            })
+            try { term.focus() } catch {}
+          }, 900)
+        }
       }
       // Delay session start slightly so the container has its final size
       // (prevents orquesta-cli/Ink from getting 24x80 when pane is larger)
@@ -869,7 +899,10 @@ function TerminalCell({
 
   // ── Live cursors: receive the watchers' pointers (relayed by the server). ──
   useEffect(() => {
-    if (!socket) return
+    // Gated on `shared` like the send side above: an unshared pane never
+    // receives a cursor, so without this every pane in the grid kept a 1.5s
+    // timer alive to sweep a map that was always empty.
+    if (!socket || !shared) return
     const me = localParticipant()
     const onCursor = (p: any) => {
       if (!p || p.sessionId !== sessionIdRef.current || p.id === me.id) return
@@ -889,7 +922,7 @@ function TerminalCell({
       if (changed) setRemoteCursors(Array.from(cursorsRef.current.values()))
     }, 1500)
     return () => { socket.off('terminal:cursor', onCursor); clearInterval(sweep) }
-  }, [socket])
+  }, [socket, shared])
 
   // Drop everyone's cursor the moment this pane stops being shared.
   useEffect(() => {
@@ -2600,16 +2633,36 @@ function AgentGridInner({
   // Dock launch: paste the plugin's prompt into the active terminal for
   // review-before-send. Falls back to the most-recent pane if none is focused,
   // focusing it first so the paste lands somewhere visible.
+  // A pane registers its API only after xterm's dynamic import and the webfont
+  // have resolved (~a few hundred ms after the pane appears). Clicking a dock
+  // tile inside that window used to hit `cellApiRef.get(...) === undefined` and
+  // do nothing at all, which is the "the dock sometimes doesn't work" report.
+  // Retry briefly instead of dropping the prompt; seed() itself queues from
+  // there if the PTY is still booting.
+  const seedWhenReady = useCallback((target: string, text: string, attempt = 0) => {
+    const api = cellApiRef.current.get(target)
+    if (api) {
+      api.focus()
+      api.seed(text)
+      return
+    }
+    if (attempt >= 20) return // ~4s — the pane is genuinely gone
+    setTimeout(() => seedWhenReady(target, text, attempt + 1), 200)
+  }, [])
+
   const launchDock = useCallback((pluginId: string) => {
     const item = PLUGIN_DOCK.find((p) => p.id === pluginId)
     if (!item) return
+    // No pane open at all: make one, then seed it once it comes up.
     const target = activeCellIdRef.current || cellsRef.current[cellsRef.current.length - 1]?.id
-    if (!target) return
+    if (!target) {
+      const created = addCell()
+      if (created) seedWhenReady(created, item.prompt)
+      return
+    }
     setActive(target)
-    const api = cellApiRef.current.get(target)
-    api?.focus()
-    api?.seed(item.prompt)
-  }, [setActive])
+    seedWhenReady(target, item.prompt)
+  }, [setActive, seedWhenReady, addCell])
 
   // Publish the pane roster + busy/idle to the host page (Kanban mode).
   useEffect(() => {

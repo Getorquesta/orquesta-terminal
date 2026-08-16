@@ -55,6 +55,14 @@ fn cli_or_shell(bin: &str, install_hint: &str, args: Vec<String>, env_extras: Ve
     (shell, vec!["-c".to_string(), msg], env_extras)
 }
 
+/// Same as [`cli_or_shell`], but prepends a fixed subcommand ahead of the
+/// caller's args — some CLIs print their help and exit when launched bare.
+fn cli_or_shell_sub(bin: &str, sub: &str, install_hint: &str, args: Vec<String>, env_extras: Vec<(String, String)>) -> (String, Vec<String>, Vec<(String, String)>) {
+    let mut with_sub = vec![sub.to_string()];
+    with_sub.extend(args);
+    cli_or_shell(bin, install_hint, with_sub, env_extras)
+}
+
 /// Remove the AppImage mount segments from a `PATH`-style (`:`-separated) value.
 /// Returns the remaining real-system segments joined back together (may be empty).
 fn strip_mount_paths(value: &str, appdir: Option<&str>, mount_prefix: &str) -> String {
@@ -163,6 +171,14 @@ fn resolve_command(
 
     if let Some(uid) = hosted_user_id {
         env_extras.push(("ORQUESTA_HOSTED_USER_ID".into(), uid.into()));
+        // The self-reporters read ORQUESTA_REPORT_USER_ID, NOT the _HOSTED_ name:
+        // orquesta-cli (config-sync.ts) and the Claude Code hook (orquesta-agent
+        // hook.ts) both send it as `userId` so the server attributes the prompt
+        // to the human driving this cockpit instead of to the reporting token's
+        // owner. Without it the server falls back to the token's created_by —
+        // and for a legacy token minted with created_by NULL, to an arbitrary
+        // org member, which is how Oscar's prompts showed up as Fernando's.
+        env_extras.push(("ORQUESTA_REPORT_USER_ID".into(), uid.into()));
     }
     if let Some(tok) = hosted_token {
         env_extras.push(("ORQUESTA_HOSTED_TOKEN".into(), tok.into()));
@@ -192,7 +208,7 @@ fn resolve_command(
         }
         "orquesta" => cli_or_shell("orquesta", "npm i -g orquesta-cli", base, env_extras),
         "kimi"     => cli_or_shell("kimi",     "npm i -g @moonshot-ai/kimi-cli", base, env_extras),
-        "kiro"     => cli_or_shell("kiro",     "Download Kiro at https://kiro.dev", base, env_extras),
+        "kiro"     => cli_or_shell_sub("kiro-cli", "chat", "curl -fsSL https://cli.kiro.dev/install | bash", base, env_extras),
         "opencode" => cli_or_shell("opencode", "npm i -g opencode", base, env_extras),
         "gemini"   => cli_or_shell("gemini",   "npm i -g @google/gemini-cli", base, env_extras),
         "codex"    => cli_or_shell("codex",    "npm i -g @openai/codex", base, env_extras),
@@ -330,7 +346,18 @@ fn output_reader_loop(
     mut child: Box<dyn portable_pty::Child + Send>,
     state: Arc<AppState>,
 ) {
-    let mut buf = [0u8; 4096];
+    // 64 KB rather than 4 KB. A TUI agent (claude, orquesta) repaints its whole
+    // frame on every tick, so a small buffer turned one repaint into a dozen
+    // `session:output` events — each one a separate JSON payload across the
+    // Tauri IPC bridge and a separate xterm write on the webview's main thread.
+    // A larger read coalesces a burst into one event without adding any latency
+    // (read() still returns as soon as anything is available), which is the
+    // single cheapest cut to the renderer's per-event overhead.
+    let mut buf = [0u8; 65536];
+    // A multi-byte UTF-8 char can straddle two reads. from_utf8_lossy would turn
+    // each half into U+FFFD, permanently corrupting box-drawing and emoji in the
+    // pane, so hold an incomplete trailing sequence back for the next round.
+    let mut carry: Vec<u8> = Vec::new();
     loop {
         match reader.read(&mut buf) {
             Ok(0) | Err(_) => {
@@ -356,7 +383,35 @@ fn output_reader_loop(
                 break;
             }
             Ok(n) => {
-                let data = String::from_utf8_lossy(&buf[..n]).to_string();
+                // Re-attach whatever partial char the previous read cut off.
+                let chunk: &[u8] = if carry.is_empty() {
+                    &buf[..n]
+                } else {
+                    carry.extend_from_slice(&buf[..n]);
+                    &carry[..]
+                };
+                // Decode as far as we can; stash any incomplete tail sequence.
+                let (data, keep) = match std::str::from_utf8(chunk) {
+                    Ok(s) => (s.to_string(), Vec::new()),
+                    Err(e) => {
+                        let good = e.valid_up_to();
+                        // `error_len() == None` means "ran out of input mid-char"
+                        // — that tail is genuinely incomplete, so carry it. A
+                        // Some(_) is real garbage; let the lossy pass mark it.
+                        if e.error_len().is_none() {
+                            (
+                                String::from_utf8_lossy(&chunk[..good]).into_owned(),
+                                chunk[good..].to_vec(),
+                            )
+                        } else {
+                            (String::from_utf8_lossy(chunk).to_string(), Vec::new())
+                        }
+                    }
+                };
+                carry = keep;
+                if data.is_empty() {
+                    continue;
+                }
 
                 // Emit to frontend
                 state
