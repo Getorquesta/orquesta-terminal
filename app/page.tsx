@@ -599,21 +599,28 @@ export default function TerminalWorkspacePage() {
           </div>
         )}
 
-        {/* Timeline sidebar — fixed overlay, doesn't affect grid layout */}
+        {/* Timeline sidebar — overlays the grid only.
+
+            It used to be `fixed top-0 h-screen`, i.e. the whole viewport, while
+            `main` is `relative z-10` and the title bar and status bar are z-20
+            siblings OUTSIDE it — so the drawer's own header and its bottom rows
+            were painted over by those two bars no matter how high its z-index
+            went (a positioned ancestor with a z-index caps everything inside
+            it). Anchoring to `main` puts it exactly in the space between them. */}
         {timelineOpen && hosted.isLoggedIn && (
           <>
-            <div className="fixed inset-0 z-40" onClick={() => setTimelineOpen(false)} />
-            <div className="fixed right-0 top-0 h-screen z-50 shadow-2xl">
+            <div className="absolute inset-0 z-40" onClick={() => setTimelineOpen(false)} />
+            <div className="absolute inset-y-0 right-0 z-50 max-w-full shadow-2xl">
               <HostedTimeline auth={hosted.auth!} />
             </div>
           </>
         )}
 
-        {/* Plugins panel — fixed overlay, doesn't affect grid layout */}
+        {/* Plugins panel — same anchoring as the timeline above. */}
         {pluginsOpen && (
           <>
-            <div className="fixed inset-0 z-40" onClick={() => setPluginsOpen(false)} />
-            <div className="fixed right-0 top-0 h-screen z-50 shadow-2xl">
+            <div className="absolute inset-0 z-40" onClick={() => setPluginsOpen(false)} />
+            <div className="absolute inset-y-0 right-0 z-50 max-w-full shadow-2xl">
               <PluginsPanel />
             </div>
           </>
