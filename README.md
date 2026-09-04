@@ -67,6 +67,26 @@ chmod +x Orquesta.Terminal_0.1.27_amd64.AppImage
 ./Orquesta.Terminal_0.1.27_amd64.AppImage
 ```
 
+### Linux graphics fallback
+
+WebKitGTK draws the window in a separate renderer process, and on some Linux
+graphics stacks that process segfaults **inside the driver** — seen on a GTX
+1660 Ti driven by Mesa/NVK, where the whole crash backtrace sits in
+`libgallium`. The app itself survives, so nothing exits and you are left with a
+dead or black window.
+
+The app now watches that renderer. If it never starts, or dies mid-session, the
+next launch is restarted with `LIBGL_ALWAYS_SOFTWARE=1` and a notice explains
+why. Every decision is appended to:
+
+```
+~/.local/share/com.orquesta.terminal/logs/render.log
+```
+
+Software rendering is slower but correct. Once your graphics driver is fixed,
+launch once with `ORQUESTA_FORCE_GPU=1` to clear the fallback. Setting
+`LIBGL_ALWAYS_SOFTWARE` yourself always wins and is never overridden.
+
 ## Quick Start
 
 > Prefer a prebuilt binary? See [Download](#download) above. To run from source:

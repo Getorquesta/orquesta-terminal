@@ -24,6 +24,7 @@ import {
 } from 'lucide-react'
 import { RemoteSessionModal } from '@/components/features/RemoteSessionModal'
 import { UpdateNotice } from '@/components/features/UpdateNotice'
+import { RenderNotice } from '@/components/features/RenderNotice'
 import { useKeyLabels } from '@/lib/platform'
 
 interface Project {
@@ -639,6 +640,9 @@ export default function TerminalWorkspacePage() {
 
       {/* Offers the newest release once, shortly after launch */}
       <UpdateNotice />
+
+      {/* Explains a software-rendering fallback, once per incident */}
+      <RenderNotice />
 
       {/* ── Status bar ── */}
       <footer className="glass relative z-20 flex items-center justify-between gap-3 px-4 py-1.5 text-[11px]">

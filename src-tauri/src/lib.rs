@@ -5,6 +5,7 @@ mod error;
 mod fs;
 mod ipc;
 mod pty;
+mod render_guard;
 mod state;
 mod updater;
 
@@ -12,22 +13,11 @@ use std::sync::Arc;
 use state::AppState;
 use tauri::Manager;
 
-/// WebKitGTK's DMABUF renderer paints a black window on many Linux setups
-/// (NVIDIA proprietary drivers, VMs, some Mesa versions). The app runs fine —
-/// it just never composites — so fall back to the shared-memory path.
-/// Set WEBKIT_DISABLE_DMABUF_RENDERER=0 to keep the DMABUF renderer.
-#[cfg(target_os = "linux")]
-fn apply_linux_webkit_workarounds() {
-    if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
-        std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
-    }
-}
-
-#[cfg(not(target_os = "linux"))]
-fn apply_linux_webkit_workarounds() {}
-
 pub fn run() {
-    apply_linux_webkit_workarounds();
+    // Must run before Tauri brings up GTK/WebKit: the webview reads these
+    // variables when it is created. See render_guard for why software rendering
+    // is sometimes the only mode that survives.
+    let render_mode = render_guard::apply_render_mode();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
@@ -36,7 +26,7 @@ pub fn run() {
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
-        .setup(|app| {
+        .setup(move |app| {
             let handle = app.handle().clone();
             let app_state = AppState::new(handle);
 
@@ -64,6 +54,12 @@ pub fn run() {
                     cloud::heartbeat_shares(&state_shares).await;
                 }
             });
+
+            // Watch the webview renderer for the life of the app. On a
+            // graphics stack that segfaults inside the driver this is the only
+            // signal that anything is wrong — the Tauri process keeps running
+            // and the user just gets a dead window.
+            render_guard::start_watchdog(app.handle().clone(), render_mode.clone());
 
             app.manage(app_state);
             Ok(())
@@ -106,10 +102,31 @@ pub fn run() {
             ipc::open_external_url,
             ipc::hosted_proxy,
             ipc::hosted_upload,
+            // Graphics diagnostics
+            render_guard::render_diagnostics,
             // Updates
             updater::check_for_update,
             updater::can_self_update,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .on_window_event(|_window, event| {
+            if matches!(
+                event,
+                tauri::WindowEvent::CloseRequested { .. } | tauri::WindowEvent::Destroyed
+            ) {
+                render_guard::mark_shutdown();
+            }
+        })
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|_app, event| {
+            // Quitting kills the webview renderer too — including the updater's
+            // relaunch. Tell the watchdog, or a deliberate exit reads as a
+            // driver crash and the app comes back after the user closed it.
+            if matches!(
+                event,
+                tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit
+            ) {
+                render_guard::mark_shutdown();
+            }
+        });
 }
