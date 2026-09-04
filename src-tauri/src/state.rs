@@ -12,6 +12,12 @@ pub struct PtySession {
     pub cli_type: String,
     pub cwd: String,
     pub pid: Option<u32>,
+    // The PTY's current size. A shared viewer has to render at exactly this
+    // geometry: TUI apps redraw by "move up N lines and erase", counting lines
+    // against THIS width, so a viewer of a different width under-erases and
+    // every redraw stacks a new copy of the prompt instead of overwriting it.
+    pub cols: u16,
+    pub rows: u16,
 }
 
 // ── Shared Terminals ─────────────────────────────────────────────────────────

@@ -15,6 +15,14 @@ use crate::state::{AppState, PtySession};
 /// for both detection and the spawned PTY environment. AppImage mount segments are
 /// stripped so we never reintroduce the poisoned paths.
 fn login_shell_path() -> Option<&'static str> {
+    // Windows has no login shell and no `SHELL`: a GUI launch already inherits
+    // the user's full PATH from the registry, so there is nothing to recover.
+    #[cfg(windows)]
+    {
+        return None;
+    }
+    #[cfg(not(windows))]
+    {
     static PATH: OnceLock<Option<String>> = OnceLock::new();
     PATH.get_or_init(|| {
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".into());
@@ -28,6 +36,57 @@ fn login_shell_path() -> Option<&'static str> {
         if cleaned.is_empty() { None } else { Some(cleaned) }
     })
     .as_deref()
+    }
+}
+
+/// The interactive shell to fall back to on this platform.
+///
+/// Windows defines no `SHELL`, so the old `unwrap_or("/bin/bash")` handed
+/// `spawn_command` a path that cannot exist there — the spawn failed, the
+/// frontend swallowed the rejection, and the pane sat on "Connecting…" forever.
+/// Prefer PowerShell, then whatever `ComSpec` names, then plain `cmd.exe`.
+fn default_shell() -> String {
+    #[cfg(windows)]
+    {
+        if let Ok(p) = which::which("powershell.exe") {
+            return p.to_string_lossy().into_owned();
+        }
+        if let Ok(p) = which::which("pwsh.exe") {
+            return p.to_string_lossy().into_owned();
+        }
+        return std::env::var("ComSpec").unwrap_or_else(|_| "cmd.exe".into());
+    }
+    #[cfg(not(windows))]
+    {
+        std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".into())
+    }
+}
+
+/// A shell invocation that prints a "not installed" notice and then stays open.
+///
+/// The POSIX form (`-c 'printf …; exec $SHELL'`) has no Windows equivalent —
+/// neither PowerShell nor cmd has `exec` — so each platform gets its own.
+fn not_installed_command(bin: &str, install_hint: &str) -> (String, Vec<String>) {
+    let shell = default_shell();
+    #[cfg(windows)]
+    {
+        let lower = shell.to_lowercase();
+        if lower.contains("powershell") || lower.contains("pwsh") {
+            let msg = format!(
+                "Write-Host ''; Write-Host '  {bin} is not installed.' -ForegroundColor Yellow; Write-Host '  {install_hint}'; Write-Host ''"
+            );
+            return (shell, vec!["-NoExit".into(), "-Command".into(), msg]);
+        }
+        let msg = format!("echo.&echo   {bin} is not installed.&echo   {install_hint}&echo.");
+        return (shell, vec!["/K".into(), msg]);
+    }
+    #[cfg(not(windows))]
+    {
+        let msg = format!(
+            r#"printf '\r\n\033[1;33m  {bin} is not installed.\033[0m\r\n  {install_hint}\r\n\r\n'; exec {shell}"#
+        );
+        (shell, vec!["-c".to_string(), msg])
+    }
 }
 
 /// Absolute path to `bin`, searching the login-shell PATH first (so GUI launches
@@ -48,11 +107,8 @@ fn cli_or_shell(bin: &str, install_hint: &str, args: Vec<String>, env_extras: Ve
     if let Some(abs) = resolve_bin(bin) {
         return (abs, args, env_extras);
     }
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".into());
-    let msg = format!(
-        r#"printf '\r\n\033[1;33m  {bin} is not installed.\033[0m\r\n  {install_hint}\r\n\r\n'; exec {shell}"#
-    );
-    (shell, vec!["-c".to_string(), msg], env_extras)
+    let (shell, shell_args) = not_installed_command(bin, install_hint);
+    (shell, shell_args, env_extras)
 }
 
 /// Same as [`cli_or_shell`], but prepends a fixed subcommand ahead of the
@@ -166,8 +222,25 @@ fn resolve_command(
     hosted_user_id: Option<&str>,
     hosted_token: Option<&str>,
     hosted_api_url: Option<&str>,
+    hosted_project_id: Option<&str>,
+    hosted_project_name: Option<&str>,
 ) -> (String, Vec<String>, Vec<(String, String)>) {
     let mut env_extras: Vec<(String, String)> = Vec::new();
+
+    // Which project THIS pane belongs to. orquesta-cli resolves the project as
+    // `.orquesta.json` → ORQUESTA_PROJECT_ID → the global config, but its
+    // "Connected to:" banner only ever read the global config — so a second
+    // pane bound to another project reported correctly and displayed nothing.
+    if let Some(pid) = hosted_project_id {
+        env_extras.push(("ORQUESTA_PROJECT_ID".into(), pid.into()));
+    }
+    // The name is display-only: without it the CLI can still name the project,
+    // but only by its truncated uuid.
+    if let Some(name) = hosted_project_name {
+        if !name.is_empty() {
+            env_extras.push(("ORQUESTA_PROJECT_NAME".into(), name.into()));
+        }
+    }
 
     if let Some(uid) = hosted_user_id {
         env_extras.push(("ORQUESTA_HOSTED_USER_ID".into(), uid.into()));
@@ -214,10 +287,7 @@ fn resolve_command(
         "codex"    => cli_or_shell("codex",    "npm i -g @openai/codex", base, env_extras),
         "aider"    => cli_or_shell("aider",    "pip install aider-chat", base, env_extras),
         "continue" => cli_or_shell("continue", "npm i -g continue", base, env_extras),
-        _ => {
-            let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".into());
-            (shell, base, env_extras)
-        }
+        _ => (default_shell(), base, env_extras),
     }
 }
 
@@ -234,6 +304,8 @@ pub async fn spawn_session(
     hosted_user_id: Option<String>,
     hosted_token: Option<String>,
     hosted_api_url: Option<String>,
+    hosted_project_id: Option<String>,
+    hosted_project_name: Option<String>,
     state: Arc<AppState>,
 ) -> Result<serde_json::Value, String> {
     let (cmd, args, env_extras) = resolve_command(
@@ -244,6 +316,8 @@ pub async fn spawn_session(
         hosted_user_id.as_deref(),
         hosted_token.as_deref(),
         hosted_api_url.as_deref(),
+        hosted_project_id.as_deref(),
+        hosted_project_name.as_deref(),
     );
 
     let pty_system = portable_pty::native_pty_system();
@@ -308,6 +382,8 @@ pub async fn spawn_session(
                 cli_type: cli_type.clone(),
                 cwd: work_dir.clone(),
                 pid,
+                cols,
+                rows,
             },
         );
     }
@@ -375,8 +451,18 @@ fn output_reader_loop(
                     )
                     .ok();
 
-                // Mirror to cloud if shared
-                crate::cloud::maybe_broadcast_ended(&session_id, &state);
+                // Mirror to cloud if shared — and INVALIDATE the share, not just
+                // announce it. Broadcasting `session:ended` alone left the row
+                // `active` in the DB and the entry in `shared_terminals`, so a
+                // guest opening the link afterwards still got the full scrollback
+                // replayed to them: a zombie session outliving its own terminal.
+                {
+                    let sid = session_id.clone();
+                    let st = Arc::clone(&state);
+                    tauri::async_runtime::spawn(async move {
+                        let _ = crate::cloud::stop_share(&sid, &st).await;
+                    });
+                }
 
                 // Remove from sessions map
                 state.sessions.lock().unwrap().remove(&session_id);
@@ -453,16 +539,18 @@ pub fn resize_session(
     session_id: &str,
     cols: u16,
     rows: u16,
-    state: &AppState,
+    state: &Arc<AppState>,
 ) -> Result<(), String> {
-    let sessions = state.sessions.lock().unwrap();
+    let mut sessions = state.sessions.lock().unwrap();
     // A resize can race ahead of session_start (the frontend delays the start by
     // ~100ms to settle the pane size) or land just after a session ends. Resizing
     // a session that isn't in the map is a harmless no-op — treat it as success
     // instead of an error so it doesn't spam the console. (Input still errors.)
-    let Some(session) = sessions.get(session_id) else {
+    let Some(session) = sessions.get_mut(session_id) else {
         return Ok(());
     };
+    session.cols = cols;
+    session.rows = rows;
 
     // Actually resize the PTY (TIOCSWINSZ) so TUI apps see the real terminal size
     // and redraw correctly — otherwise their frames don't clear and output doubles.
@@ -476,6 +564,9 @@ pub fn resize_session(
         })
         .map_err(|e| format!("Failed to resize PTY: {e}"))?;
     drop(sessions);
+
+    // Shared viewers render at the host's geometry, so they need every change.
+    crate::cloud::maybe_broadcast_geometry(session_id, cols, rows, state);
 
     state
         .app_handle

@@ -123,14 +123,32 @@ export function useTauri(_opts: { projectId?: string; sessionToken?: string } = 
     listenersRef.current.get(event)?.delete(handler)
   }, [])
 
+  // Deliver an event to this hook's own subscribers, as if Rust had emitted it.
+  // Used to turn a rejected invoke() into the error event the UI already knows
+  // how to render.
+  const dispatchLocal = useCallback((event: string, payload: unknown) => {
+    listenersRef.current.get(event)?.forEach((h) => h(payload))
+  }, [])
+
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const emit = useCallback((event: string, data?: any) => {
     if (!INVOKE_EVENTS.has(event) || !hasTauri()) return
     const cmd = toCommand(event)
-    invoke(cmd, (data as Record<string, unknown>) ?? {}).catch((err) =>
-      console.error(`[tauri] invoke ${cmd} failed:`, err),
-    )
-  }, [])
+    invoke(cmd, (data as Record<string, unknown>) ?? {}).catch((err) => {
+      console.error(`[tauri] invoke ${cmd} failed:`, err)
+      // A rejected invoke used to end here, in the console. Rust returns Err
+      // for every failed spawn — a missing shell on Windows, a bad cwd, a dead
+      // binary — and none of it ever reached the pane, which just kept showing
+      // "Connecting…" with nothing to explain it. Re-emit as the namespace's
+      // error event so the existing handlers render it.
+      const ns = event.split(':')[0]
+      const sessionId = (data as { sessionId?: string } | undefined)?.sessionId
+      if (sessionId && (ns === 'session' || ns === 'remote')) {
+        const message = err instanceof Error ? err.message : String(err)
+        dispatchLocal(`${ns}:error`, { sessionId, message })
+      }
+    })
+  }, [dispatchLocal])
 
   /**
    * Like emit() but returns the Rust command's return value.

@@ -415,6 +415,9 @@ function TerminalCell({
   const termRef = useRef<import('@xterm/xterm').Terminal | null>(null)
   const fitAddonRef = useRef<import('@xterm/addon-fit').FitAddon | null>(null)
   const sessionIdRef = useRef<string | null>(null)
+  // True once the PTY has produced its first byte for the CURRENT session.
+  // Guards the boot watchdog so a healthy CLI never prints the warning.
+  const bootedRef = useRef(false)
   const hoverTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   // Prompt-completion detection (feeds the sidebar dot + lighting mode).
   const idleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -523,8 +526,9 @@ function TerminalCell({
   fontRef.current = fontSize
   // Hosted-hook target read live at (re)connect time so toggling it from the
   // panel doesn't restart the terminal — the next session picks it up.
-  const hostedRef = useRef({ apiUrl: hostedApiUrl, token: hostedToken, userId: hostedUserId })
-  hostedRef.current = { apiUrl: hostedApiUrl, token: hostedToken, userId: hostedUserId }
+  const hostedProjectName = hostedProjects?.find((p) => p.id === hostedProjectId)?.name
+  const hostedRef = useRef({ apiUrl: hostedApiUrl, token: hostedToken, userId: hostedUserId, projectId: hostedProjectId, projectName: hostedProjectName })
+  hostedRef.current = { apiUrl: hostedApiUrl, token: hostedToken, userId: hostedUserId, projectId: hostedProjectId, projectName: hostedProjectName }
   const importRef = useRef({ cwd, resumeId })
   importRef.current = { cwd, resumeId }
 
@@ -547,6 +551,7 @@ function TerminalCell({
     let term: import('@xterm/xterm').Terminal
     let mounted = true
     let startTimer: ReturnType<typeof setTimeout> | null = null
+    let bootTimer: ReturnType<typeof setTimeout> | null = null
 
     async function initTerminal() {
       const xtermModule = await import('@xterm/xterm')
@@ -722,6 +727,7 @@ function TerminalCell({
       const startSession = (reconnect = false) => {
         const sessionId = `sess-${cellId}-${Date.now()}`
         sessionIdRef.current = sessionId
+        bootedRef.current = false
         setBranch(null)
         if (reconnect) {
           importRef.current.resumeId = undefined  // don't retry a dead resume
@@ -734,8 +740,22 @@ function TerminalCell({
           skipPermissions: launch.skipPermissions, extraArgs: launch.extraArgs,
           hostedApiUrl: hostedRef.current.apiUrl, hostedToken: hostedRef.current.token,
           hostedUserId: hostedRef.current.userId,
+          // Which project THIS pane is bound to. orquesta-cli reads it as
+          // ORQUESTA_PROJECT_ID; without it the CLI's "Connected to:" banner
+          // fell back to the global config and stayed blank on a second pane.
+          hostedProjectId: hostedRef.current.projectId,
+          hostedProjectName: hostedRef.current.projectName,
           cwd: importRef.current.cwd, resumeId: importRef.current.resumeId,
         })
+        // Nothing at all within 12s means the spawn neither started nor failed
+        // loudly — say so instead of leaving "Connecting…" on screen forever.
+        if (bootTimer) clearTimeout(bootTimer)
+        bootTimer = setTimeout(() => {
+          bootTimer = null
+          if (sessionIdRef.current !== sessionId || bootedRef.current) return
+          term.writeln('\x1b[33m[still connecting — the CLI has not produced any output yet]\x1b[0m')
+          term.writeln('\x1b[90mCheck that the selected CLI is installed and that the folder exists.\x1b[0m')
+        }, 12000)
         // Flush a plugin-dock prompt that was clicked before this PTY existed.
         // The CLI needs a moment to draw its input box before it will accept a
         // paste, so this waits rather than firing into a half-booted TUI.
@@ -786,6 +806,7 @@ function TerminalCell({
 
       return () => {
         if (startTimer) clearTimeout(startTimer)
+        if (bootTimer) clearTimeout(bootTimer)
         clearTimeout(resizeTimer)
         resizeObserver.disconnect()
         host.removeEventListener('mouseup', onMouseUp)
@@ -827,6 +848,7 @@ function TerminalCell({
 
     const handleOutput = (data: { sessionId: string; data: string }) => {
       if (data.sessionId !== sessionIdRef.current) return
+      bootedRef.current = true
       termRef.current?.write(data.data)
       // Activity → running. Arm/rearm an idle timer; when output goes quiet for
       // ~2.5s we call it "finished". Kept generous so the frequent mid-work
@@ -846,7 +868,9 @@ function TerminalCell({
     }
     const handleError = (data: { sessionId: string; message: string }) => {
       if (data.sessionId !== sessionIdRef.current) return
+      bootedRef.current = true
       termRef.current?.writeln(`\r\n\x1b[31m[Error: ${data.message}]\x1b[0m`)
+      termRef.current?.writeln('\x1b[90mPress Enter to try again.\x1b[0m')
     }
     const handleMeta = (data: { sessionId: string; branch: string | null }) => {
       if (data.sessionId !== sessionIdRef.current) return

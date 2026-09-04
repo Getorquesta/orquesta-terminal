@@ -428,6 +428,10 @@ async fn send_scrollback(
         Some(v) => v,
         None => return,
     };
+    // Replay is useless without the geometry it was rendered at: the viewer has
+    // to size its terminal to the host's, or every TUI redraw under-erases and
+    // the prompt line stacks instead of overwriting.
+    let (cols, rows) = session_geometry(session_id, state);
     let frame = socketio_frame(&json!([
         "broadcast",
         {
@@ -436,6 +440,8 @@ async fn send_scrollback(
             "payload": {
                 "sessionId": session_id,
                 "viewerId": viewer_id,
+                "cols": cols,
+                "rows": rows,
                 "data": scrollback
             },
             "self": false
@@ -742,6 +748,64 @@ pub fn maybe_broadcast_output(session_id: &str, data: &str, state: &Arc<AppState
             "channel": channel,
             "event": "session:output",
             "payload": { "sessionId": sid, "data": data },
+            "self": false
+        }
+    ]));
+
+    let state_clone = Arc::clone(state);
+    tauri::async_runtime::spawn(async move {
+        let tx_opt = {
+            let conns = state_clone.cloud_conns.lock().unwrap();
+            conns.get(&key).map(|c| c.tx.clone())
+        };
+        if let Some(tx) = tx_opt {
+            let _ = tx.send(frame).await;
+        }
+    });
+}
+
+/// The current size of a live PTY session, defaulting to 80x24 if it is gone.
+fn session_geometry(session_id: &str, state: &Arc<AppState>) -> (u16, u16) {
+    let sessions = state.sessions.lock().unwrap();
+    sessions
+        .get(session_id)
+        .map(|s| (s.cols, s.rows))
+        .unwrap_or((80, 24))
+}
+
+// ── maybe_broadcast_geometry ──────────────────────────────────────────────────
+
+/// Tell shared viewers the host terminal's new size.
+///
+/// Only the host's size is authoritative — a view-only viewer never sends
+/// `session:resize` (that path is gated on control), so without this the two
+/// sides silently disagree forever.
+pub fn maybe_broadcast_geometry(session_id: &str, cols: u16, rows: u16, state: &Arc<AppState>) {
+    let info_opt = {
+        let shared = state.shared_terminals.lock().unwrap();
+        shared.get(session_id).map(|i| {
+            (
+                i.session_id.clone(),
+                i.channel.clone(),
+                i.api_url.clone(),
+                i.cli_token.clone(),
+                i.project_id.clone(),
+            )
+        })
+    };
+
+    let (sid, channel, api_url, cli_token, project_id) = match info_opt {
+        Some(v) => v,
+        None => return,
+    };
+
+    let key = conn_key(&api_url, &cli_token, &project_id);
+    let frame = socketio_frame(&json!([
+        "broadcast",
+        {
+            "channel": channel,
+            "event": "session:geometry",
+            "payload": { "sessionId": sid, "cols": cols, "rows": rows },
             "self": false
         }
     ]));

@@ -20,6 +20,8 @@ pub async fn session_start(
     hosted_user_id: Option<String>,
     hosted_token: Option<String>,
     hosted_api_url: Option<String>,
+    hosted_project_id: Option<String>,
+    hosted_project_name: Option<String>,
     state: State<'_, Arc<AppState>>,
 ) -> Result<Value, String> {
     crate::pty::spawn_session(
@@ -36,6 +38,8 @@ pub async fn session_start(
         hosted_user_id,
         hosted_token,
         hosted_api_url,
+        hosted_project_id,
+        hosted_project_name,
         Arc::clone(&state),
     )
     .await
