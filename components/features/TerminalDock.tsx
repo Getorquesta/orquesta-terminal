@@ -9,7 +9,11 @@
 // (Overlay mode is handled by the grid engine itself — no floating wrapper here.)
 
 import { useRef, useState, useEffect } from 'react'
-import { Plus, X, GripVertical, PanelLeftClose, Terminal as TerminalIcon, Circle, Server } from 'lucide-react'
+import { Plus, X, GripVertical, PanelLeftClose, Terminal as TerminalIcon, Circle, Server, Cpu, ExternalLink } from 'lucide-react'
+import { openAuthPage } from '@/hooks/useHostedAuth'
+
+/** Local agent manager UI — orquesta-agent serves it while a daemon runs here. */
+export const LOCAL_AGENT_UI_URL = 'http://localhost:8080'
 
 export type CellStatus = 'running' | 'idle'
 
@@ -579,6 +583,21 @@ export function TerminalListSidebar({
             )}
           </>
         )}
+      </div>
+
+      {/* ── Local agents ── the orquesta-agent manager UI (served on :8080 by a
+          daemon running on this machine). Opened in the real browser, not the
+          webview: it is a separate admin surface, not part of the dock. */}
+      <div className="border-t border-zinc-800/80 p-1.5">
+        <button
+          onClick={() => { void openAuthPage(LOCAL_AGENT_UI_URL) }}
+          className="flex w-full items-center gap-2 rounded px-1.5 py-1.5 text-[11px] text-zinc-400 hover:bg-zinc-800/70 hover:text-zinc-100"
+          title={`Manage the agents running on this machine (${LOCAL_AGENT_UI_URL})`}
+        >
+          <Cpu className="h-3.5 w-3.5 text-emerald-400/80" />
+          <span className="flex-1 text-left">Local agents</span>
+          <ExternalLink className="h-3 w-3 text-zinc-600" />
+        </button>
       </div>
     </aside>
   )

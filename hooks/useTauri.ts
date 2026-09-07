@@ -53,6 +53,24 @@ const INVOKE_EVENTS = new Set([
   'remote:end',
 ])
 
+/**
+ * Commands that ANSWER instead of emitting.
+ *
+ * The daemon commands were written against the old socket.io cockpit server,
+ * where the reply came back as its own event. Under Tauri they are plain
+ * `invoke` calls whose answer is the return value — and `emit()` threw that
+ * value away, so the UI sat forever on the event that never came: the takeover
+ * modal stuck on "Checking for agents already online…", "Start agent" stuck on
+ * "Starting…", and the daemon-status map never populated at all. Re-dispatch the
+ * return (and any rejection) under the event name the UI already listens for.
+ */
+const ACK_RESULT_EVENT: Record<string, string> = {
+  'daemon:preflight': 'daemon:preflight-result',
+  'daemon:start': 'daemon:result',
+  'daemon:stop': 'daemon:result',
+  'daemon:status-request': 'daemon:status-all',
+}
+
 // Convert 'session:start' → 'session_start' (Rust command name)
 function toCommand(event: string): string {
   return event.replace(/[:-]/g, '_')
@@ -134,8 +152,30 @@ export function useTauri(_opts: { projectId?: string; sessionToken?: string } = 
   const emit = useCallback((event: string, data?: any) => {
     if (!INVOKE_EVENTS.has(event) || !hasTauri()) return
     const cmd = toCommand(event)
-    invoke(cmd, (data as Record<string, unknown>) ?? {}).catch((err) => {
+    const ackEvent = ACK_RESULT_EVENT[event]
+    invoke(cmd, (data as Record<string, unknown>) ?? {}).then((res) => {
+      if (!ackEvent) return
+      // daemon_status_request answers `{ daemons: [...] }`; its listener wants
+      // the bare array.
+      if (event === 'daemon:status-request') {
+        const list = (res as { daemons?: unknown[] } | null)?.daemons
+        dispatchLocal(ackEvent, Array.isArray(list) ? list : [])
+        return
+      }
+      const projectId = (data as { projectId?: string } | undefined)?.projectId
+      dispatchLocal(ackEvent, { projectId, ...(res as Record<string, unknown> | null) })
+    }).catch((err) => {
       console.error(`[tauri] invoke ${cmd} failed:`, err)
+      if (ackEvent) {
+        // A rejected daemon command must still land, or the modal keeps
+        // spinning on a call that already failed.
+        const message = err instanceof Error ? err.message : String(err)
+        const projectId = (data as { projectId?: string } | undefined)?.projectId
+        dispatchLocal(
+          ackEvent,
+          event === 'daemon:status-request' ? [] : { ok: false, projectId, error: message, message },
+        )
+      }
       // A rejected invoke used to end here, in the console. Rust returns Err
       // for every failed spawn — a missing shell on Windows, a bad cwd, a dead
       // binary — and none of it ever reached the pane, which just kept showing

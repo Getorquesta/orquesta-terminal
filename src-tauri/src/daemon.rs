@@ -120,64 +120,84 @@ fn candidate_bin_dirs() -> Vec<std::path::PathBuf> {
 }
 
 /// Check preflight status before starting a daemon.
+///
+/// Answers the takeover modal's one question: what would a second agent collide
+/// with? So it LISTS the project's agents (dashboard's own online window) and
+/// reports whether this machine already runs a daemon for it. It deliberately
+/// does NOT mint an agent token — minting is a side effect, and a cancelled
+/// pre-flight used to leave a stray `daemon-preflight` token on the project.
 pub async fn preflight(
     api_url: &str,
     cli_token: &str,
     project_id: &str,
     state: &Arc<AppState>,
 ) -> Result<Value, String> {
-    // Check if daemon already running for this project
-    {
+    let local = {
         let daemons = state.daemons.lock().unwrap();
-        if daemons.get(project_id).map(|d| d.running).unwrap_or(false) {
-            return Ok(json!({
-                "ok": false,
-                "reason": "already_running",
-                "projectId": project_id,
-            }));
-        }
-    } // MutexGuard dropped before any await
+        daemons.get(project_id).map(|d| (d.running, d.pid))
+    }; // MutexGuard dropped before any await
+    let local_running = local.map(|(running, _)| running).unwrap_or(false);
+    let local_pid = local.and_then(|(_, pid)| pid);
 
-    // Check orquesta-agent binary
     let bin = resolve_orquesta_agent_bin();
-    if bin.is_none() {
-        return Ok(json!({
-            "ok": false,
-            "reason": "binary_not_found",
-            "message": "orquesta-agent not found in PATH",
-        }));
-    }
 
-    // Mint a project-scoped token via REST
     let base = if api_url.is_empty() {
         "https://getorquesta.com"
     } else {
         api_url
     };
 
-    let client = reqwest::Client::new();
-    let resp = client
-        // Singular. The plural spelling 404s — it was never a route.
-        .post(format!("{base}/api/orquesta-cli/projects/{project_id}/agent-token"))
-        .header("Authorization", format!("Bearer {cli_token}"))
-        .json(&json!({ "name": "daemon-preflight" }))
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
+    // Every failure below is REPORTED, never propagated: the modal offers
+    // "you can still proceed", and an Err here would leave it spinning instead.
+    let mut online: Vec<Value> = Vec::new();
+    let mut error: Option<String> = None;
 
-    if !resp.status().is_success() {
-        return Ok(json!({
-            "ok": false,
-            "reason": "auth_failed",
-            "status": resp.status().as_u16(),
-        }));
+    if cli_token.is_empty() {
+        error = Some("not signed in".into());
+    } else {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(15))
+            .build()
+            .map_err(|e| e.to_string())?;
+        let resp = client
+            .get(format!("{base}/api/orquesta-cli/projects/{project_id}/agents"))
+            .header("Authorization", format!("Bearer {cli_token}"))
+            .send()
+            .await;
+        match resp {
+            Err(e) => error = Some(e.to_string()),
+            Ok(r) if !r.status().is_success() => {
+                error = Some(format!("HTTP {}", r.status().as_u16()));
+            }
+            Ok(r) => match r.json::<Value>().await {
+                Err(e) => error = Some(e.to_string()),
+                Ok(body) => {
+                    let empty: Vec<Value> = Vec::new();
+                    for a in body["agents"].as_array().unwrap_or(&empty) {
+                        if a["online"] == Value::Bool(true) {
+                            online.push(json!({
+                                "id": a["id"],
+                                "name": a["name"],
+                                "lastSeen": a["lastSeen"],
+                            }));
+                        }
+                    }
+                }
+            },
+        }
     }
 
-    let body: Value = resp.json().await.map_err(|e| e.to_string())?;
+    if bin.is_none() {
+        error = Some("orquesta-agent not found in PATH".into());
+    }
+
     Ok(json!({
-        "ok": true,
+        "ok": error.is_none(),
+        "projectId": project_id,
+        "online": online,
+        "localDaemon": { "running": local_running, "pid": local_pid },
         "bin": bin,
-        "tokenInfo": body,
+        "error": error,
     }))
 }
 
@@ -335,24 +355,78 @@ pub async fn start_daemon(
         "projectId": project_id,
         "pid": pid,
         "tokenName": token_body["name"],
+        "message": match pid {
+            Some(p) => format!("Agent started (pid {p})."),
+            None => "Agent started.".to_string(),
+        },
     }))
+}
+
+/// Signal a process tree to exit. `kill_on_drop` cannot do this for us: the
+/// `Child` was moved into the exit-watch task, so dropping the map entry drops
+/// nothing — the daemon kept running while the UI reported it stopped.
+fn kill_pid(pid: u32) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    let out = std::process::Command::new("taskkill")
+        .args(["/PID", &pid.to_string(), "/T", "/F"])
+        .output();
+    #[cfg(not(target_os = "windows"))]
+    let out = std::process::Command::new("kill")
+        .args(["-TERM", &pid.to_string()])
+        .output();
+
+    match out {
+        Ok(o) if o.status.success() => Ok(()),
+        // Already gone counts as stopped.
+        Ok(o) => {
+            let err = String::from_utf8_lossy(&o.stderr).trim().to_string();
+            if err.contains("No such process") || err.contains("not found") {
+                Ok(())
+            } else {
+                Err(err)
+            }
+        }
+        Err(e) => Err(e.to_string()),
+    }
 }
 
 /// Stop a running daemon.
 pub fn stop_daemon(project_id: &str, state: &Arc<AppState>) -> Result<Value, String> {
-    let mut daemons = state.daemons.lock().unwrap();
-    if let Some(daemon) = daemons.get_mut(project_id) {
-        daemon.running = false;
-        // The tokio::process::Child drops when the spawn task exits
-        // We just mark as not running; the kill_on_drop will handle it
-        daemons.remove(project_id);
-        state
-            .app_handle
-            .emit("daemon:status", json!({ "projectId": project_id, "running": false }))
-            .ok();
-        Ok(json!({ "ok": true, "projectId": project_id }))
-    } else {
-        Ok(json!({ "ok": false, "reason": "not_found" }))
+    let pid = {
+        let mut daemons = state.daemons.lock().unwrap();
+        match daemons.remove(project_id) {
+            Some(d) => d.pid,
+            None => return Ok(json!({
+                "ok": false,
+                "reason": "not_found",
+                "projectId": project_id,
+                "message": "No local daemon is running for this project.",
+            })),
+        }
+    };
+
+    // A daemon we tracked but whose pid we never got: the entry is gone, so the
+    // exit watcher will reap it — report stopped rather than leaving it listed.
+    let killed = match pid {
+        Some(p) => kill_pid(p),
+        None => Ok(()),
+    };
+    state
+        .app_handle
+        .emit("daemon:status", json!({ "projectId": project_id, "running": false }))
+        .ok();
+
+    match killed {
+        Ok(()) => Ok(json!({
+            "ok": true,
+            "projectId": project_id,
+            "message": "Agent stopped.",
+        })),
+        Err(e) => Ok(json!({
+            "ok": false,
+            "projectId": project_id,
+            "message": format!("Could not stop the agent: {e}"),
+        })),
     }
 }
 
