@@ -64,6 +64,7 @@ import { SettingsPanel } from './SettingsPanel'
 import { launchConfigFor, loadSettings } from '@/lib/cliSettings'
 import { feedTypedBuffer, emptyTypedBuffer, MIN_TYPED_PROMPT, type TypedBuffer } from '@/lib/typedBuffer'
 import { attachRenderer } from '@/lib/xterm-renderer'
+import { openExternal } from '@/lib/open-external'
 import { useKeyLabels } from '@/lib/platform'
 import '@xterm/xterm/css/xterm.css'
 
@@ -582,7 +583,10 @@ function TerminalCell({
 
       const fitAddon = new FitAddon()
       const webLinksAddon = new WebLinksAddon((e, uri) => {
-        window.open(uri, '_blank', 'noopener')
+        // window.open is a no-op in the Tauri webview — a URL printed by a
+        // command was clickable and opened nothing. Route it through the Rust
+        // opener like every other external link (lib/open-external.ts).
+        void openExternal(uri)
       })
       term.loadAddon(fitAddon)
       term.loadAddon(webLinksAddon)

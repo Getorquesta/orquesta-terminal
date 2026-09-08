@@ -26,6 +26,7 @@ import { RemoteSessionModal } from '@/components/features/RemoteSessionModal'
 import { UpdateNotice } from '@/components/features/UpdateNotice'
 import { RenderNotice } from '@/components/features/RenderNotice'
 import { useKeyLabels } from '@/lib/platform'
+import { installExternalLinkHandler } from '@/lib/open-external'
 
 interface Project {
   id: string
@@ -92,6 +93,10 @@ export default function TerminalWorkspacePage() {
 
   const { socket } = useTauri({ projectId, sessionToken })
   const hosted = useHostedAuth()
+
+  // Every `target="_blank"` in the app goes through the Rust opener instead of
+  // the webview, which ignores it without saying so. See lib/open-external.ts.
+  useEffect(() => installExternalLinkHandler(), [])
 
   // Stable callbacks — AgentGrid re-publishes panes on every status flip, so an
   // unstable identity here would loop the effect.
@@ -557,7 +562,7 @@ export default function TerminalWorkspacePage() {
             socket={socket}
             onImport={(specs) => gridRef.current?.importSessions(specs)}
           />
-          <TerminalMonitorButton socket={socket} />
+          <TerminalMonitorButton socket={socket} panes={panes} readPaneTail={readPaneTail} />
           <button
             onClick={() => setPluginsOpen(o => !o)}
             className={`flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs transition-colors ${
@@ -1856,12 +1861,24 @@ interface MonitorSession {
   active: boolean
   startedAt: number
   lines: MonitorLog[]
+  /** Pane title — set for terminals open in this window, absent for remote sessions. */
+  name?: string
+  /** Live PTY tail of a local pane, rendered instead of `lines`. */
+  tail?: string
+  /** A local pane that is producing output right now (vs. sitting at a prompt). */
+  busy?: boolean
 }
 
-function TerminalMonitorButton({ socket }: { socket: ReturnType<typeof useTauri>['socket'] }) {
+function TerminalMonitorButton({ socket, panes, readPaneTail }: {
+  socket: ReturnType<typeof useTauri>['socket']
+  panes: PaneInfo[]
+  readPaneTail: (paneId: string) => string
+}) {
   const [open, setOpen] = useState(false)
   // sessionId → session card state, in Map to preserve insertion order
   const [sessions, setSessions] = useState<Map<string, MonitorSession>>(new Map())
+  // paneId → last sampled PTY tail
+  const [tails, setTails] = useState<Record<string, string>>({})
 
   useEffect(() => {
     if (!socket) return
@@ -1898,9 +1915,42 @@ function TerminalMonitorButton({ socket }: { socket: ReturnType<typeof useTauri>
     return () => { socket.off('log', onLog) }
   }, [socket])
 
-  const list = [...sessions.values()].sort((a, b) =>
+  // Terminals open in THIS window never emit a server `log` event — the panes
+  // are local PTYs and the socket only carries remote sessions. Building the
+  // list from that socket alone is why a workspace full of running terminals
+  // reported "0 live / No terminals running": there was no second source, so
+  // the count was structurally blind rather than merely stale. Read the panes'
+  // own tails instead, and only while the panel is open.
+  useEffect(() => {
+    if (!open || panes.length === 0) return
+    const sample = () => {
+      const next: Record<string, string> = {}
+      // The pane hands back its whole visible screen; a 160px card only ever
+      // shows the end of it, so keep the last lines and not 50 blank ones.
+      for (const p of panes) {
+        next[p.id] = readPaneTail(p.id).replace(/\s+$/, '').split('\n').slice(-40).join('\n')
+      }
+      setTails(next)
+    }
+    sample()
+    const timer = setInterval(sample, 1000)
+    return () => clearInterval(timer)
+  }, [open, panes, readPaneTail])
+
+  const localSessions: MonitorSession[] = panes.map(p => ({
+    id: `pane:${p.id}`,
+    cli: p.cliType || 'shell',
+    name: p.name,
+    active: true,
+    busy: p.status === 'running',
+    startedAt: 0,
+    lines: [],
+    tail: tails[p.id] ?? '',
+  }))
+  const remoteSessions = [...sessions.values()].sort((a, b) =>
     (Number(b.active) - Number(a.active)) || (b.startedAt - a.startedAt))
-  const activeCount = list.filter(s => s.active).length
+  const list = [...localSessions, ...remoteSessions]
+  const activeCount = localSessions.length + remoteSessions.filter(s => s.active).length
 
   return (
     <div className="relative">
@@ -1967,7 +2017,7 @@ function MonitorCard({ session }: { session: MonitorSession }) {
   const viewRef = useRef<HTMLDivElement>(null)
   useEffect(() => {
     if (viewRef.current) viewRef.current.scrollTop = viewRef.current.scrollHeight
-  }, [session.lines.length])
+  }, [session.lines.length, session.tail])
 
   const lineColor = (level: string) => {
     switch (level) {
@@ -1981,16 +2031,25 @@ function MonitorCard({ session }: { session: MonitorSession }) {
   return (
     <div className="rounded-lg border border-white/10 bg-black/30 overflow-hidden flex flex-col min-h-[160px]">
       <div className="flex items-center justify-between px-2.5 py-1.5 border-b border-white/5 bg-white/5">
-        <span className="flex items-center gap-1.5 text-[11px] text-zinc-200">
-          <span className={`h-1.5 w-1.5 rounded-full ${session.active ? 'bg-green-400 animate-pulse' : 'bg-zinc-600'}`} />
-          <span className="font-mono">{session.cli}</span>
+        <span className="flex min-w-0 items-center gap-1.5 text-[11px] text-zinc-200">
+          <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${
+            session.busy ? 'bg-green-400 animate-pulse'
+              : session.active ? 'bg-green-400' : 'bg-zinc-600'}`} />
+          <span className="truncate font-mono">{session.name || session.cli}</span>
         </span>
-        <span className="text-[9px] text-zinc-500 font-mono">
-          {session.pid ? `PID ${session.pid}` : session.id.slice(0, 8)}
+        <span className="shrink-0 text-[9px] text-zinc-500 font-mono">
+          {session.tail !== undefined ? session.cli
+            : session.pid ? `PID ${session.pid}` : session.id.slice(0, 8)}
         </span>
       </div>
       <div ref={viewRef} className="flex-1 max-h-40 overflow-y-auto px-2 py-1.5 font-mono text-[10px] leading-relaxed">
-        {session.lines.length === 0 ? (
+        {session.tail !== undefined ? (
+          session.tail.trim() ? (
+            <pre className="whitespace-pre-wrap break-all text-zinc-300">{session.tail}</pre>
+          ) : (
+            <p className="text-zinc-700">no output yet</p>
+          )
+        ) : session.lines.length === 0 ? (
           <p className="text-zinc-700">waiting for output…</p>
         ) : (
           session.lines.map(l => (
