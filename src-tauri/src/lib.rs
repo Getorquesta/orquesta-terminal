@@ -118,7 +118,7 @@ pub fn run() {
         })
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
-        .run(|_app, event| {
+        .run(|app, event| {
             // Quitting kills the webview renderer too — including the updater's
             // relaunch. Tell the watchdog, or a deliberate exit reads as a
             // driver crash and the app comes back after the user closed it.
@@ -127,6 +127,13 @@ pub fn run() {
                 tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit
             ) {
                 render_guard::mark_shutdown();
+            }
+            // Invalidate every share link while the process can still speak
+            // to the API — after this, nothing runs (QA-28).
+            if matches!(event, tauri::RunEvent::ExitRequested { .. }) {
+                if let Some(state) = app.try_state::<Arc<AppState>>() {
+                    cloud::stop_all_shares_blocking(&state);
+                }
             }
         });
 }

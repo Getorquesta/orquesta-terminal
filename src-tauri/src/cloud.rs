@@ -918,6 +918,35 @@ pub async fn stop_share(session_id: &str, state: &Arc<AppState>) -> Result<(), S
     Ok(())
 }
 
+// ── stop_all_shares_blocking ──────────────────────────────────────────────────
+
+/// Close every live share before the process exits. Quitting the app never
+/// reached `stop_share`: the PTY reader loops die with the process, so their
+/// spawned `stop_share` futures were dropped and every row stayed `active` —
+/// the guest kept the terminal open until the dashboard's 3-minute heartbeat
+/// window expired, which is the "still accessible after I closed the app"
+/// report (QA-28). Blocks the exit path for at most a few seconds; a PATCH
+/// that does not make it is no worse than what happened before.
+pub fn stop_all_shares_blocking(state: &Arc<AppState>) {
+    let ids: Vec<String> = state.shared_terminals.lock().unwrap().keys().cloned().collect();
+    if ids.is_empty() {
+        return;
+    }
+    let st = Arc::clone(state);
+    let work = async move {
+        let stops = ids.iter().map(|sid| stop_share(sid, &st));
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(4),
+            futures_util::future::join_all(stops),
+        )
+        .await;
+    };
+    // `block_on` on the runtime's own worker thread would deadlock, so hand it
+    // to a plain OS thread and wait for that instead.
+    let done = std::thread::spawn(move || tauri::async_runtime::block_on(work));
+    let _ = done.join();
+}
+
 // ── prune_stale_viewers ───────────────────────────────────────────────────────
 
 /// Prune viewers that haven't sent a heartbeat in 70 seconds.
