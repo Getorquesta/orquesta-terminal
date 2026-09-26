@@ -98,6 +98,10 @@ pub fn run() {
             ipc::remote_resize,
             ipc::remote_detach,
             ipc::remote_end,
+            ipc::rd_join,
+            ipc::rd_control,
+            ipc::rd_input,
+            ipc::rd_leave,
             // Hosted proxy
             ipc::open_external_url,
             ipc::hosted_proxy,

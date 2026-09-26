@@ -10,10 +10,11 @@
 // agent:project-{id}, authenticated with the cockpit's oclt_ token.
 
 import { useState, useEffect, useCallback } from 'react'
-import { X, Server, RefreshCw, Loader2, Play, Circle, Terminal as TerminalIcon } from 'lucide-react'
+import { X, Server, RefreshCw, Loader2, Play, Circle, Terminal as TerminalIcon, Monitor } from 'lucide-react'
 import type { TauriHandle } from '@/hooks/useTauri'
 import type { HostedAuth } from '@/hooks/useHostedAuth'
 import type { RemoteTarget } from './RemoteCell'
+import type { RemoteDesktopTarget } from './RemoteDesktopCell'
 
 interface RemoteAgent {
   id: string
@@ -42,12 +43,19 @@ export function RemoteSessionModal({
   socket,
   auth,
   onOpen,
+  onOpenDesktop,
   onClose,
 }: {
   socket: TauriHandle | null
   auth: HostedAuth
   /** Hand the chosen agent to the grid — it becomes a pane in the workspace. */
   onOpen: (target: RemoteTarget) => void
+  /**
+   * Open the project's real DESKTOP instead of a terminal. Deliberately taken
+   * per project, not per agent: the relay's rd:* rooms are project-scoped, so
+   * a per-agent button would promise a choice the protocol cannot honour.
+   */
+  onOpenDesktop: (target: RemoteDesktopTarget) => void
   onClose: () => void
 }) {
   const projects = auth.projects || []
@@ -82,6 +90,13 @@ export function RemoteSessionModal({
   useEffect(() => {
     if (projectId) listAgents(projectId)
   }, [projectId, listAgents])
+
+  const openDesktop = () => {
+    const project = projects.find((p) => p.id === projectId)
+    if (!project) return
+    onOpenDesktop({ projectId: project.id, projectName: project.name })
+    onClose()
+  }
 
   const open = (a: RemoteAgent) => {
     if (!projectId) return
@@ -131,6 +146,15 @@ export function RemoteSessionModal({
               title="Refresh agents"
             >
               <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
+            </button>
+            <button
+              onClick={openDesktop}
+              disabled={!projectId}
+              className="flex shrink-0 items-center gap-1.5 rounded-lg border border-white/10 bg-white/5 px-2.5 py-1.5 text-xs text-zinc-200 hover:bg-white/10 hover:text-white disabled:opacity-40"
+              title="Watch this project's real screen instead of a terminal"
+            >
+              <Monitor className="h-3.5 w-3.5" />
+              Desktop
             </button>
           </div>
 

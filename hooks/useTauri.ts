@@ -51,6 +51,13 @@ const INVOKE_EVENTS = new Set([
   'remote:resize',
   'remote:detach',
   'remote:end',
+  // Remote Desktop. `rd:join` and `rd:control` answer through their return
+  // value — a required or wrong PIN arrives only there — so both are listed in
+  // ACK_RESULT_EVENT below and re-dispatched as events the UI listens for.
+  'rd:join',
+  'rd:control',
+  'rd:input',
+  'rd:leave',
 ])
 
 /**
@@ -69,6 +76,8 @@ const ACK_RESULT_EVENT: Record<string, string> = {
   'daemon:start': 'daemon:result',
   'daemon:stop': 'daemon:result',
   'daemon:status-request': 'daemon:status-all',
+  'rd:join': 'rd:join-result',
+  'rd:control': 'rd:control-result',
 }
 
 // Convert 'session:start' → 'session_start' (Rust command name)

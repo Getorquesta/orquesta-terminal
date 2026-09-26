@@ -639,6 +639,7 @@ export default function TerminalWorkspacePage() {
           socket={socket}
           auth={hosted.auth}
           onOpen={(target) => gridRef.current?.openRemote(target)}
+          onOpenDesktop={(target) => gridRef.current?.openRemoteDesktop(target)}
           onClose={() => setRemoteOpen(false)}
         />
       )}

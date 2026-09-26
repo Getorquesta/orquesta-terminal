@@ -756,6 +756,140 @@ pub async fn remote_end(
     Ok(())
 }
 
+// ── Remote Desktop ────────────────────────────────────────────────────────────
+
+/// The connection currently carrying a desktop, if this app is watching one.
+fn rd_target(state: &Arc<AppState>) -> Option<(String, String)> {
+    let viewer = state.rd_viewer.lock().unwrap();
+    viewer.as_ref().map(|v| (v.conn_key.clone(), v.project_id.clone()))
+}
+
+/// Start watching a project's real desktop.
+///
+/// The desktop app authenticates with an org-scoped `oclt_`, which the relay
+/// accepts for VIEWING once it has checked the project belongs to that
+/// organization. Taking control is a separate request and needs the project's
+/// pairing PIN — see `rd_control`.
+#[tauri::command]
+pub async fn rd_join(
+    api_url: Option<String>,
+    token: String,
+    project_id: String,
+    state: State<'_, Arc<AppState>>,
+) -> Result<Value, String> {
+    let base = api_url.unwrap_or_else(|| "https://getorquesta.com".into());
+
+    // One desktop at a time: frames carry no project id, so a second viewer
+    // would interleave its chunks into the first one's picture.
+    let previous = rd_target(&state);
+    if let Some((old_key, old_project)) = previous {
+        if old_project != project_id {
+            let _ = cloud::rd_emit(&old_key, "rd:leave", json!({ "projectId": old_project }), &state).await;
+            cloud::rd_cleanup(&old_key, &state);
+        }
+    }
+
+    let conn_key = cloud::get_or_create_rd_conn(&base, &token, &project_id, &state).await?;
+
+    // Register BEFORE the join so the first frame — which can arrive before
+    // this await returns — finds a viewer to accumulate into.
+    {
+        let mut viewer = state.rd_viewer.lock().unwrap();
+        *viewer = Some(crate::state::RdViewer {
+            project_id: project_id.clone(),
+            conn_key: conn_key.clone(),
+            chunks: Vec::new(),
+        });
+    }
+
+    let result = cloud::rd_emit_ack(
+        &conn_key,
+        "rd:join",
+        json!({ "projectId": project_id }),
+        &state,
+    )
+    .await;
+
+    match result {
+        Ok(ack) => {
+            // The relay refuses a project this token cannot reach. Don't leave
+            // a viewer registered for a desktop we were not allowed to watch.
+            if !ack["ok"].as_bool().unwrap_or(false) {
+                *state.rd_viewer.lock().unwrap() = None;
+                cloud::rd_cleanup(&conn_key, &state);
+            }
+            Ok(ack)
+        }
+        Err(e) => {
+            *state.rd_viewer.lock().unwrap() = None;
+            cloud::rd_cleanup(&conn_key, &state);
+            Err(e)
+        }
+    }
+}
+
+/// Ask for (or give up) the keyboard and mouse.
+///
+/// `pin` is the project's pairing PIN. The relay requires one unconditionally
+/// for a desktop-app socket — a browser socket is a person who just signed in,
+/// an `oclt_` is a long-lived string in a config file — so control is refused
+/// with `pinRequired` until the project has a PIN set and it is supplied here.
+#[tauri::command]
+pub async fn rd_control(
+    pin: Option<String>,
+    release: Option<bool>,
+    state: State<'_, Arc<AppState>>,
+) -> Result<Value, String> {
+    let (conn_key, project_id) = match rd_target(&state) {
+        Some(target) => target,
+        None => return Ok(json!({ "ok": false, "error": "Not watching a desktop" })),
+    };
+    let mut payload = json!({ "projectId": project_id });
+    if release.unwrap_or(false) {
+        payload["release"] = json!(true);
+    } else if let Some(pin) = pin.filter(|p| !p.is_empty()) {
+        payload["pin"] = json!(pin);
+    }
+    cloud::rd_emit_ack(&conn_key, "rd:control", payload, &state).await
+}
+
+/// Send one computer-use action (click, type, scroll, …) to the desktop.
+#[tauri::command]
+pub async fn rd_input(
+    input: Value,
+    state: State<'_, Arc<AppState>>,
+) -> Result<(), String> {
+    if let Some((conn_key, project_id)) = rd_target(&state) {
+        cloud::rd_emit(
+            &conn_key,
+            "rd:input",
+            json!({ "projectId": project_id, "input": input }),
+            &state,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+/// Stop watching. Leaving the ROOM is what drops the agent's viewer count back
+/// to zero, and the agent stops capturing the screen at zero — without this it
+/// would keep encoding frames for nobody until the socket eventually died.
+#[tauri::command]
+pub async fn rd_leave(state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    let target = { state.rd_viewer.lock().unwrap().take() };
+    if let Some(viewer) = target {
+        let _ = cloud::rd_emit(
+            &viewer.conn_key,
+            "rd:leave",
+            json!({ "projectId": viewer.project_id }),
+            &state,
+        )
+        .await;
+        cloud::rd_cleanup(&viewer.conn_key, &state);
+    }
+    Ok(())
+}
+
 // ── External browser ──────────────────────────────────────────────────────────
 
 /// Open an http(s) URL in the user's real browser.

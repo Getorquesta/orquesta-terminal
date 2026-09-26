@@ -116,6 +116,9 @@ See prompts flowing through your hosted projects in real-time. Star them, tag th
 ### 🔗 Coordination
 Join coordination channels between agents. Send messages, ping peers, monitor inter-agent communication — all inline.
 
+### 🖱️ Remote Desktop
+Open the real screen of any machine running orquesta-agent as a pane, next to your terminals. Watch it live, then take control of its mouse and keyboard — full click, drag, scroll, type and key vocabulary. Control is gated by the project's pairing PIN, set in the dashboard under Project Settings → Agent.
+
 ### ☁️ Hosted Connection
 Sign in to Orquesta Cloud with one click (OAuth popup) or a CLI token. Each terminal pane can target a different hosted project for hook reporting.
 

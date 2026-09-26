@@ -1047,7 +1047,59 @@ async fn handle_remote_event(payload: &str, state: &Arc<AppState>) {
                 }
             }
         }
+        // ── Remote Desktop ────────────────────────────────────────────────
+        // A screen frame arrives split across several `rd:frame` messages
+        // because one PNG is far larger than the relay's per-message ceiling.
+        // Reassemble here rather than in the webview: the frontend would
+        // otherwise pay one IPC crossing per chunk instead of one per frame.
+        "rd:frame" => {
+            let chunk = data["chunk"].as_str().unwrap_or("").to_string();
+            let last = data["last"].as_bool().unwrap_or(false);
+            let complete = {
+                let mut viewer = state.rd_viewer.lock().unwrap();
+                match viewer.as_mut() {
+                    // No viewer means the pane closed while frames were still
+                    // in flight; dropping them is the correct answer.
+                    None => None,
+                    Some(v) => {
+                        v.chunks.push(chunk);
+                        if last { Some(std::mem::take(&mut v.chunks).concat()) } else { None }
+                    }
+                }
+            };
+            if let Some(png_base64) = complete {
+                let _ = state.app_handle.emit("remote:rd-frame", json!({ "data": png_base64 }));
+            }
+        }
+        "rd:status" => {
+            let _ = state.app_handle.emit("remote:rd-status", &data);
+        }
+        "rd:viewers" => {
+            let _ = state.app_handle.emit("remote:rd-viewers", &data);
+        }
         _ => {}
+    }
+}
+
+/// Hand a socket.io ack back to whoever is waiting on it.
+///
+/// `rest` is what follows the `43` packet type: an ack id then a JSON array of
+/// the callback's arguments, e.g. `7[{"ok":true}]`.
+fn resolve_ack(rest: &str, state: &Arc<AppState>) {
+    let split = rest.find('[').unwrap_or(0);
+    let (id_part, body) = rest.split_at(split);
+    let ack_id: u64 = match id_part.parse() {
+        Ok(id) => id,
+        Err(_) => return,
+    };
+    let args: Value = match serde_json::from_str(body) {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+    let first = args.get(0).cloned().unwrap_or(Value::Null);
+    let waiter = state.rd_acks.lock().unwrap().remove(&ack_id);
+    if let Some(tx) = waiter {
+        let _ = tx.send(first);
     }
 }
 
@@ -1137,6 +1189,11 @@ async fn connect_remote_socket(
                     } else if let Some(rest) = text_str.strip_prefix("42") {
                         let rest = rest.to_string();
                         handle_remote_event(&rest, &state).await;
+                    } else if let Some(rest) = text_str.strip_prefix("43") {
+                        // A reply to an emit of ours. `rd:control` is answered
+                        // this way and no other, so dropping these would turn
+                        // every PIN refusal into an unexplained silence.
+                        resolve_ack(rest, &state);
                     }
                 }
                 Ok(_) => {}
@@ -1242,6 +1299,141 @@ pub async fn remote_send(
     match tx {
         Some(tx) => tx.send(frame).await.map_err(|e| format!("remote_send {event}: {e}")),
         None => Err(format!("Lost the connection to the cloud — reopen the session ({event})")),
+    }
+}
+
+// ── Remote Desktop ────────────────────────────────────────────────────────────
+
+/// Ref name for the remote-desktop viewer's hold on a cloud connection. The
+/// conn map is keyed by session id; the desktop viewer is not a session, so it
+/// takes this one fixed ref and releases it on leave.
+const RD_REF: &str = "remote-desktop";
+
+/// Connection key for the desktop viewer. Kept in its own namespace so opening
+/// a desktop never disturbs a terminal session sharing the same project, and
+/// closing one cannot tear down the other's socket.
+fn rd_conn_key(api_url: &str, cli_token: &str, project_id: &str) -> String {
+    format!("rd::{}", conn_key(api_url, cli_token, project_id))
+}
+
+/// Connect (or reuse) the socket this app watches a desktop through.
+///
+/// Unlike `get_or_create_remote_conn` this does NOT subscribe to the project's
+/// agent channel: the rd:* protocol is handled by the relay itself, and joining
+/// the agent channel would additionally pour every other session's terminal
+/// output into a connection that only wants screen frames.
+pub async fn get_or_create_rd_conn(
+    api_url: &str,
+    cli_token: &str,
+    project_id: &str,
+    state: &Arc<AppState>,
+) -> Result<String, String> {
+    let key = rd_conn_key(api_url, cli_token, project_id);
+
+    let already_connected = {
+        let mut conns = state.remote_conns.lock().unwrap();
+        claim_live_conn(&mut conns, &key, RD_REF)
+    };
+
+    if !already_connected {
+        let socket = connect_remote_socket(api_url, cli_token, Arc::clone(state)).await?;
+
+        let (str_tx, mut str_rx) = mpsc::channel::<String>(256);
+        let raw_tx = socket.tx.clone();
+        let alive_bridge = Arc::clone(&socket.alive);
+        tauri::async_runtime::spawn(async move {
+            while let Some(s) = str_rx.recv().await {
+                if raw_tx.send(Message::Text(s.into())).await.is_err() {
+                    alive_bridge.store(false, Ordering::Relaxed);
+                    break;
+                }
+            }
+        });
+
+        let mut refs = HashSet::new();
+        refs.insert(RD_REF.to_string());
+        state.remote_conns.lock().unwrap().insert(
+            key.clone(),
+            CloudConn { tx: str_tx, refs, alive: socket.alive },
+        );
+    }
+
+    Ok(key)
+}
+
+/// The sender for a live conn, or an error naming what went wrong.
+fn live_conn_tx(conn_key: &str, state: &Arc<AppState>) -> Result<mpsc::Sender<String>, String> {
+    let conns = state.remote_conns.lock().unwrap();
+    conns
+        .get(conn_key)
+        .filter(|c| c.alive.load(Ordering::Relaxed))
+        .map(|c| c.tx.clone())
+        .ok_or_else(|| "Lost the connection to the cloud — reopen the desktop".to_string())
+}
+
+/// Emit a BARE socket.io event, with no `broadcast` envelope.
+///
+/// Everything on the agent channel travels as a pub/sub broadcast, which is why
+/// `remote_send` wraps it. The rd:* protocol is different: the relay handles
+/// `rd:join` / `rd:input` / `rd:control` on the socket itself, and a broadcast
+/// carrying one of those names would be forwarded to the room as data and acted
+/// on by nobody.
+pub async fn rd_emit(
+    conn_key: &str,
+    event: &str,
+    data: Value,
+    state: &Arc<AppState>,
+) -> Result<(), String> {
+    let tx = live_conn_tx(conn_key, state)?;
+    let frame = format!("42{}", json!([event, data]));
+    tx.send(frame).await.map_err(|e| format!("rd_emit {event}: {e}"))
+}
+
+/// Emit and wait for the relay's ack.
+///
+/// `rd:control` reports a required or wrong PIN only through the ack, so this
+/// is the one place a refusal can be read. A timeout is an answer too: the UI
+/// must say the relay never replied rather than leave a button spinning.
+pub async fn rd_emit_ack(
+    conn_key: &str,
+    event: &str,
+    data: Value,
+    state: &Arc<AppState>,
+) -> Result<Value, String> {
+    let tx = live_conn_tx(conn_key, state)?;
+    let ack_id = state.rd_ack_seq.fetch_add(1, Ordering::Relaxed);
+    let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+    state.rd_acks.lock().unwrap().insert(ack_id, ack_tx);
+
+    let frame = format!("42{ack_id}{}", json!([event, data]));
+    if let Err(e) = tx.send(frame).await {
+        // Take the waiter back out, or it leaks for the life of the app.
+        state.rd_acks.lock().unwrap().remove(&ack_id);
+        return Err(format!("rd_emit {event}: {e}"));
+    }
+
+    match tokio::time::timeout(std::time::Duration::from_secs(10), ack_rx).await {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(_)) => Err(format!("{event}: the connection dropped before the relay answered")),
+        Err(_) => {
+            state.rd_acks.lock().unwrap().remove(&ack_id);
+            Err(format!("{event}: the relay did not answer"))
+        }
+    }
+}
+
+/// Drop this app's hold on the desktop connection.
+pub fn rd_cleanup(conn_key: &str, state: &Arc<AppState>) {
+    let mut conns = state.remote_conns.lock().unwrap();
+    let empty = match conns.get_mut(conn_key) {
+        Some(conn) => {
+            conn.refs.remove(RD_REF);
+            conn.refs.is_empty()
+        }
+        None => false,
+    };
+    if empty {
+        conns.remove(conn_key);
     }
 }
 

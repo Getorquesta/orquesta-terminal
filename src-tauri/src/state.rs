@@ -82,6 +82,22 @@ pub struct RemoteSession {
     pub conn_key: String,
 }
 
+// ── Remote Desktop ────────────────────────────────────────────────────────────
+
+/// The one project whose real desktop this app is currently watching.
+///
+/// The relay's `rd:frame` carries `{ seq, last, chunk }` and no project id —
+/// a browser tab has one socket and one desktop, so it never needed one.
+/// Reassembling two projects' chunk streams off a single reader would splice
+/// them into garbage, so the app watches one desktop at a time and this says
+/// which. Opening a second desktop pane replaces the first.
+pub struct RdViewer {
+    pub project_id: String,
+    pub conn_key: String,
+    /// Chunks of the frame currently arriving, in order, until `last`.
+    pub chunks: Vec<String>,
+}
+
 // ── External JSONL tailers ────────────────────────────────────────────────────
 
 pub struct FileTailer {
@@ -99,6 +115,13 @@ pub struct AppState {
     pub daemons: Mutex<HashMap<String, DaemonInfo>>,
     pub session_viewers: Mutex<HashMap<String, HashMap<String, (String, u64)>>>,
     pub file_tailers: Mutex<HashMap<String, FileTailer>>,
+    pub rd_viewer: Mutex<Option<RdViewer>>,
+    /// Pending socket.io acks, by ack id. `rd:control` answers ONLY through an
+    /// ack — a wrong or missing PIN arrives as `{ ok: false, pinRequired }` and
+    /// nowhere else — so a fire-and-forget emit would render every refusal as
+    /// silence.
+    pub rd_acks: Mutex<HashMap<u64, tokio::sync::oneshot::Sender<serde_json::Value>>>,
+    pub rd_ack_seq: std::sync::atomic::AtomicU64,
     pub app_handle: AppHandle,
 }
 
@@ -113,6 +136,9 @@ impl AppState {
             daemons: Mutex::new(HashMap::new()),
             session_viewers: Mutex::new(HashMap::new()),
             file_tailers: Mutex::new(HashMap::new()),
+            rd_viewer: Mutex::new(None),
+            rd_acks: Mutex::new(HashMap::new()),
+            rd_ack_seq: std::sync::atomic::AtomicU64::new(1),
             app_handle,
         })
     }
