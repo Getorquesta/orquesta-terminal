@@ -632,7 +632,7 @@ export default function TerminalWorkspacePage() {
 
         {/* Operator — same overlay model as the board: panes stay alive behind it. */}
         {operatorOpen && (
-          <div className="absolute inset-0 z-30 bg-zinc-950/95 backdrop-blur-sm">
+          <div className="absolute inset-0 z-30 bg-zinc-950">
             <OperatorPanel
               auth={hosted.auth}
               connecting={hosted.loading}
