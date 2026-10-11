@@ -9,6 +9,7 @@ import { hostedFetch } from '@/lib/tauri-proxy'
 import pkg from '../package.json'
 import { AgentGrid, type AgentGridHandle, type ImportSpec, type PaneInfo } from '@/components/features/AgentGrid'
 import { KanbanBoard } from '@/components/features/KanbanBoard'
+import { OperatorPanel } from '@/components/features/OperatorPanel'
 import { useKanban } from '@/hooks/useKanban'
 import { useHostedAuth, openAuthPage, type HostedAuth } from '@/hooks/useHostedAuth'
 import { CommandPalette, type Command } from '@/components/features/CommandPalette'
@@ -20,7 +21,7 @@ import {
   Cloud, ExternalLink, Loader2, CheckCircle2, AlertCircle, Clock,
   Star, Tag, MessageSquare, Send, Monitor, Puzzle,
   Activity, ScrollText, Server, Layers, Zap, PanelLeft, ArrowRightLeft,
-  Columns3, Search,
+  Columns3, Search, Bot,
 } from 'lucide-react'
 import { RemoteSessionModal } from '@/components/features/RemoteSessionModal'
 import { UpdateNotice } from '@/components/features/UpdateNotice'
@@ -87,6 +88,7 @@ export default function TerminalWorkspacePage() {
   // Kanban mode. The grid stays MOUNTED underneath (the board is an overlay) —
   // unmounting it would kill every PTY the board is supposed to be driving.
   const [boardOpen, setBoardOpen] = useState(false)
+  const [operatorOpen, setOperatorOpen] = useState(false)
   const [panes, setPanes] = useState<PaneInfo[]>([])
   const gridRef = useRef<AgentGridHandle>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
@@ -273,6 +275,14 @@ export default function TerminalWorkspacePage() {
       keys: keys.combo(keys.mod, keys.shift, 'K'),
       icon: Columns3,
       run: () => setBoardOpen(o => !o),
+    })
+    list.push({
+      id: 'view-operator',
+      group: 'Navigate',
+      label: 'Toggle Operator',
+      hint: "chat with your project's agent",
+      icon: Bot,
+      run: () => setOperatorOpen(o => !o),
     })
     list.push({
       id: 'nav-dashboard',
@@ -515,6 +525,21 @@ export default function TerminalWorkspacePage() {
             )}
           </div>
 
+          {/* Operator — chat with the hosted project's agent */}
+          <button
+            onClick={() => setOperatorOpen(o => !o)}
+            data-testid="operator-toggle"
+            className={`flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs transition-colors ${
+              operatorOpen
+                ? 'border-green-500/30 bg-green-500/10 text-green-300'
+                : 'border-white/10 bg-white/5 text-zinc-300 hover:bg-white/10 hover:text-white'
+            }`}
+            title="Operator — chat with your project's agent"
+          >
+            <Bot className="h-3.5 w-3.5" />
+            <span className="hidden sm:inline">Operator</span>
+          </button>
+
           {/* Kanban mode — the prompt board */}
           <button
             onClick={() => setBoardOpen(o => !o)}
@@ -602,6 +627,18 @@ export default function TerminalWorkspacePage() {
         {boardOpen && (
           <div className="absolute inset-0 z-30 bg-zinc-950/95 backdrop-blur-sm">
             <KanbanBoard board={board} panes={panes} onClose={() => setBoardOpen(false)} />
+          </div>
+        )}
+
+        {/* Operator — same overlay model as the board: panes stay alive behind it. */}
+        {operatorOpen && (
+          <div className="absolute inset-0 z-30 bg-zinc-950/95 backdrop-blur-sm">
+            <OperatorPanel
+              auth={hosted.auth}
+              connecting={hosted.loading}
+              onConnect={() => { hosted.loginWithBrowser().catch(() => {}) }}
+              onClose={() => setOperatorOpen(false)}
+            />
           </div>
         )}
 

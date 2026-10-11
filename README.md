@@ -116,6 +116,9 @@ See prompts flowing through your hosted projects in real-time. Star them, tag th
 ### 🔗 Coordination
 Join coordination channels between agents. Send messages, ping peers, monitor inter-agent communication — all inline.
 
+### 🤖 Operator
+Chat with any of your hosted projects' agents, full-screen over your panes. Same conversations as the dashboard's Home: every message runs on the project's agent (your machine, a VM or the managed cloud machine), each chat keeps its own Claude session so the agent remembers what was said, and each answer can expand into the agent's logs. Open it with the **Operator** button — if you are not signed in yet, it connects you first.
+
 ### 🖱️ Remote Desktop
 Open the real screen of any machine running orquesta-agent as a pane, next to your terminals. Watch it live, then take control of its mouse and keyboard — full click, drag, scroll, type and key vocabulary. Control is gated by the project's pairing PIN, set in the dashboard under Project Settings → Agent.
 
