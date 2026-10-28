@@ -66,6 +66,8 @@ interface MeshGraph {
   nodes: MeshNode[]
   edges: MeshEdge[]
   pendingOwnerApprovals: PendingApproval[]
+  /** Studio businesses and the mesh projects each owns. Empty → no business layer. */
+  businesses?: Array<{ id: string; name: string; project_ids: string[] }>
   role: string
 }
 
@@ -93,6 +95,9 @@ interface MeshActivity {
 interface Org { id: string; name: string; role: string }
 
 const ORG_KEY = 'orquesta-mesh-org'
+/** Per org: '' = whole org, BIZ_NONE = projects outside every business, else a business id. */
+const BIZ_KEY = 'orquesta-mesh-business'
+const BIZ_NONE = 'none'
 const IDLE_POLL_MS = 30000
 const INFLIGHT_POLL_MS = 10000
 const NODE_R = 22
@@ -147,6 +152,41 @@ function layoutNodes(nodes: MeshNode[]): Map<string, { x: number; y: number }> {
   return out
 }
 
+/** Project ids the business filter keeps, or null when it keeps the whole org. */
+function businessProjects(graph: MeshGraph, biz: string): Set<string> | null {
+  if (!biz) return null
+  const list = graph.businesses || []
+  if (biz === BIZ_NONE) {
+    const owned = new Set(list.flatMap(b => b.project_ids))
+    return new Set(graph.nodes.map(n => n.project_id).filter((p): p is string => !!p && !owned.has(p)))
+  }
+  const b = list.find(x => x.id === biz)
+  return b ? new Set(b.project_ids) : null
+}
+
+/**
+ * The graph narrowed to one business, as the dashboard does it: the business's
+ * project nodes, the project-less nodes (people, external agents) with an edge
+ * to one of them, the edges among those, and the approvals touching them.
+ */
+function filterByBusiness(graph: MeshGraph, keep: Set<string> | null): MeshGraph {
+  if (!keep) return graph
+  const inside = new Set(graph.nodes.filter(n => n.project_id && keep.has(n.project_id)).map(n => n.id))
+  const loose = new Set(graph.nodes.filter(n => !n.project_id).map(n => n.id))
+  const kept = new Set(inside)
+  for (const e of graph.edges) {
+    if (inside.has(e.from_node_id) && loose.has(e.to_node_id)) kept.add(e.to_node_id)
+    if (inside.has(e.to_node_id) && loose.has(e.from_node_id)) kept.add(e.from_node_id)
+  }
+  return {
+    ...graph,
+    nodes: graph.nodes.filter(n => kept.has(n.id)),
+    edges: graph.edges.filter(e => kept.has(e.from_node_id) && kept.has(e.to_node_id)),
+    pendingOwnerApprovals: graph.pendingOwnerApprovals.filter(p =>
+      keep.has(p.to_project_id) || (!!p.from_project_id && keep.has(p.from_project_id))),
+  }
+}
+
 /** Pair key the activity route uses: asking project (or external node) | target project | kind. */
 function pairKey(from: MeshNode | undefined, to: MeshNode | undefined, kind: string): string | null {
   if (!from || !to?.project_id) return null
@@ -194,8 +234,9 @@ export function MeshPanel({
 function MeshView({ auth, onClose }: { auth: HostedAuth; onClose: () => void }) {
   const [orgs, setOrgs] = useState<Org[] | null>(null)
   const [orgId, setOrgId] = useState('')
-  const [graph, setGraph] = useState<MeshGraph | null>(null)
-  const [activity, setActivity] = useState<MeshActivity | null>(null)
+  const [rawGraph, setGraph] = useState<MeshGraph | null>(null)
+  const [rawActivity, setActivity] = useState<MeshActivity | null>(null)
+  const [biz, setBiz] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
   const [selected, setSelected] = useState<string | null>(null)
@@ -232,7 +273,17 @@ function MeshView({ auth, onClose }: { auth: HostedAuth; onClose: () => void }) 
     }
   }, [base, orgId, auth.token])
 
-  const anyInflight = useMemo(() => Object.keys(activity?.inflight || {}).length > 0, [activity])
+  useEffect(() => { if (orgId) setBiz(readStored(`${BIZ_KEY}.${orgId}`)) }, [orgId])
+
+  // Business selector: the canvas, the side panel and the run list all read the narrowed graph.
+  const keep = useMemo(() => (rawGraph ? businessProjects(rawGraph, biz) : null), [rawGraph, biz])
+  const graph = useMemo(() => (rawGraph ? filterByBusiness(rawGraph, keep) : null), [rawGraph, keep])
+  const activity = useMemo(() => (rawActivity && keep ? {
+    ...rawActivity,
+    runs: rawActivity.runs.filter(r => keep.has(r.to_project_id) || (!!r.from_project_id && keep.has(r.from_project_id))),
+  } : rawActivity), [rawActivity, keep])
+
+  const anyInflight = useMemo(() => Object.keys(rawActivity?.inflight || {}).length > 0, [rawActivity])
   useEffect(() => {
     load()
     const id = setInterval(() => { if (!document.hidden) load() }, anyInflight ? INFLIGHT_POLL_MS : IDLE_POLL_MS)
@@ -256,6 +307,17 @@ function MeshView({ auth, onClose }: { auth: HostedAuth; onClose: () => void }) 
     setActivity(null)
     setSelected(null)
   }
+
+  const switchBiz = (id: string) => {
+    setBiz(id)
+    writeStored(`${BIZ_KEY}.${orgId}`, id)
+    setSelected(null)
+  }
+  const businesses = useMemo(
+    () => [...(rawGraph?.businesses || [])].sort((a, b) => a.name.localeCompare(b.name)),
+    [rawGraph],
+  )
+  const bizValue = biz === BIZ_NONE || businesses.some(b => b.id === biz) ? biz : ''
 
   // Workstream sub-nodes stay collapsed into their project, as the dashboard draws them by default.
   const nodes = useMemo(() => (graph?.nodes || []).filter(n => !n.sub_agent_id), [graph])
@@ -286,6 +348,22 @@ function MeshView({ auth, onClose }: { auth: HostedAuth; onClose: () => void }) 
           </div>
         ) : (
           <span className="text-xs text-zinc-400">{orgs?.[0]?.name || auth.organizationName || ''}</span>
+        )}
+        {businesses.length > 0 && (
+          <div className="relative">
+            <select
+              value={bizValue}
+              onChange={e => switchBiz(e.target.value)}
+              aria-label="Business"
+              title="Show one business's agents"
+              className={`appearance-none rounded-md py-1 pl-2 pr-6 text-xs outline-none hover:bg-zinc-700 ${bizValue ? 'bg-sky-900/60 text-sky-200' : 'bg-zinc-800 text-zinc-200'}`}
+            >
+              <option value="">All businesses</option>
+              {businesses.map(b => <option key={b.id} value={b.id}>{b.name.replace(/^Business · /, '')}</option>)}
+              <option value={BIZ_NONE}>Projects outside a business</option>
+            </select>
+            <ChevronDown className="pointer-events-none absolute right-1.5 top-1.5 h-3.5 w-3.5 text-zinc-500" />
+          </div>
         )}
         {graph && (
           <span
