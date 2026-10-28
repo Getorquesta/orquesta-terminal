@@ -520,12 +520,14 @@ function OperatorChat({ auth, onClose }: { auth: HostedAuth; onClose: () => void
               ) : null}
 
               {!threadLoading && thread.map((t, i) => {
-                const prev = thread[i - 1]
+                // Compare against the last USER turn, not the previous turn: agent
+                // turns in between carry no day, and comparing to them repeated it.
                 const day = t.kind === 'user' ? dayLabel(t.at) : null
-                const prevDay = prev?.kind === 'user' ? dayLabel(prev.at) : null
+                const lastUser = thread.slice(0, i).reverse().find(x => x.kind === 'user')
+                const prevDay = lastUser ? dayLabel(lastUser.at) : null
                 return (
                   <Fragment key={`${t.kind}-${t.promptId}`}>
-                    {day && day !== prevDay && (i > 0 || day !== 'Today') && (
+                    {day && day !== prevDay && (prevDay !== null || day !== 'Today') && (
                       <div className="flex items-center gap-3 py-1 text-[10px] uppercase tracking-wider text-zinc-600">
                         <span className="h-px flex-1 bg-white/5" />{day}<span className="h-px flex-1 bg-white/5" />
                       </div>
