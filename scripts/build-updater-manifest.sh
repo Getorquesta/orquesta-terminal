@@ -25,7 +25,7 @@ assets="$(jq -r '.assets[].name' "$release_json")"
 
 # First asset whose name matches, ignoring the .sig files themselves.
 find_asset() {
-  printf '%s\n' "$assets" | grep -v '\.sig$' | grep -iE "$1" | head -1
+  printf '%s\n' "$assets" | grep -v '\.sig$' | grep -iE "$1" | head -1 || true
 }
 
 download_url() {
