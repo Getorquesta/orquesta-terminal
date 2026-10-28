@@ -14,7 +14,7 @@ function card(over: Record<string, unknown> = {}) {
   return {
     id: `k_${Math.random().toString(36).slice(2, 9)}`,
     text: 'Refactor the auth middleware',
-    column: 'backlog',
+    column: 'todo',
     tags: [],
     createdAt: 1700000000000,
     order: 0,
@@ -90,18 +90,27 @@ async function openBoard(page: Page) {
   await expect(page.getByTestId('kanban-board')).toBeVisible({ timeout: 5_000 })
 }
 
+/** Open a card's detail drawer — where output, suggestions, edit and rework live. */
+async function openCard(page: Page, column: string) {
+  await page.getByTestId(`kanban-column-${column}`).getByTestId('kanban-card').first().locator('p').first().click()
+  await expect(page.getByTestId('kanban-drawer')).toBeVisible()
+}
+
+/** Prompts typed into a pane only become cards with capture switched on. */
+const withCapture = `try { localStorage.setItem('orquesta-kanban-capture', '1') } catch (e) {}`
+
 test.beforeEach(async ({ page }) => {
   await page.addInitScript(TAURI_MOCK_SCRIPT)
 })
 
 // ── Shell ───────────────────────────────────────────────────────────────────
 
-test('board toggle opens the five-column board', async ({ page }) => {
+test('board toggle opens the four-column board', async ({ page }) => {
   await page.goto('/')
   await page.waitForSelector('header', { state: 'visible' })
   await openBoard(page)
 
-  for (const col of ['backlog', 'queued', 'running', 'review', 'done']) {
+  for (const col of ['todo', 'running', 'review', 'done']) {
     await expect(page.getByTestId(`kanban-column-${col}`)).toBeVisible()
   }
   await expect(page.getByText('Prompt board')).toBeVisible()
@@ -136,11 +145,11 @@ test('new prompt adds one card per paragraph', async ({ page }) => {
   await page.getByTestId('kanban-composer').fill('First prompt here\n\nSecond prompt here')
   await page.getByTestId('kanban-composer-submit').click()
 
-  const backlog = page.getByTestId('kanban-column-backlog')
-  await expect(backlog.getByTestId('kanban-card')).toHaveCount(2)
-  await expect(page.getByTestId('count-backlog')).toHaveText('2')
-  await expect(backlog.getByText('First prompt here')).toBeVisible()
-  await expect(backlog.getByText('Second prompt here')).toBeVisible()
+  const todo = page.getByTestId('kanban-column-todo')
+  await expect(todo.getByTestId('kanban-card')).toHaveCount(2)
+  await expect(page.getByTestId('count-todo')).toHaveText('2')
+  await expect(todo.getByText('First prompt here')).toBeVisible()
+  await expect(todo.getByText('Second prompt here')).toBeVisible()
 })
 
 test('blank composer input adds nothing', async ({ page }) => {
@@ -151,7 +160,7 @@ test('blank composer input adds nothing', async ({ page }) => {
   await page.getByTestId('kanban-new-prompt').click()
   await page.getByTestId('kanban-composer').fill('   \n\n  ')
   await page.getByTestId('kanban-composer-submit').click()
-  await expect(page.getByTestId('count-backlog')).toHaveText('0')
+  await expect(page.getByTestId('count-todo')).toHaveText('0')
 })
 
 test('cards survive a reload', async ({ page }) => {
@@ -161,7 +170,7 @@ test('cards survive a reload', async ({ page }) => {
   await page.getByTestId('kanban-new-prompt').click()
   await page.getByTestId('kanban-composer').fill('Persisted prompt')
   await page.getByTestId('kanban-composer-submit').click()
-  await expect(page.getByTestId('count-backlog')).toHaveText('1')
+  await expect(page.getByTestId('count-todo')).toHaveText('1')
 
   await page.reload()
   await page.waitForSelector('header', { state: 'visible' })
@@ -180,7 +189,7 @@ test('running a card with no terminal open explains why it cannot', async ({ pag
   await page.getByTestId('card-run').first().click()
   await expect(page.getByTestId('kanban-toast')).toContainText('No terminal open')
   // The card stays put rather than pretending to run.
-  await expect(page.getByTestId('count-backlog')).toHaveText('1')
+  await expect(page.getByTestId('count-todo')).toHaveText('1')
   await expect(page.getByTestId('count-running')).toHaveText('0')
 })
 
@@ -217,19 +226,20 @@ test('approve moves a reviewed card to done', async ({ page }) => {
   await expect(page.getByTestId('count-done')).toHaveText('1')
 })
 
-test('rework sends the card back to queued with the feedback attached', async ({ page }) => {
+test('rework sends the card back to To do with the feedback attached', async ({ page }) => {
   await page.addInitScript(seed([card({ text: 'Half right', column: 'review', paneName: 'claude' })]))
   await page.goto('/')
   await page.waitForSelector('header', { state: 'visible' })
   await openBoard(page)
 
+  await openCard(page, 'review')
   await page.getByTestId('card-rework').click()
   await page.getByPlaceholder('What should the agent change?').fill('Cover the timeout case too')
   await page.getByRole('button', { name: /Send back/ }).click()
 
   await expect(page.getByTestId('count-review')).toHaveText('0')
-  await expect(page.getByTestId('count-queued')).toHaveText('1')
-  await expect(page.getByTestId('kanban-column-queued')).toContainText('Cover the timeout case too')
+  await expect(page.getByTestId('count-todo')).toHaveText('1')
+  await expect(page.getByTestId('kanban-column-todo')).toContainText('Cover the timeout case too')
 })
 
 test('the Board button badges how many results await approval', async ({ page }) => {
@@ -263,10 +273,10 @@ test('deleting a card removes it', async ({ page }) => {
   await page.waitForSelector('header', { state: 'visible' })
   await openBoard(page)
 
-  await expect(page.getByTestId('count-backlog')).toHaveText('1')
+  await expect(page.getByTestId('count-todo')).toHaveText('1')
   await page.getByTestId('kanban-card').first().hover()
   await page.locator('[title="Delete card"]').first().click()
-  await expect(page.getByTestId('count-backlog')).toHaveText('0')
+  await expect(page.getByTestId('count-todo')).toHaveText('0')
 })
 
 test('drag and drop moves a card between columns', async ({ page }) => {
@@ -304,7 +314,7 @@ test('dragging into Running with no agent leaves the card in place', async ({ pa
   await dragCardToColumn(page, 'k_noagent', 'running')
   await expect(page.getByTestId('kanban-toast')).toContainText('No terminal open')
   await expect(page.getByTestId('count-running')).toHaveText('0')
-  await expect(page.getByTestId('count-backlog')).toHaveText('1')
+  await expect(page.getByTestId('count-todo')).toHaveText('1')
 })
 
 // ── The live loop: agent works, then goes quiet ─────────────────────────────
@@ -343,6 +353,7 @@ test('a card follows its agent: running while it works, review when it goes quie
 const asAgentPane = `try { localStorage.setItem('orq-term-settings', JSON.stringify({ cli: {}, defaultCli: 'claude' })) } catch (e) {}`
 
 test('a prompt typed straight into an agent pane shows up as running', async ({ page }) => {
+  await page.addInitScript(withCapture)
   await page.addInitScript(asAgentPane)
   await page.goto('/')
   await page.waitForSelector('header', { state: 'visible' })
@@ -364,6 +375,7 @@ test('a prompt typed straight into an agent pane shows up as running', async ({ 
 })
 
 test('typing an answer to a card already running adds nothing', async ({ page }) => {
+  await page.addInitScript(withCapture)
   await page.addInitScript(asAgentPane)
   await page.addInitScript(seed([card({ id: 'k_own', text: 'Owns the pane' })]))
   await page.goto('/')
@@ -384,6 +396,7 @@ test('typing an answer to a card already running adds nothing', async ({ page })
 })
 
 test('shell panes do not turn every command into a card', async ({ page }) => {
+  await page.addInitScript(withCapture)
   await page.goto('/')            // default pane type is shell
   await page.waitForSelector('header', { state: 'visible' })
   await openLivePane(page)
@@ -438,7 +451,7 @@ test('a second card will not pile onto a pane that is already running one', asyn
   await page.locator('[data-card-id="k_second"]').getByTestId('card-run').click()
   await expect(page.getByTestId('kanban-toast')).toContainText('already running')
   await expect(page.getByTestId('count-running')).toHaveText('1')
-  await expect(page.getByTestId('count-backlog')).toHaveText('1')
+  await expect(page.getByTestId('count-todo')).toHaveText('1')
 })
 
 test('dispatching to a pane whose session ended is refused, not swallowed', async ({ page }) => {
@@ -457,7 +470,7 @@ test('dispatching to a pane whose session ended is refused, not swallowed', asyn
 
   await expect(page.getByTestId('kanban-toast')).toContainText('no live session')
   await expect(page.getByTestId('count-running')).toHaveText('0')
-  await expect(page.getByTestId('count-backlog')).toHaveText('1')
+  await expect(page.getByTestId('count-todo')).toHaveText('1')
   // …and nothing was written to the dead PTY.
   expect(await ptyWrites(page)).toEqual([])
 })
@@ -482,6 +495,7 @@ async function runUntilReview(page: Page) {
   await expect(page.getByTestId('count-running')).toHaveText('1', { timeout: 10_000 })
   await emit(page, 'session:output', { sessionId: await liveSessionId(page), data: AGENT_TAIL })
   await expect(page.getByTestId('count-review')).toHaveText('1', { timeout: 10_000 })
+  await openCard(page, 'review')
 }
 
 test('a reviewed card carries back what the agent actually said', async ({ page }) => {
@@ -494,8 +508,7 @@ test('a reviewed card carries back what the agent actually said', async ({ page 
   // The question is surfaced on its own — it's the decision waiting on a human.
   await expect(page.getByTestId('card-suggestion')).toContainText('Should I stop Waydroid or the dev server?')
 
-  // The fuller output is one click away, with the TUI chrome stripped out.
-  await page.getByRole('button', { name: 'Agent output' }).click()
+  // The fuller output sits right under it, with the TUI chrome stripped out.
   const out = page.getByTestId('card-result')
   await expect(out).toContainText('Swap is exhausted')
   await expect(out).not.toContainText('for shortcuts')
@@ -515,25 +528,26 @@ test('the agent’s suggestion can be queued as its own prompt', async ({ page }
   await box.fill('Stop Waydroid with waydroid session stop')
   await page.getByTestId('card-queue-confirm').click()
 
-  await expect(page.getByTestId('count-queued')).toHaveText('1')
-  const queued = page.getByTestId('kanban-column-queued')
-  await expect(queued).toContainText('Stop Waydroid with waydroid session stop')
-  await expect(queued).toContainText('suggested')
+  await expect(page.getByTestId('count-todo')).toHaveText('1')
+  const todo2 = page.getByTestId('kanban-column-todo')
+  await expect(todo2).toContainText('Stop Waydroid with waydroid session stop')
+  await expect(todo2).toContainText('suggested')
   // The original stays in Review — queueing a follow-up is not approving it.
   await expect(page.getByTestId('count-review')).toHaveText('1')
 })
 
-test('a queued prompt can be rewritten in place', async ({ page }) => {
-  await page.addInitScript(seed([card({ id: 'k_edit', text: 'Close Waydroid?', column: 'queued' })]))
+test('a waiting prompt can be rewritten in place', async ({ page }) => {
+  await page.addInitScript(seed([card({ id: 'k_edit', text: 'Close Waydroid?', column: 'todo' })]))
   await page.goto('/')
   await page.waitForSelector('header', { state: 'visible' })
   await openBoard(page)
 
+  await openCard(page, 'todo')
   await page.getByTestId('card-edit-open').click()
   await page.getByTestId('card-edit').fill('Close Waydroid with waydroid session stop')
   await page.getByTestId('card-edit').press('ControlOrMeta+Enter')
 
-  await expect(page.getByTestId('kanban-column-queued')).toContainText('Close Waydroid with waydroid session stop')
+  await expect(page.getByTestId('kanban-column-todo')).toContainText('Close Waydroid with waydroid session stop')
 
   // …and the rewrite is what's stored, so it's the rewrite that gets sent.
   // (Checked in localStorage rather than across a reload: the seed init script
@@ -548,6 +562,7 @@ test('a queued prompt can be rewritten in place', async ({ page }) => {
 })
 
 test('a real prompt typed into a shell pane still lands on the board', async ({ page }) => {
+  await page.addInitScript(withCapture)
   await page.goto('/')            // default pane type is shell
   await page.waitForSelector('header', { state: 'visible' })
   await openLivePane(page)
@@ -563,6 +578,7 @@ test('a real prompt typed into a shell pane still lands on the board', async ({ 
 })
 
 test('a pasted block of prose becomes one card, not one per line', async ({ page }) => {
+  await page.addInitScript(withCapture)
   // How a board reaches 700 cards in a day: the parser stripped the paste
   // brackets and treated every newline inside the block as Enter, and the
   // "one running card per pane" guard read a ref that only catches up on the
@@ -627,10 +643,11 @@ test('the answer survives an agent that repaints its frame hundreds of times', a
   expect(repaints.length).toBeGreaterThan(8000)
 
   await expect(page.getByTestId('count-review')).toHaveText('1', { timeout: 25_000 })
+  await openCard(page, 'review')
   await expect(page.getByTestId('card-suggestion')).toContainText('Should I stop Waydroid or the dev server?')
 })
 
-test('a list of "quickest wins" becomes one queued card per win', async ({ page }) => {
+test('a list of "quickest wins" becomes one To do card per win', async ({ page }) => {
   // Real output, verbatim: agents just as often end with a list of actions as
   // with a question, and three quickest wins are three pieces of work.
   await page.addInitScript(seed([card({ id: 'k_wins', text: 'check the ram' })]))
@@ -650,6 +667,7 @@ test('a list of "quickest wins" becomes one queued card per win', async ({ page 
       'and kill the next-server dev server if that project is not active.\r\n',
   })
   await expect(page.getByTestId('count-review')).toHaveText('1', { timeout: 25_000 })
+  await openCard(page, 'review')
 
   // Three items — and the parenthetical's comma did not split one in half.
   const items = page.getByTestId('card-suggestion')
@@ -658,7 +676,7 @@ test('a list of "quickest wins" becomes one queued card per win', async ({ page 
   await expect(items.nth(2)).toContainText('kill the next-server dev server')
 
   await page.getByTestId('card-queue-all').click()
-  await expect(page.getByTestId('count-queued')).toHaveText('3')
+  await expect(page.getByTestId('count-todo')).toHaveText('3')
 })
 
 test('the TUI footer never wins over what the agent offered to do', async ({ page }) => {
@@ -692,6 +710,7 @@ test('the TUI footer never wins over what the agent offered to do', async ({ pag
     ].join('\r\n') + '\r\n',
   })
   await expect(page.getByTestId('count-review')).toHaveText('1', { timeout: 25_000 })
+  await openCard(page, 'review')
 
   const items = page.getByTestId('card-suggestion')
   await expect(items).toHaveCount(1)
@@ -699,10 +718,72 @@ test('the TUI footer never wins over what the agent offered to do', async ({ pag
   await expect(items.first()).not.toContainText('bypass permissions')
 
   // And the status furniture stays out of the output snapshot too.
-  await page.getByRole('button', { name: 'Agent output' }).click()
   const out = page.getByTestId('card-result')
   await expect(out).toContainText('qemu-system-x86')
   await expect(out).not.toContainText('bypass permissions')
   await expect(out).not.toContainText('Baked for')
   await expect(out).not.toContainText('Transcript saving')
+})
+
+// ── Keeping a big board usable ──────────────────────────────────────────────
+
+test('typing into a pane adds no card while capture is off (the default)', async ({ page }) => {
+  await page.addInitScript(asAgentPane)
+  await page.goto('/')
+  await page.waitForSelector('header', { state: 'visible' })
+  await openLivePane(page)
+
+  await page.locator('.xterm-helper-textarea').first().focus()
+  await page.keyboard.type('check the memory usage on prod')
+  await page.keyboard.press('Enter')
+
+  await openBoard(page)
+  await expect(page.getByTestId('kanban-capture-toggle')).not.toBeChecked()
+  await expect(page.getByTestId('count-running')).toHaveText('0')
+})
+
+test('old auto-captured noise is cleared once, real cards stay', async ({ page }) => {
+  await page.addInitScript(seed([
+    card({ text: 'proceda', column: 'review', tags: ['typed'] }),
+    card({ text: 'ping', column: 'done', tags: ['typed'] }),
+    card({ text: 'Mine, still waiting', column: 'queued' }),
+    card({ text: 'Mine, to review', column: 'review' }),
+  ]))
+  await page.goto('/')
+  await page.waitForSelector('header', { state: 'visible' })
+  await openBoard(page)
+
+  await expect(page.getByTestId('count-todo')).toHaveText('1')
+  await expect(page.getByTestId('count-review')).toHaveText('1')
+  await expect(page.getByTestId('count-done')).toHaveText('0')
+})
+
+test('a long column renders a page at a time', async ({ page }) => {
+  await page.addInitScript(seed(Array.from({ length: 75 }, (_, i) => card({ text: `Prompt number ${i}`, order: i }))))
+  await page.goto('/')
+  await page.waitForSelector('header', { state: 'visible' })
+  await openBoard(page)
+
+  const col = page.getByTestId('kanban-column-todo')
+  await expect(page.getByTestId('count-todo')).toHaveText('75')
+  await expect(col.getByTestId('kanban-card')).toHaveCount(30)
+  await page.getByTestId('kanban-more-todo').click()
+  await expect(col.getByTestId('kanban-card')).toHaveCount(75)
+})
+
+test('Review can be cleared in one go, with a confirming second click', async ({ page }) => {
+  await page.addInitScript(seed([
+    card({ text: 'A', column: 'review' }),
+    card({ text: 'B', column: 'review' }),
+    card({ text: 'C', column: 'review' }),
+  ]))
+  await page.goto('/')
+  await page.waitForSelector('header', { state: 'visible' })
+  await openBoard(page)
+
+  await page.getByTestId('kanban-clear-review').click()
+  await expect(page.getByTestId('count-review')).toHaveText('3')
+  await expect(page.getByTestId('kanban-clear-review')).toContainText('Clear 3?')
+  await page.getByTestId('kanban-clear-review').click()
+  await expect(page.getByTestId('count-review')).toHaveText('0')
 })
