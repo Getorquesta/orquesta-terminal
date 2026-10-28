@@ -1,24 +1,50 @@
 name: release
 
-# Publishes the Linux installer to the GitHub Releases page.
-# Uses ONLY first-party actions/* + the preinstalled `gh` CLI, so it runs
-# even if the org restricts third-party GitHub Actions.
-# Windows/macOS users use the web version (cloud mode) for now.
+# Builds the signed installers for a version tag and uploads them to a draft
+# GitHub Release:
+#   Linux    .AppImage (+ .sig) and .deb
+#   Windows  NSIS -setup.exe (+ .sig)
+#   macOS    universal .dmg, plus the .app.tar.gz (+ .sig) the updater swaps in
 #
-# Trigger by pushing a version tag, e.g.:  git tag v0.1.9 && git push origin v0.1.9
+# Trigger by pushing a signed version tag, e.g.:
+#   git tag -s -m v0.1.38 v0.1.38 && git push origin v0.1.38
+#
+# Hardening (security protocol S16 §3.3):
+# - Every signing secret lives in the `release` environment, which only `v*`
+#   tags may deploy to and which waits for a required reviewer. The three build
+#   jobs ask for it; nothing else in this repo can read those secrets.
+# - The build jobs get a read-only token and never write to the repo. Only
+#   `publish`, which holds no secrets, gets `contents: write`.
+# - Actions are pinned to full commit SHAs (tag in the trailing comment) and
+#   are first-party actions/* only.
+# - `npm ci --ignore-scripts`: no dependency install script runs next to the
+#   signing keys. build.yml installs the same way, so a PR proves it still builds.
+# - No workflow_dispatch: a release can only come from a tag.
+#
+# The repo secrets the build jobs use, all in the `release` environment:
+#   TAURI_SIGNING_PRIVATE_KEY(_PASSWORD)  updater signature (all platforms)
+#   APPLE_CERTIFICATE                     base64 of the Developer ID .p12
+#   APPLE_CERTIFICATE_PASSWORD            .p12 export password
+#   APPLE_SIGNING_IDENTITY                "Developer ID Application: … (TEAMID)"
+#   APPLE_TEAM_ID                         Apple Developer team id
+#   APPLE_API_ISSUER                      App Store Connect API issuer id
+#   APPLE_API_KEY                         App Store Connect API key id
+#   APPLE_API_KEY_P8                      base64 of the AuthKey_*.p8
 on:
   push:
     tags: ['v*']
-  workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  release-linux:
+  linux:
     runs-on: ubuntu-24.04
+    environment: release
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       - name: Install system dependencies
         run: |
@@ -35,21 +61,18 @@ jobs:
             patchelf \
             file wget curl
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 20
           cache: npm
 
       - name: Install JS dependencies
-        run: npm ci
+        run: npm ci --ignore-scripts
 
-      # Build the full Tauri bundle (.AppImage + .deb). `npm run build`
-      # runs `tauri build`, which runs next-build via beforeBuildCommand.
+      # `npm run build` runs `tauri build`, which runs next-build via
+      # beforeBuildCommand and signs the AppImage for the in-app updater.
       - name: Build Tauri bundle
         env:
-          # Signs the AppImage so the in-app updater will accept it. Without
-          # these the build still succeeds — it just ships no .sig, and
-          # updater-manifest leaves Linux out of latest.json.
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: npm run build
@@ -62,22 +85,141 @@ jobs:
             -exec cp {} dist-release/ \;
           ls -la dist-release
 
-      # Create the draft GitHub Release for this tag (if no other job made it
-      # yet) and upload the Linux installers. `gh` is preinstalled on the runner.
-      - name: Publish draft release
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: installer-linux
+          path: dist-release/*
+          if-no-files-found: error
+          retention-days: 3
+
+  windows:
+    runs-on: windows-latest
+    environment: release
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install JS dependencies
+        run: npm ci --ignore-scripts
+
+      # Rust (stable + MSVC) and WebView2 are preinstalled on windows-latest.
+      # NSIS needs no extra tooling (Tauri fetches it), unlike MSI which needs WiX.
+      - name: Build Tauri bundle (NSIS)
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: npx tauri build --bundles nsis
+
+      - name: Collect installer
+        shell: bash
         run: |
-          TAG="${GITHUB_REF_NAME}"
-          # The three release jobs finish in any order, so whichever gets here
-          # first creates the draft; the rest just wait for it to exist. (This
-          # used to be a delete+create in the Linux job, which raced: v0.1.18's
-          # macOS upload hit "release not found".)
-          for i in $(seq 1 30); do
-            gh release view "$TAG" >/dev/null 2>&1 && break
-            gh release create "$TAG" --draft \
-              --title "Orquesta Terminal $TAG" \
-              --notes "Installers below (.AppImage / .deb / .exe / .dmg)." && break
-            sleep 10
-          done
+          mkdir -p dist-release
+          find src-tauri/target/release/bundle/nsis \
+            \( -name '*-setup.exe' -o -name '*-setup.exe.sig' \) -exec cp {} dist-release/ \;
+          ls -la dist-release
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: installer-windows
+          path: dist-release/*
+          if-no-files-found: error
+          retention-days: 3
+
+  macos:
+    runs-on: macos-14
+    environment: release
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install JS dependencies
+        run: npm ci --ignore-scripts
+
+      # Rust is preinstalled; add both arches for one universal binary that runs
+      # on Apple Silicon and Intel Macs.
+      - name: Add Rust targets (universal)
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+      # Decode the App Store Connect API key (.p8) to a file for notarization.
+      - name: Write App Store Connect API key
+        env:
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+        run: |
+          echo "$APPLE_API_KEY_P8" | base64 --decode > "$RUNNER_TEMP/authkey.p8"
+
+      # `tauri build` code-signs with the Developer ID cert and notarizes via the
+      # API key, both triggered by the APPLE_* env vars. TAURI_SIGNING_* is the
+      # updater's own signature, unrelated to Apple codesigning.
+      - name: Build signed + notarized bundle (universal .dmg)
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_PATH: ${{ runner.temp }}/authkey.p8
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        # `app` produces the updater artifact; `dmg` is what people download.
+        run: npx tauri build --target universal-apple-darwin --bundles app,dmg
+
+      - name: Remove App Store Connect API key
+        if: always()
+        run: rm -f "$RUNNER_TEMP/authkey.p8"
+
+      - name: Collect installer
+        shell: bash
+        run: |
+          mkdir -p dist-release
+          find src-tauri/target \
+            \( -name '*.dmg' -o -name '*.app.tar.gz' -o -name '*.app.tar.gz.sig' \) \
+            -exec cp {} dist-release/ \;
+          ls -la dist-release
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: installer-macos
+          path: dist-release/*
+          if-no-files-found: error
+          retention-days: 3
+
+  # Uploads whatever the platform jobs produced. It holds no secrets, so it is
+  # the only job allowed to write. A platform whose build failed is left out;
+  # updater-manifest then leaves it out of latest.json too.
+  publish:
+    needs: [linux, windows, macos]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: installer-*
+          path: dist-release
+          merge-multiple: true
+
+      - name: Upload to the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          ls -la dist-release
+          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --draft \
+            --title "Orquesta Terminal $TAG" \
+            --notes "Installers below (.AppImage / .deb / .exe / .dmg)."
           gh release upload "$TAG" dist-release/* --clobber
