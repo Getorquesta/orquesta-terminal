@@ -10,24 +10,27 @@
  * quiet — that quiet edge is what auto-promotes a card into Review.
  *
  * Columns:
- *   backlog → queued → running → review → done
+ *   todo → running → review → done
  *
  * The interesting one is `review`: an agent finishing is NOT the end of the
  * task, it's a request for a human decision. Cards land there and wait for
- * Approve (→ done) or Rework (→ queued, with the feedback appended so the
+ * Approve (→ done) or Rework (→ todo, with the feedback appended so the
  * next dispatch carries it).
+ *
+ * Prompts typed straight into a pane only become cards when auto-capture is on
+ * (off by default): left on, every "yes", "ping" and paste turned into a card
+ * and boards drowned in hundreds of them stuck in Review.
  */
 
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import type { PaneInfo } from '@/components/features/AgentGrid'
 import { cleanOutput, pickSuggestions } from '@/lib/ptyText'
 
-export const COLUMNS = ['backlog', 'queued', 'running', 'review', 'done'] as const
+export const COLUMNS = ['todo', 'running', 'review', 'done'] as const
 export type ColumnId = (typeof COLUMNS)[number]
 
 export const COLUMN_META: Record<ColumnId, { label: string; hint: string; accent: string }> = {
-  backlog: { label: 'Backlog', hint: 'Prompts you haven’t sent yet', accent: 'zinc' },
-  queued: { label: 'Queued', hint: 'Assigned to an agent, waiting', accent: 'amber' },
+  todo: { label: 'To do', hint: 'Prompts waiting to be sent — Run one or drag it into Running', accent: 'zinc' },
   running: { label: 'Running', hint: 'Live in a terminal right now', accent: 'cyan' },
   review: { label: 'Review', hint: 'Agent finished — approve or rework', accent: 'violet' },
   done: { label: 'Done', hint: 'Approved', accent: 'emerald' },
@@ -75,8 +78,13 @@ export interface KanbanState {
   v: number
 }
 
-const VERSION = 1
+const VERSION = 2
 const storageKey = (scope: string) => `orquesta-kanban-${scope || 'standalone'}`
+const CAPTURE_KEY = 'orquesta-kanban-capture'
+/** Approved cards kept on disk; older ones fall off so the board never bloats. */
+const DONE_KEEP = 200
+/** Agent output kept per card — the tail is where the answer is. */
+const RESULT_MAX = 4000
 
 function newId(): string {
   return `k_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`
@@ -114,13 +122,26 @@ function load(scope: string): KanbanCard[] {
     if (!raw) return []
     const parsed = JSON.parse(raw) as KanbanState
     if (!parsed || !Array.isArray(parsed.cards)) return []
+    let cards = parsed.cards
+    // v1 auto-captured every line typed into a pane; what's left of that is
+    // finished noise. Drop it once, keeping a copy under a side key.
+    if ((parsed.v ?? 1) < 2) {
+      const noise = (c: KanbanCard) => c.tags?.includes('typed') && (c.column === 'review' || c.column === 'done')
+      if (cards.some(noise)) {
+        try { localStorage.setItem(`${storageKey(scope)}-v1-backup`, raw) } catch {}
+        cards = cards.filter((c) => !noise(c))
+      }
+    }
     // A card left mid-flight by a reload can't still be running — no PTY is
     // attached to it any more. Park it in Review so the run isn't lost silently.
-    return parsed.cards.map((c) => {
+    return cards.map((c) => {
       // v1 stored a single `suggestion`; it's a list now (an agent's closing
       // advice is usually several separate things to do).
       const legacy = (c as KanbanCard & { suggestion?: string }).suggestion
-      const migrated = legacy && !c.suggestions ? { ...c, suggestions: [legacy] } : c
+      let migrated = legacy && !c.suggestions ? { ...c, suggestions: [legacy] } : c
+      // Backlog and Queued were one idea in two columns; they're To do now.
+      const col = migrated.column as string
+      if (col === 'backlog' || col === 'queued') migrated = { ...migrated, column: 'todo' }
       return migrated.column === 'running'
         ? { ...migrated, column: 'review' as ColumnId, finishedAt: migrated.finishedAt ?? Date.now() }
         : migrated
@@ -149,7 +170,11 @@ export interface UseKanban {
   queueSuggestion: (id: string, text: string) => string | null
   approve: (id: string) => void
   rework: (id: string, feedback: string) => void
-  clearDone: () => void
+  /** Remove every card in a column (Done's trash, Review's bulk clear). */
+  clearColumn: (col: ColumnId) => void
+  /** Whether prompts typed straight into a pane become cards. */
+  captureEnabled: boolean
+  setCaptureEnabled: (on: boolean) => void
 }
 
 export function useKanban({
@@ -186,16 +211,48 @@ export function useKanban({
     setCardsScope(scope)
   }, [scope])
 
+  const [captureEnabled, setCaptureState] = useState(false)
+  const captureRef = useRef(false)
+  useEffect(() => {
+    try { captureRef.current = localStorage.getItem(CAPTURE_KEY) === '1' } catch {}
+    setCaptureState(captureRef.current)
+  }, [])
+  const setCaptureEnabled = useCallback((on: boolean) => {
+    captureRef.current = on
+    setCaptureState(on)
+    try { localStorage.setItem(CAPTURE_KEY, on ? '1' : '0') } catch {}
+  }, [])
+
   // Persist only when the cards in hand belong to the scope we'd write them
   // under. That covers two cases the naive version got wrong: the pre-hydration
   // render (empty board) and the render right after a project switch (project
   // A's cards, project B's key) — both would clobber a stored board.
+  // Debounced: a running card ticks state often and the board is a few hundred
+  // KB of JSON at worst; a reload or close still flushes the last write.
+  const pendingWrite = useRef<(() => void) | null>(null)
   useEffect(() => {
     if (cardsScope !== scope) return
-    try {
-      localStorage.setItem(storageKey(scope), JSON.stringify({ v: VERSION, cards } satisfies KanbanState))
-    } catch {}
+    const write = () => {
+      pendingWrite.current = null
+      const done = cards.filter((c) => c.column === 'done').sort((a, b) => a.order - b.order)
+      const drop = new Set(done.slice(DONE_KEEP).map((c) => c.id))
+      const kept = drop.size ? cards.filter((c) => !drop.has(c.id)) : cards
+      try {
+        localStorage.setItem(storageKey(scope), JSON.stringify({ v: VERSION, cards: kept } satisfies KanbanState))
+      } catch {}
+    }
+    pendingWrite.current = write
+    const t = setTimeout(write, 250)
+    return () => clearTimeout(t)
   }, [cards, scope, cardsScope])
+  // A scope switch, unmount or reload has no next write to supersede the
+  // pending one, so it lands now.
+  useEffect(() => () => pendingWrite.current?.(), [scope])
+  useEffect(() => {
+    const flush = () => pendingWrite.current?.()
+    window.addEventListener('beforeunload', flush)
+    return () => window.removeEventListener('beforeunload', flush)
+  }, [])
 
   const byColumn = useMemo(() => {
     const out = Object.fromEntries(COLUMNS.map((c) => [c, [] as KanbanCard[]])) as Record<ColumnId, KanbanCard[]>
@@ -213,12 +270,12 @@ export function useKanban({
       {
         id: newId(),
         text: body,
-        column: 'backlog',
+        column: 'todo',
         paneId: pane?.id,
         paneName: pane?.name,
         tags: opts?.tags ?? [],
         createdAt: Date.now(),
-        order: prev.filter((c) => c.column === 'backlog').length,
+        order: prev.filter((c) => c.column === 'todo').length,
       },
     ])
   }, [])
@@ -304,6 +361,7 @@ export function useKanban({
    * lines long enough to read as a sentence — or an outright question — count.
    */
   const capture = useCallback((paneId: string, text: string) => {
+    if (!captureRef.current) return
     const pane = panesRef.current.find((p) => p.id === paneId)
     if (!pane) return
     if (pane.cliType === 'shell' && !looksLikePrompt(text)) return
@@ -338,7 +396,7 @@ export function useKanban({
    *
    * An agent finishing with "should I close Waydroid or the dev server?" has
    * handed you the next task — it just isn't written down anywhere. This writes
-   * it down, in Queued, still pinned to the pane that asked, so running it
+   * it down, in To do, still pinned to the pane that asked, so running it
    * answers the question in the session that's holding it.
    */
   const queueSuggestion = useCallback((id: string, text: string): string | null => {
@@ -351,12 +409,12 @@ export function useKanban({
       {
         id: cardId,
         text: body,
-        column: 'queued',
+        column: 'todo',
         paneId: src?.paneId,
         paneName: src?.paneName,
         tags: ['suggested'],
         createdAt: Date.now(),
-        order: topOrder(prev, 'queued'),
+        order: topOrder(prev, 'todo'),
       },
     ])
     return cardId
@@ -371,9 +429,10 @@ export function useKanban({
     setCards((prev) => {
       const target = prev.find((c) => c.id === id)
       if (!target) return prev
-      // Leaving Running/Review resets the run bookkeeping so a re-dispatch is clean.
+      // Back to To do resets the run bookkeeping so a re-dispatch is clean; the
+      // pane pin stays, it's a choice you made.
       const reset: Partial<KanbanCard> =
-        to === 'backlog' ? { paneId: undefined, paneName: undefined, dispatchedAt: undefined, finishedAt: undefined, sawRunning: false } : {}
+        to === 'todo' ? { dispatchedAt: undefined, finishedAt: undefined, sawRunning: false } : {}
       const others = prev.filter((c) => c.id !== id)
       const col = others.filter((c) => c.column === to).sort((a, b) => a.order - b.order)
       const at = beforeId ? col.findIndex((c) => c.id === beforeId) : -1
@@ -396,17 +455,17 @@ export function useKanban({
 
   const rework = useCallback((id: string, feedback: string) => {
     setCards((prev) => {
-      const order = topOrder(prev, 'queued')
+      const order = topOrder(prev, 'todo')
       return prev.map((c) =>
         c.id === id
-          ? { ...c, column: 'queued', feedback: feedback.trim() || undefined, sawRunning: false, order }
+          ? { ...c, column: 'todo', feedback: feedback.trim() || undefined, sawRunning: false, order }
           : c,
       )
     })
   }, [])
 
-  const clearDone = useCallback(() => {
-    setCards((prev) => prev.filter((c) => c.column !== 'done'))
+  const clearColumn = useCallback((col: ColumnId) => {
+    setCards((prev) => prev.filter((c) => c.column !== col))
   }, [])
 
   // ── The live wire: pane busy/idle drives Running → Review ────────────────
@@ -425,9 +484,9 @@ export function useKanban({
         const pane = panes.find((p) => p.id === c.paneId)
         if (!pane) {
           // The pane was closed under it — the run is unrecoverable, send it back
-          // to Queued (unassigned) rather than leaving a card that can never finish.
+          // to To do (unassigned) rather than leaving a card that can never finish.
           changed = true
-          return { ...c, column: 'queued' as ColumnId, paneId: undefined, sawRunning: false }
+          return { ...c, column: 'todo' as ColumnId, paneId: undefined, sawRunning: false }
         }
         if (pane.status === 'running') {
           if (c.sawRunning) return c
@@ -439,7 +498,7 @@ export function useKanban({
         changed = true
         // Snapshot what the agent left on screen NOW — the pane keeps writing,
         // and by the time a human opens the card the answer may be scrolled off.
-        const result = cleanOutput(tailRef.current?.(pane.id) ?? '')
+        const result = cleanOutput(tailRef.current?.(pane.id) ?? '').slice(-RESULT_MAX)
         const items = pickSuggestions(result)
         return {
           ...c,
@@ -454,5 +513,8 @@ export function useKanban({
     })
   }, [panes, cards])
 
-  return { cards, byColumn, add, update, remove, move, dispatch, capture, queueSuggestion, approve, rework, clearDone }
+  return {
+    cards, byColumn, add, update, remove, move, dispatch, capture, queueSuggestion, approve, rework, clearColumn,
+    captureEnabled, setCaptureEnabled,
+  }
 }
