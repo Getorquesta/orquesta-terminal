@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Orquesta Terminal",
-  "version": "0.1.37",
+  "version": "0.1.38",
   "identifier": "com.orquesta.terminal",
   "build": {
     "beforeDevCommand": "fuser -k 3001/tcp 2>/dev/null; npm run next-dev",
@@ -56,7 +56,7 @@
       "endpoints": [
         "https://github.com/Getorquesta/orquesta-terminal/releases/latest/download/latest.json"
       ],
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEU2Q0UyNDRCM0VENjQ0ODUKUldTRlJOWStTeVRPNWlvRVo0QmsyZkFEUlNlRjMzeVVwNWlKNkpMei9MN2QxTmxOWi9EblJpRE4K"
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDJBMTA5RTY3MzQ5ODY2RTIKUldUaVpwZzBaNTRRS3ZwTW5hU0NEZDRldkZKcGl6c29Ed1NZQWtGM1N1NUJXK1R5R0JNN1FuYjkK"
     }
   }
 }
