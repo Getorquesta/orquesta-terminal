@@ -1,6 +1,6 @@
 name: build
 
-# Uses ONLY first-party actions/* (checkout, setup-node) + shell, so it runs
+# Uses ONLY first-party actions/* pinned by SHA + shell, so it runs
 # even if the org restricts third-party GitHub Actions. Rust is preinstalled
 # on the ubuntu runner image.
 on:
@@ -10,12 +10,19 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# No secrets here: this only proves the bundle still builds, including for
+# pull requests from forks.
+permissions:
+  contents: read
+
 jobs:
   tauri-linux:
     name: Build (Tauri · Linux)
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       - name: Install system dependencies
         run: |
@@ -32,7 +39,7 @@ jobs:
             patchelf \
             file wget curl
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 20
           cache: npm
@@ -41,7 +48,7 @@ jobs:
         run: rustup show && cargo --version
 
       - name: Install JS dependencies
-        run: npm ci
+        run: npm ci --ignore-scripts
 
       - name: Build frontend (static export)
         run: npm run next-build
@@ -62,7 +69,7 @@ jobs:
         run: npx tauri build --config '{"bundle":{"createUpdaterArtifacts":false}}'
 
       - name: Upload bundle artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: orquesta-terminal-linux
           path: |

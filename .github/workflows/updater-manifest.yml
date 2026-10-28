@@ -3,9 +3,10 @@ name: updater-manifest
 # Publishes latest.json — the manifest the in-app updater reads from
 # https://github.com/Getorquesta/orquesta-terminal/releases/latest/download/latest.json
 #
-# It runs when a release is published, i.e. after the three build jobs have
-# uploaded their installers and their .sig files to the draft. Publishing the
-# release is what makes the new version visible to running apps.
+# It runs when a release is published, i.e. after release.yml has uploaded the
+# installers and their .sig files to the draft. Publishing the release is what
+# makes the new version visible to running apps. It needs no secrets: it only
+# reads the .sig files already on the release.
 on:
   release:
     types: [published]
@@ -17,17 +18,22 @@ on:
         required: true
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   manifest:
     runs-on: ubuntu-24.04
+    permissions:
+      contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
+      # The tag goes through env, never interpolated into the script, so a
+      # dispatch input can't inject shell.
       - name: Build and upload latest.json
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          TAG="${{ github.event.inputs.tag || github.event.release.tag_name }}"
-          bash scripts/build-updater-manifest.sh "$TAG"
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.inputs.tag || github.event.release.tag_name }}
+        run: bash scripts/build-updater-manifest.sh "$TAG"
