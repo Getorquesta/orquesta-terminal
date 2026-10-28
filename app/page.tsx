@@ -10,6 +10,7 @@ import pkg from '../package.json'
 import { AgentGrid, type AgentGridHandle, type ImportSpec, type PaneInfo } from '@/components/features/AgentGrid'
 import { KanbanBoard } from '@/components/features/KanbanBoard'
 import { OperatorPanel } from '@/components/features/OperatorPanel'
+import { MeshPanel } from '@/components/features/MeshPanel'
 import { useKanban } from '@/hooks/useKanban'
 import { useHostedAuth, openAuthPage, type HostedAuth } from '@/hooks/useHostedAuth'
 import { CommandPalette, type Command } from '@/components/features/CommandPalette'
@@ -21,7 +22,7 @@ import {
   Cloud, ExternalLink, Loader2, CheckCircle2, AlertCircle, Clock,
   Star, Tag, MessageSquare, Send, Monitor, Puzzle,
   Activity, ScrollText, Server, Layers, Zap, PanelLeft, ArrowRightLeft,
-  Columns3, Search, Bot,
+  Columns3, Search, Bot, Network,
 } from 'lucide-react'
 import { RemoteSessionModal } from '@/components/features/RemoteSessionModal'
 import { UpdateNotice } from '@/components/features/UpdateNotice'
@@ -89,6 +90,7 @@ export default function TerminalWorkspacePage() {
   // unmounting it would kill every PTY the board is supposed to be driving.
   const [boardOpen, setBoardOpen] = useState(false)
   const [operatorOpen, setOperatorOpen] = useState(false)
+  const [meshOpen, setMeshOpen] = useState(false)
   const [panes, setPanes] = useState<PaneInfo[]>([])
   const gridRef = useRef<AgentGridHandle>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
@@ -283,6 +285,14 @@ export default function TerminalWorkspacePage() {
       hint: "chat with your project's agent",
       icon: Bot,
       run: () => setOperatorOpen(o => !o),
+    })
+    list.push({
+      id: 'view-mesh',
+      group: 'Navigate',
+      label: 'Toggle Mesh',
+      hint: 'who may ask whom, live',
+      icon: Network,
+      run: () => setMeshOpen(o => !o),
     })
     list.push({
       id: 'nav-dashboard',
@@ -540,6 +550,21 @@ export default function TerminalWorkspacePage() {
             <span className="hidden sm:inline">Operator</span>
           </button>
 
+          {/* Mesh — the org's agent graph, read-only */}
+          <button
+            onClick={() => setMeshOpen(o => !o)}
+            data-testid="mesh-toggle"
+            className={`flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs transition-colors ${
+              meshOpen
+                ? 'border-sky-500/30 bg-sky-500/10 text-sky-300'
+                : 'border-white/10 bg-white/5 text-zinc-300 hover:bg-white/10 hover:text-white'
+            }`}
+            title="Mesh — which agents may ask which, and what they're asking now"
+          >
+            <Network className="h-3.5 w-3.5" />
+            <span className="hidden sm:inline">Mesh</span>
+          </button>
+
           {/* Kanban mode — the prompt board */}
           <button
             onClick={() => setBoardOpen(o => !o)}
@@ -638,6 +663,18 @@ export default function TerminalWorkspacePage() {
               connecting={hosted.loading}
               onConnect={() => { hosted.loginWithBrowser().catch(() => {}) }}
               onClose={() => setOperatorOpen(false)}
+            />
+          </div>
+        )}
+
+        {/* Mesh — same overlay model: panes stay alive behind it. */}
+        {meshOpen && (
+          <div className="absolute inset-0 z-30 bg-zinc-950">
+            <MeshPanel
+              auth={hosted.auth}
+              connecting={hosted.loading}
+              onConnect={() => { hosted.loginWithBrowser().catch(() => {}) }}
+              onClose={() => setMeshOpen(false)}
             />
           </div>
         )}
