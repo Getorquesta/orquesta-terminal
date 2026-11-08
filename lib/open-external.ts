@@ -19,9 +19,18 @@ function hasTauri(): boolean {
   return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
 }
 
-/** Open an http(s) URL in the real browser. Resolves false when nothing could. */
+/**
+ * What the Tauri command will accept: a web URL, or a `mailto:` for the
+ * "Request a plugin" link. `mailto:` is not open season — `open_external_url`
+ * re-validates it in Rust (see `mailto_is_safe`), because the webview is the
+ * untrusted side of this call and a renderer-side check is a convenience, not
+ * a control.
+ */
+const EXTERNAL_SCHEME = /^(?:https?:\/\/|mailto:)/i
+
+/** Open a URL outside the app. Resolves false when nothing could. */
 export async function openExternal(url: string): Promise<boolean> {
-  if (!/^https?:\/\//i.test(url)) return false
+  if (!EXTERNAL_SCHEME.test(url)) return false
 
   if (hasTauri()) {
     try {
@@ -37,11 +46,18 @@ export async function openExternal(url: string): Promise<boolean> {
     return false
   }
 
+  // A plain browser opens `mailto:` by navigating, not in a new window — a
+  // popup-blocked `window.open` would report failure for a link that works.
+  if (/^mailto:/i.test(url)) {
+    window.location.href = url
+    return true
+  }
   return Boolean(window.open(url, '_blank', 'noopener,noreferrer'))
 }
 
 /**
- * Route every `target="_blank"` link on the page through `openExternal`.
+ * Route every `target="_blank"` link — and every `mailto:` — through
+ * `openExternal`.
  *
  * Deliberately one delegated listener rather than an `onClick` on each anchor:
  * there were ten such links across five components when this was written, and
@@ -56,10 +72,14 @@ export function installExternalLinkHandler(): () => void {
 
   const onClick = (e: MouseEvent) => {
     if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.altKey) return
-    const anchor = (e.target as Element | null)?.closest?.('a[target="_blank"]')
+    // `mailto:` anchors carry no `target="_blank"` — a mail link that opens a
+    // blank tab is wrong in a browser — so they are matched on the href.
+    const anchor = (e.target as Element | null)?.closest?.(
+      'a[target="_blank"], a[href^="mailto:"]'
+    )
     if (!anchor) return
     const href = anchor.getAttribute('href') || ''
-    if (!/^https?:\/\//i.test(href)) return
+    if (!EXTERNAL_SCHEME.test(href)) return
     e.preventDefault()
     void openExternal(href)
   }

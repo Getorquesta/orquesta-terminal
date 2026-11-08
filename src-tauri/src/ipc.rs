@@ -892,22 +892,57 @@ pub async fn rd_leave(state: State<'_, Arc<AppState>>) -> Result<(), String> {
 
 // ── External browser ──────────────────────────────────────────────────────────
 
-/// Open an http(s) URL in the user's real browser.
+/// A `mailto:` the webview may hand to the OS opener.
+///
+/// `mailto:` has to be allowed for "Request a plugin" to do anything at all,
+/// but it is not as inert as it looks: some mail clients honour an `attach=`
+/// (or `attachment=`) parameter and will attach a local file by path, which
+/// turns "open a compose window" into "exfiltrate whatever path the caller
+/// names". So the query is an allow-list — subject/body/cc/bcc and nothing
+/// else — rather than a deny-list of the parameter names known to be abusable
+/// today.
+fn mailto_is_safe(url: &str) -> bool {
+    let rest = match url.get("mailto:".len()..) {
+        Some(r) => r,
+        None => return false,
+    };
+    let (addr, query) = match rest.split_once('?') {
+        Some((a, q)) => (a, Some(q)),
+        None => (rest, None),
+    };
+    // One plain address. No comma-separated list, no empty recipient.
+    if addr.is_empty() || !addr.contains('@') || addr.contains(',') || addr.contains(';') {
+        return false;
+    }
+    let Some(query) = query else { return true };
+    query.split('&').all(|pair| {
+        let key = pair.split('=').next().unwrap_or("").to_ascii_lowercase();
+        matches!(key.as_str(), "subject" | "body" | "cc" | "bcc")
+    })
+}
+
+/// Open an http(s) URL — or a `mailto:` — in the user's real browser or mail
+/// client.
 ///
 /// The shell plugin is deliberately *not* exposed over IPC (see
 /// `capabilities/default.json`): `shell:allow-open` hands the OS opener whatever
 /// string the webview passes, files and executables included. Browser sign-in
 /// still needs a browser, so this command does that one job and refuses
-/// anything that isn't a plain web URL.
+/// anything that isn't a plain web URL or a vetted `mailto:`.
 #[tauri::command]
 #[allow(deprecated)] // Shell::open is fine here; tauri-plugin-opener isn't a dep yet.
 pub async fn open_external_url(app: AppHandle, url: String) -> Result<(), String> {
     let lower = url.to_ascii_lowercase();
-    if !(lower.starts_with("http://") || lower.starts_with("https://")) {
-        return Err("only http(s) URLs can be opened".into());
+    let is_web = lower.starts_with("http://") || lower.starts_with("https://");
+    let is_mail = lower.starts_with("mailto:");
+    if !(is_web || is_mail) {
+        return Err("only http(s) and mailto: URLs can be opened".into());
     }
     if url.chars().any(|c| c.is_control() || c.is_whitespace()) {
         return Err("invalid URL".into());
+    }
+    if is_mail && !mailto_is_safe(&url) {
+        return Err("invalid mailto: URL".into());
     }
 
     // On Linux, run the opener ourselves with a cleaned environment: inside an

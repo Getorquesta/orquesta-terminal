@@ -1909,7 +1909,7 @@ function PluginsPanel() {
           View all plugins
         </a>
         <a
-          href="mailto:plugins@getorquesta.com?subject=Plugin Request"
+          href="mailto:plugins@getorquesta.com?subject=Plugin%20Request"
           className="flex w-full items-center justify-center gap-1.5 rounded-lg border border-purple-500/20 bg-purple-500/5 px-3 py-2 text-[11px] text-purple-300 transition-colors hover:bg-purple-500/10"
         >
           <Plus className="h-3 w-3" />
