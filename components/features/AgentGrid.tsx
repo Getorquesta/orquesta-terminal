@@ -56,7 +56,7 @@ import { Button } from '@/components/ui/button'
 import { Plus, X, Maximize2, GitBranch, LayoutGrid, Pencil, Cloud, Share2, Eye, Keyboard, Search, Check, ChevronDown, Link2, Users, Cpu, AlertTriangle, Folder, FolderOpen, Home, CornerLeftUp, PanelLeft, Loader2 } from 'lucide-react'
 import { TerminalSidebar } from './TerminalSidebar'
 import { TerminalListSidebar, PluginDock, TerminalSwitcherDock } from './TerminalDock'
-import type { CellStatus, DockItem, PluginDockItem } from './TerminalDock'
+import type { CellStatus, DockItem, PluginDockItem, QueueSort } from './TerminalDock'
 import { RemoteCell } from './RemoteCell'
 import type { RemoteTarget } from './RemoteCell'
 import { RemoteDesktopCell } from './RemoteDesktopCell'
@@ -66,6 +66,10 @@ import { SettingsPanel } from './SettingsPanel'
 import { launchConfigFor, loadSettings } from '@/lib/cliSettings'
 import { feedTypedBuffer, emptyTypedBuffer, MIN_TYPED_PROMPT, type TypedBuffer } from '@/lib/typedBuffer'
 import { attachRenderer } from '@/lib/xterm-renderer'
+import { looksBlocked, parseProgramStatus, type ProgramStatus, type QueueEntry, type QueueState } from '@/lib/agentQueue'
+import { playAlert } from '@/lib/alertSound'
+import { AgentToastStack, StatusMarker, type AgentToast } from './AgentQueue'
+import { useTerminalSearch } from './TerminalSearchBar'
 import { openExternal } from '@/lib/open-external'
 import { useKeyLabels } from '@/lib/platform'
 import '@xterm/xterm/css/xterm.css'
@@ -100,6 +104,8 @@ interface GridCell {
    * customer's machine capturing its screen.
    */
   desktop?: RemoteDesktopTarget
+  /** Kept above the priority groups in the terminal rail. */
+  pinned?: boolean
 }
 
 /** One external session to import as a live terminal pane. */
@@ -185,6 +191,8 @@ interface CellApi {
   run: (text: string) => boolean
   /** This pane's screen as text (see readScreen). */
   tail: () => string
+  /** Open the find bar. Optional: a hot-reloaded pane may predate it. */
+  search?: () => void
 }
 
 /**
@@ -412,15 +420,17 @@ interface TerminalCellProps {
   /** Fired with the text of a prompt the user typed straight into this pane —
    *  the board turns it into a card so hand-sent work shows as running too. */
   onPromptTyped: (text: string) => void
-  /** Highlight this pane (lighting mode just surfaced it). */
-  attention?: boolean
+  /** What the program in this pane reported over OSC 7501. */
+  onProgramStatus: (status: ProgramStatus) => void
+  /** Where this pane sits in the agent queue; rings it when it wants you. */
+  queueState?: QueueState
 }
 
 function TerminalCell({
   cellId, socket, cliType, name, autoName, fontSize, opacity, hostedApiUrl, hostedToken, hostedUserId,
   hostedProjects, hostedProjectId, cwd, resumeId, daemonRunning,
   onClose, onCliTypeChange, onRename, onHostedProjectChange, onMakeAgent, onPickFolder, onFocusCell, onNew, onArrange, onZoom, registerApi,
-  onActivity, onFinished, onUserInput, onSubmit, onPromptTyped, attention,
+  onActivity, onFinished, onUserInput, onSubmit, onPromptTyped, onProgramStatus, queueState,
 }: TerminalCellProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const termRef = useRef<import('@xterm/xterm').Terminal | null>(null)
@@ -531,8 +541,9 @@ function TerminalCell({
 
   // Latest callbacks in refs so the (heavy) init effect never re-runs when a
   // parent handler's identity changes — only cellId/socket/cliType restart it.
-  const cbRef = useRef({ onClose, onFocusCell, onNew, onArrange, onZoom, registerApi, onActivity, onFinished, onUserInput, onSubmit, onPromptTyped })
-  cbRef.current = { onClose, onFocusCell, onNew, onArrange, onZoom, registerApi, onActivity, onFinished, onUserInput, onSubmit, onPromptTyped }
+  const cbRef = useRef({ onClose, onFocusCell, onNew, onArrange, onZoom, registerApi, onActivity, onFinished, onUserInput, onSubmit, onPromptTyped, onProgramStatus })
+  cbRef.current = { onClose, onFocusCell, onNew, onArrange, onZoom, registerApi, onActivity, onFinished, onUserInput, onSubmit, onPromptTyped, onProgramStatus }
+  const search = useTerminalSearch()
   const fontRef = useRef(fontSize)
   fontRef.current = fontSize
   // Hosted-hook target read live at (re)connect time so toggling it from the
@@ -589,6 +600,8 @@ function TerminalCell({
         // Alt-screen suppression: when claude enters alt-screen mode (TUI),
         // keep the scrollbar and mouse events working in the pane wrapper.
         altClickMovesCursor: false,
+        // Search highlights are drawn with the decoration API.
+        allowProposedApi: true,
       })
 
       const fitAddon = new FitAddon()
@@ -600,6 +613,7 @@ function TerminalCell({
       })
       term.loadAddon(fitAddon)
       term.loadAddon(webLinksAddon)
+      void search.attach(term)
       term.open(containerRef.current)
       // GPU (or at least canvas) painting instead of xterm's default DOM
       // renderer — see lib/xterm-renderer.ts. Fire-and-forget: the pane is
@@ -615,6 +629,13 @@ function TerminalCell({
         if (idleTimerRef.current) clearTimeout(idleTimerRef.current)
         busyRef.current = false
         cbRef.current.onFinished()
+      })
+
+      // ── Program Status Protocol: see lib/agentQueue.ts.
+      term.parser.registerOscHandler(7501, (payload) => {
+        const report = parseProgramStatus(payload)
+        if (report) cbRef.current.onProgramStatus(report)
+        return true
       })
 
       // ── Resize: push the real pane size to the PTY. Without this the shell
@@ -645,6 +666,7 @@ function TerminalCell({
         run: (text: string) => runInput(text),
         // What the agent last said — the board turns this into the card's result.
         tail: () => readScreen(),
+        search: search.open,
       })
 
       // ── Clipboard: xterm has no copy/paste by default in the browser. ──
@@ -718,6 +740,7 @@ function TerminalCell({
         if (mod && e.shiftKey && k === 'c') { if (term.hasSelection()) { copySelection(); return false } }
         if (mod && e.shiftKey && k === 'v') { paste(); return false }
         if (mod && e.shiftKey && k === 'l') { e.preventDefault(); term.clear(); return false }
+        if (mod && e.shiftKey && k === 'f') { e.preventDefault(); search.open(); return false }
         if (mod && !e.shiftKey && (k === '=' || k === '+')) { e.preventDefault(); cbRef.current.onZoom(1); return false }
         if (mod && !e.shiftKey && k === '-') { e.preventDefault(); cbRef.current.onZoom(-1); return false }
         if (mod && !e.shiftKey && k === '0') { e.preventDefault(); cbRef.current.onZoom(0); return false }
@@ -836,6 +859,7 @@ function TerminalCell({
 
     return () => {
       mounted = false
+      search.detach()
       cleanup.then((fn) => fn?.())
       term?.dispose()
       if (sessionIdRef.current) {
@@ -879,6 +903,7 @@ function TerminalCell({
       if (data.sessionId !== sessionIdRef.current) return
       termRef.current?.writeln('\r\n\x1b[90m[session ended — press Enter to restart]\x1b[0m\r\n')
       sessionIdRef.current = null
+      cbRef.current.onProgramStatus({ state: 'clear' })
     }
     const handleError = (data: { sessionId: string; message: string }) => {
       if (data.sessionId !== sessionIdRef.current) return
@@ -1051,7 +1076,9 @@ function TerminalCell({
   return (
     <div
       className={`flex h-full flex-col rounded-md border overflow-hidden backdrop-blur-sm ${
-        attention ? 'border-emerald-500/60 ring-1 ring-emerald-500/40' : 'border-zinc-800'
+        queueState === 'blocked' ? 'border-red-500/60 ring-1 ring-red-500/40'
+          : queueState === 'done' ? 'border-emerald-500/60 ring-1 ring-emerald-500/40'
+          : 'border-zinc-800'
       }`}
       style={{ backgroundColor: `rgba(10, 12, 16, ${opacity})` }}
       // Focus-follows-mouse: once the cursor settles on a pane (~150ms) it
@@ -1082,6 +1109,7 @@ function TerminalCell({
             className="h-1.5 w-1.5 shrink-0 rounded-full"
             style={{ backgroundColor: tint }}
           />
+          {queueState && queueState !== 'idle' && <StatusMarker state={queueState} />}
           {editing ? (
             <input
               autoFocus
@@ -1274,6 +1302,7 @@ function TerminalCell({
         )}
         <div className="absolute inset-0 overflow-hidden">
           <div ref={containerRef} className="h-full px-1 pt-1 pb-0 overflow-hidden" />
+          {search.bar}
           {shared && remoteCursors.length > 0 && <CursorOverlay cursors={remoteCursors} />}
         </div>
       </div>
@@ -1295,6 +1324,8 @@ export interface AgentGridHandle {
   openRemote: (target: RemoteTarget) => string
   /** Open a project's real desktop as a pane in the main workspace. */
   openRemoteDesktop: (target: RemoteDesktopTarget) => string
+  /** Open the find bar on the active terminal. */
+  searchActive: () => void
   /** Flip between the tiling grid and free-floating overlay windows. */
   toggleOverlay: () => void
   /** Toggle "lighting": auto-surface whichever terminal last finished a prompt. */
@@ -1409,6 +1440,7 @@ interface PersistShape {
   floatGeom?: Record<string, FloatGeom>
   lighting?: boolean
   sidebarOpen?: boolean
+  queueSort?: QueueSort
 }
 
 // Total grid-row budget a tidy layout spans. Combined with a dynamic rowHeight
@@ -1424,6 +1456,14 @@ const SIDEBAR_GAP = 8
 // stays promoted on Lighting mode's big stage before demoting to the calm grid —
 // long enough to actually read and reply before it moves.
 const ATTENTION_MS = 10000
+// Output has to run this long unprompted before a pane counts as working, so the
+// repaint a TUI does on focus or a keystroke doesn't flip it.
+const SUSTAINED_OUTPUT_MS = 1500
+// A turn you started has to last this long to be worth a Done. Anything shorter,
+// you were still watching.
+const MIN_TURN_MS = 5000
+// A window refocus settles the active pane just after the event fires.
+const FOCUS_SETTLE_MS = 300
 // Minimum time (ms) a pane holds Lighting mode's big stage before it can hand
 // off to the next waiting pane — only if you haven't engaged it by then.
 const DWELL_MS = 5000
@@ -1887,6 +1927,42 @@ function AgentGridInner({
   const [statuses, setStatuses] = useState<Record<string, CellStatus>>({})
   const [finishedIds, setFinishedIds] = useState<Set<string>>(new Set())
   const attentionTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map())
+  // ── Agent queue ─────────────────────────────────────────────────────────────
+  // What each pane wants from you (see lib/agentQueue.ts). The ref mirrors the
+  // state because alerts must be decided once, against the latest value, from
+  // callbacks that fire between renders.
+  const [queue, setQueue] = useState<Record<string, QueueEntry>>({})
+  const queueRef = useRef(queue)
+  const [queueSort, setQueueSort] = useState<QueueSort>('priority')
+  const [toasts, setToasts] = useState<AgentToast[]>([])
+  const toastKeyRef = useRef(0)
+  const armedRef = useRef<Map<string, number>>(new Map())          // id → when you sent the turn
+  const outputSinceRef = useRef<Map<string, number>>(new Map())    // id → start of this output burst
+  const programDrivenRef = useRef<Set<string>>(new Set())          // panes speaking OSC 7501
+  const viewedRef = useRef<Set<string>>(new Set())                 // Done panes you've looked at
+  const autoNamesRef = useRef<Map<string, string>>(new Map())
+  const moveQueue = useCallback((id: string, state: QueueState, note?: string) => {
+    const cur = queueRef.current[id]
+    if ((cur?.state ?? 'idle') === state && cur?.note === note) return
+    if (state !== 'done') viewedRef.current.delete(id)
+    const since = cur?.state === state ? cur.since : Date.now()
+    const next = { ...queueRef.current, [id]: { state, since, note } }
+    queueRef.current = next
+    setQueue(next)
+  }, [])
+  const forgetQueue = useCallback((id: string) => {
+    armedRef.current.delete(id)
+    outputSinceRef.current.delete(id)
+    programDrivenRef.current.delete(id)
+    viewedRef.current.delete(id)
+    const { [id]: _gone, ...rest } = queueRef.current
+    queueRef.current = rest
+    setQueue(rest)
+    setToasts((prev) => prev.filter((t) => t.cellId !== id))
+  }, [])
+  const dismissToast = useCallback((key: number) => {
+    setToasts((prev) => prev.filter((t) => t.key !== key))
+  }, [])
   const lightingRef = useRef(lighting)
   lightingRef.current = lighting
   const viewModeRef = useRef(viewMode)
@@ -2164,6 +2240,7 @@ function AgentGridInner({
     let nextFloatGeom: Record<string, FloatGeom> = {}
     let nextLighting = false
     let nextSidebar = true
+    let nextQueueSort: QueueSort = 'priority'
     try {
       const saved = localStorage.getItem(key)
       if (saved) {
@@ -2188,6 +2265,7 @@ function AgentGridInner({
           }
           if (typeof p.lighting === 'boolean') nextLighting = p.lighting
           if (typeof p.sidebarOpen === 'boolean') nextSidebar = p.sidebarOpen
+          if (p.queueSort === 'manual' || p.queueSort === 'priority') nextQueueSort = p.queueSort
         } else if (p && (p.lg || p.md || p.sm)) {
           nextLayouts = p // legacy layouts-only shape — no panes to restore
         }
@@ -2199,6 +2277,7 @@ function AgentGridInner({
     setFloatGeom(nextFloatGeom)
     setLighting(nextLighting)
     setSidebarOpen(nextSidebar)
+    setQueueSort(nextQueueSort)
     try {
       const f = parseInt(localStorage.getItem(FONT_KEY) || '', 10)
       if (f >= MIN_FONT && f <= MAX_FONT) setFontSize(f)
@@ -2217,11 +2296,11 @@ function AgentGridInner({
       // reload can't reattach to it, so persisting them would restore a pane
       // that immediately starts a SECOND session. Drop them here.
       const payload: PersistShape = {
-        v: 5, cells: cells.filter((c) => !c.remote && !c.desktop), layouts, viewMode, floatGeom, lighting, sidebarOpen,
+        v: 5, cells: cells.filter((c) => !c.remote && !c.desktop), layouts, viewMode, floatGeom, lighting, sidebarOpen, queueSort,
       }
       localStorage.setItem(key, JSON.stringify(payload))
     } catch {}
-  }, [key, cells, layouts, viewMode, floatGeom, lighting, sidebarOpen])
+  }, [key, cells, layouts, viewMode, floatGeom, lighting, sidebarOpen, queueSort])
 
   const addCell = useCallback((init?: Partial<Omit<GridCell, 'id'>>) => {
     const id = `cell-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
@@ -2285,6 +2364,7 @@ function AgentGridInner({
 
   const removeCell = useCallback((id: string) => {
     cellApiRef.current.delete(id)
+    forgetQueue(id)
     if (activeCellIdRef.current === id) { activeCellIdRef.current = null; setActiveCellId(null) }
     // Drop from the Lighting stage/queue; if it held the spotlight, hand off.
     const q = lightQueueRef.current
@@ -2306,7 +2386,7 @@ function AgentGridInner({
       delete next[id]
       return next
     })
-  }, [])
+  }, [forgetQueue])
 
   const closeActive = useCallback(() => {
     const target = activeCellIdRef.current || cellsRef.current[cellsRef.current.length - 1]?.id
@@ -2395,6 +2475,10 @@ function AgentGridInner({
 
   const setCellName = useCallback((id: string, name: string) => {
     setCells((prev) => prev.map((c) => (c.id === id ? { ...c, name } : c)))
+  }, [])
+
+  const togglePin = useCallback((id: string) => {
+    setCells((prev) => prev.map((c) => (c.id === id ? { ...c, pinned: !c.pinned } : c)))
   }, [])
 
   const setCellCwd = useCallback((id: string, cwd: string) => {
@@ -2520,8 +2604,95 @@ function AgentGridInner({
     })
   }, [])
 
+  // ── Agent queue transitions ─────────────────────────────────────────────────
+  // Actually in front of this pane: the app has focus, the pane is active, and
+  // Lighting (if on) has it on stage. A pane you're watching never alerts.
+  const isLooking = useCallback((id: string) => (
+    document.hasFocus() && activeCellIdRef.current === id
+      && (!lightingRef.current || spotlightRef.current === id)
+  ), [])
+
+  const raiseAlert = useCallback((id: string, kind: 'done' | 'blocked', note?: string) => {
+    const alerts = loadSettings().alerts
+    if (alerts?.sound ?? true) playAlert(kind)
+    if (!(alerts?.toast ?? true)) return
+    const cell = cellsRef.current.find((c) => c.id === id)
+    if (!cell) return
+    const toast = { key: ++toastKeyRef.current, cellId: id, kind, title: paneLabel(cell, autoNamesRef.current), note }
+    setToasts((prev) => [...prev.filter((t) => t.cellId !== id), toast])
+  }, [])
+
+  const finishTurn = useCallback((id: string, note?: string) => {
+    if (isLooking(id)) { moveQueue(id, 'idle'); return }
+    const repeat = queueRef.current[id]?.state === 'done'
+    moveQueue(id, 'done', note)
+    if (!repeat) raiseAlert(id, 'done', note)
+  }, [isLooking, moveQueue, raiseAlert])
+
+  const raiseBlocked = useCallback((id: string, note?: string) => {
+    const repeat = queueRef.current[id]?.state === 'blocked'
+    moveQueue(id, 'blocked', note)
+    if (!repeat && !isLooking(id)) raiseAlert(id, 'blocked', note)
+  }, [isLooking, moveQueue, raiseAlert])
+
+  // You sent something: a turn starts now, and whatever the pane was waiting on
+  // has been answered.
+  const armTurn = useCallback((id: string) => {
+    if (programDrivenRef.current.has(id)) return
+    armedRef.current.set(id, Date.now())
+    const state = queueRef.current[id]?.state
+    if (state === 'done' || state === 'blocked') moveQueue(id, 'idle')
+  }, [moveQueue])
+
+  const applyProgramStatus = useCallback((id: string, report: ProgramStatus) => {
+    const state = queueRef.current[id]?.state
+    if (report.state === 'clear') {
+      // An unseen Done outlives the program that earned it.
+      programDrivenRef.current.delete(id)
+      if (state !== 'done') moveQueue(id, 'idle')
+      return
+    }
+    programDrivenRef.current.add(id)
+    armedRef.current.delete(id)
+    if (report.state === 'working') moveQueue(id, 'working', report.note)
+    else if (report.state === 'done') finishTurn(id, report.note)
+    else if (report.state === 'idle') { if (state !== 'done') moveQueue(id, 'idle') }
+    else raiseBlocked(id, report.note)
+  }, [finishTurn, moveQueue, raiseBlocked])
+
+  // A Done stays until you've looked at the pane and moved on, so glancing at it
+  // doesn't make it vanish from under you.
+  const prevActiveRef = useRef<string | null>(null)
+  useEffect(() => {
+    const prev = prevActiveRef.current
+    prevActiveRef.current = activeCellId
+    if (prev && prev !== activeCellId && viewedRef.current.has(prev)) moveQueue(prev, 'idle')
+    if (activeCellId && queueRef.current[activeCellId]?.state === 'done' && document.hasFocus()) {
+      viewedRef.current.add(activeCellId)
+    }
+  }, [activeCellId, moveQueue])
+
+  useEffect(() => {
+    let settle: ReturnType<typeof setTimeout> | undefined
+    const onFocus = () => {
+      clearTimeout(settle)
+      settle = setTimeout(() => {
+        const id = activeCellIdRef.current
+        if (id && queueRef.current[id]?.state === 'done') viewedRef.current.add(id)
+      }, FOCUS_SETTLE_MS)
+    }
+    window.addEventListener('focus', onFocus)
+    return () => { clearTimeout(settle); window.removeEventListener('focus', onFocus) }
+  }, [])
+
   // ── Prompt-completion signals from panes ────────────────────────────────────
   const markActivity = useCallback((id: string) => {
+    if (!programDrivenRef.current.has(id)) {
+      const now = Date.now()
+      const since = outputSinceRef.current.get(id) ?? now
+      outputSinceRef.current.set(id, since)
+      if (armedRef.current.has(id) || now - since >= SUSTAINED_OUTPUT_MS) moveQueue(id, 'working')
+    }
     setStatuses((prev) => (prev[id] === 'running' ? prev : { ...prev, [id]: 'running' }))
     // A newly-active pane is no longer "waiting for attention".
     setFinishedIds((prev) => {
@@ -2534,9 +2705,17 @@ function AgentGridInner({
     // The spotlight itself is left alone if it resumes — we keep watching it.
     const q = lightQueueRef.current
     const qi = q.indexOf(id); if (qi >= 0) q.splice(qi, 1)
-  }, [])
+  }, [moveQueue])
 
   const markFinished = useCallback((id: string) => {
+    outputSinceRef.current.delete(id)
+    if (!programDrivenRef.current.has(id)) {
+      const armedAt = armedRef.current.get(id)
+      armedRef.current.delete(id)
+      if (armedAt !== undefined && looksBlocked(cellApiRef.current.get(id)?.tail?.() ?? '')) raiseBlocked(id)
+      else if (armedAt !== undefined && Date.now() - armedAt >= MIN_TURN_MS) finishTurn(id)
+      else if (queueRef.current[id]?.state === 'working') moveQueue(id, 'idle')
+    }
     setStatuses((prev) => ({ ...prev, [id]: 'idle' }))
     setFinishedIds((prev) => { const next = new Set(prev); next.add(id); return next })
     const prevT = attentionTimers.current.get(id)
@@ -2566,7 +2745,7 @@ function AgentGridInner({
         }
       }
     }
-  }, [])
+  }, [finishTurn, moveQueue, raiseBlocked])
 
   // User typed into a pane → in Lighting, if it's the spotlight, mark it engaged
   // so the dwell hand-off never pulls it out from under you ("seguir = escribir").
@@ -2575,13 +2754,16 @@ function AgentGridInner({
       engagedRef.current = true
       if (dwellRef.current) { clearTimeout(dwellRef.current); dwellRef.current = null }
     }
-  }, [])
+    // Many prompts take a single key with no Enter.
+    if (queueRef.current[id]?.state === 'blocked') armTurn(id)
+  }, [armTurn])
 
   // Sending a prompt (Enter) into the doomed pane defuses the countdown. 💥→😌
   // Typing alone isn't enough — you have to actually fire off a prompt.
   const markUserSubmit = useCallback((id: string) => {
     if (rouletteTargetRef.current === id) defuseRoulette()
-  }, [defuseRoulette])
+    armTurn(id)
+  }, [armTurn, defuseRoulette])
 
   // Clean up any pending attention/dwell/roulette timers on unmount.
   useEffect(() => () => {
@@ -2646,6 +2828,10 @@ function AgentGridInner({
     apiRef.current = {
       addTerminal: () => addCell(), arrange, closeActive, importSessions, openRemote, openRemoteDesktop,
       toggleOverlay, toggleLighting, toggleSidebar, cycleTerminal: cycleActive,
+      searchActive: () => {
+        const id = activeCellIdRef.current
+        if (id) cellApiRef.current.get(id)?.search?.()
+      },
       dispatchPrompt: (cellId, text) => {
         const api = cellApiRef.current.get(cellId)
         if (!api) return false
@@ -2653,6 +2839,7 @@ function AgentGridInner({
         // or steal the active pane for a write that didn't happen.
         const sent = api.run(text)
         if (!sent) return false
+        armTurn(cellId)
         setActive(cellId)
         api.focus()
         return true
@@ -2664,7 +2851,7 @@ function AgentGridInner({
         return typeof api?.tail === 'function' ? api.tail() : ''
       },
     }
-  }, [apiRef, addCell, arrange, closeActive, importSessions, openRemote, openRemoteDesktop, toggleOverlay, toggleLighting, toggleSidebar, cycleActive, setActive])
+  }, [apiRef, addCell, arrange, closeActive, importSessions, openRemote, openRemoteDesktop, toggleOverlay, toggleLighting, toggleSidebar, cycleActive, setActive, armTurn])
 
   // Grid-level keyboard shortcuts for when NO terminal is focused (the focused
   // case is handled inside the pane so the keys don't reach the shell).
@@ -2795,6 +2982,7 @@ function AgentGridInner({
   // and the board all read from this one map so a pane is called the same thing
   // everywhere.
   const autoNames = useMemo(() => autoPaneNames(cells), [cells])
+  autoNamesRef.current = autoNames
 
   // Publish the pane roster + busy/idle to the host page (Kanban mode).
   useEffect(() => {
@@ -2833,12 +3021,15 @@ function AgentGridInner({
       opacity={terminalOpacity}
       apiUrl={hostedApiUrl}
       token={hostedToken}
-      attention={finishedIds.has(cell.id)}
+      queueState={queue[cell.id]?.state}
       onClose={() => removeCell(cell.id)}
       onRename={(v) => setCellName(cell.id, v)}
       onFocusCell={() => setActive(cell.id)}
       onActivity={() => markActivity(cell.id)}
       onFinished={() => markFinished(cell.id)}
+      onUserInput={() => markUserInput(cell.id)}
+      onSubmit={() => markUserSubmit(cell.id)}
+      onProgramStatus={(report) => applyProgramStatus(cell.id, report)}
       registerApi={(api) => {
         if (api) cellApiRef.current.set(cell.id, api)
         else cellApiRef.current.delete(cell.id)
@@ -2861,7 +3052,7 @@ function AgentGridInner({
       cwd={cell.cwd}
       resumeId={cell.resumeId}
       daemonRunning={!!(cell.hostedProjectId && daemonStatus[cell.hostedProjectId]?.running)}
-      attention={finishedIds.has(cell.id)}
+      queueState={queue[cell.id]?.state}
       onClose={() => removeCell(cell.id)}
       onCliTypeChange={(v) => setCellCli(cell.id, v)}
       onRename={(v) => setCellName(cell.id, v)}
@@ -2895,6 +3086,7 @@ function AgentGridInner({
       onUserInput={() => markUserInput(cell.id)}
       onSubmit={() => markUserSubmit(cell.id)}
       onPromptTyped={(text) => onPromptTypedRef.current?.(cell.id, text)}
+      onProgramStatus={(report) => applyProgramStatus(cell.id, report)}
       registerApi={(api) => {
         if (api) cellApiRef.current.set(cell.id, api)
         else cellApiRef.current.delete(cell.id)
@@ -2912,6 +3104,7 @@ function AgentGridInner({
       label: disp,
       kind: c.remote || c.desktop ? 'remote' : 'local',
       detail: c.desktop ? 'Desktop' : c.remote ? (c.remote.host || c.remote.cli || 'Remote') : undefined,
+      pinned: c.pinned,
     }
   })
   const sidebarEl = sidebarOpen ? (
@@ -2919,8 +3112,10 @@ function AgentGridInner({
       <TerminalListSidebar
         items={dockItems}
         activeId={activeCellId}
-        statuses={statuses}
-        finishedIds={finishedIds}
+        queue={queue}
+        sort={queueSort}
+        onSortChange={setQueueSort}
+        onTogglePin={togglePin}
         onFocus={focusCellFromList}
         onClose={removeCell}
         onReorder={reorderCells}
@@ -3092,6 +3287,12 @@ function AgentGridInner({
         </Button>
       </div>
 
+      <AgentToastStack
+        toasts={toasts}
+        onOpen={(id) => { setToasts((prev) => prev.filter((t) => t.cellId !== id)); focusCellFromList(id) }}
+        onDismiss={dismissToast}
+      />
+
       <SettingsPanel
         open={settingsOpen}
         clis={CLI_OPTIONS.filter((o) => o.value !== 'shell')}
@@ -3234,8 +3435,7 @@ function AgentGridInner({
         <TerminalSwitcherDock
           items={dockItems}
           activeId={activeCellId}
-          statuses={statuses}
-          finishedIds={finishedIds}
+          queue={queue}
           onSwitch={focusCellFromList}
           onAdd={() => addCell()}
         />
@@ -3252,7 +3452,7 @@ export const AgentGrid = forwardRef<AgentGridHandle, AgentGridProps>(function Ag
   const { containerRef, width } = useContainerWidth()
   const [height, setHeight] = useState(0)
   const apiRef = useRef<AgentGridHandle>({
-    addTerminal() {}, arrange() {}, closeActive() {}, importSessions() {},
+    addTerminal() {}, arrange() {}, closeActive() {}, importSessions() {}, searchActive() {},
     openRemote: () => '',
     openRemoteDesktop: () => '',
     toggleOverlay() {}, toggleLighting() {}, toggleSidebar() {}, cycleTerminal() {},
@@ -3263,6 +3463,7 @@ export const AgentGrid = forwardRef<AgentGridHandle, AgentGridProps>(function Ag
     addTerminal: () => apiRef.current.addTerminal(),
     arrange: () => apiRef.current.arrange(),
     closeActive: () => apiRef.current.closeActive(),
+    searchActive: () => apiRef.current.searchActive(),
     importSessions: (specs) => apiRef.current.importSessions(specs),
     openRemote: (target) => apiRef.current.openRemote(target),
     openRemoteDesktop: (target) => apiRef.current.openRemoteDesktop(target),

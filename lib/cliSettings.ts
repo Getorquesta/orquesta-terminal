@@ -11,11 +11,20 @@ export interface CliConfig {
   extraArgs?: string
 }
 
+export interface AlertSettings {
+  /** Play a chime when a pane you aren't looking at finishes or needs you. */
+  sound?: boolean
+  /** Show a clickable toast for the same events. */
+  toast?: boolean
+}
+
 export interface OrqSettings {
   /** Per-cliType launch config. */
   cli: Record<string, CliConfig>
   /** cliType used when opening a brand-new terminal. */
   defaultCli?: string
+  /** Agent alerts. Both default on. */
+  alerts?: AlertSettings
 }
 
 // The documented "skip every permission prompt" flag per CLI. Mirror of the Rust
@@ -42,7 +51,11 @@ export function loadSettings(): OrqSettings {
     const raw = localStorage.getItem(STORAGE_KEY)
     if (!raw) return DEFAULTS
     const parsed = JSON.parse(raw) as Partial<OrqSettings>
-    return { cli: { ...DEFAULTS.cli, ...(parsed.cli ?? {}) }, defaultCli: parsed.defaultCli ?? DEFAULTS.defaultCli }
+    return {
+      cli: { ...DEFAULTS.cli, ...(parsed.cli ?? {}) },
+      defaultCli: parsed.defaultCli ?? DEFAULTS.defaultCli,
+      alerts: parsed.alerts,
+    }
   } catch {
     return DEFAULTS
   }

@@ -2,15 +2,30 @@
 
 // ── SettingsPanel ─────────────────────────────────────────────────────────────
 // A modal for launch settings: per-CLI "skip permission prompts" (the CLI's
-// documented yolo flag) plus free-form extra arguments, and the default CLI for
-// new terminals. Self-contained — loads on open, writes to localStorage on save.
+// documented yolo flag) plus free-form extra arguments, the default CLI for new
+// terminals, and agent alerts. Self-contained — loads on open, writes to localStorage on save.
 
 import { useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { X, Settings as SettingsIcon, Terminal as TerminalIcon } from 'lucide-react'
-import { loadSettings, saveSettings, YOLO_FLAGS, type OrqSettings } from '@/lib/cliSettings'
+import { X, Settings as SettingsIcon, Terminal as TerminalIcon, Bell, Play } from 'lucide-react'
+import { loadSettings, saveSettings, YOLO_FLAGS, type AlertSettings, type OrqSettings } from '@/lib/cliSettings'
+import { playAlert } from '@/lib/alertSound'
 
 export interface CliChoice { value: string; label: string }
+
+function Switch({ on, onToggle }: { on: boolean; onToggle: () => void }) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={on}
+      onClick={onToggle}
+      className={`relative h-5 w-9 rounded-full transition-colors ${on ? 'bg-emerald-500/80' : 'bg-zinc-700'}`}
+    >
+      <span className={`absolute top-0.5 h-4 w-4 rounded-full bg-white transition-all ${on ? 'left-4' : 'left-0.5'}`} />
+    </button>
+  )
+}
 
 export function SettingsPanel({
   open, clis, onClose,
@@ -38,6 +53,11 @@ export function SettingsPanel({
   const cfgFor = (id: string) => draft.cli[id] ?? {}
   const setCfg = (id: string, patch: Partial<{ skipPermissions: boolean; extraArgs: string }>) =>
     setDraft((d) => ({ ...d, cli: { ...d.cli, [id]: { ...d.cli[id], ...patch } } }))
+
+  const soundOn = draft.alerts?.sound ?? true
+  const toastOn = draft.alerts?.toast ?? true
+  const setAlerts = (patch: AlertSettings) =>
+    setDraft((d) => ({ ...d, alerts: { ...d.alerts, ...patch } }))
 
   const save = () => { saveSettings(draft); onClose() }
 
@@ -73,6 +93,47 @@ export function SettingsPanel({
             </select>
           </section>
 
+          {/* Agent alerts */}
+          <section className="mb-5">
+            <div className="mb-2 flex items-center gap-2 text-xs font-medium uppercase tracking-wide text-zinc-500">
+              <Bell className="h-3.5 w-3.5" /> Alerts
+            </div>
+            <div className="divide-y divide-zinc-800/80 rounded-lg border border-zinc-800/80 bg-zinc-900/40">
+              <div className="flex items-center justify-between gap-3 px-3.5 py-2.5">
+                <div className="min-w-0">
+                  <div className="text-sm text-zinc-200">Sound</div>
+                  <div className="text-[11px] text-zinc-500">When a pane you aren&apos;t looking at finishes or needs you</div>
+                </div>
+                <div className="flex shrink-0 items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => playAlert('done')}
+                    className="flex items-center gap-1 rounded px-1.5 py-1 text-[11px] text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
+                    title="Play the finished sound"
+                  >
+                    <Play className="h-3 w-3" /> Done
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => playAlert('blocked')}
+                    className="flex items-center gap-1 rounded px-1.5 py-1 text-[11px] text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
+                    title="Play the needs-you sound"
+                  >
+                    <Play className="h-3 w-3" /> Needs you
+                  </button>
+                  <Switch on={soundOn} onToggle={() => setAlerts({ sound: !soundOn })} />
+                </div>
+              </div>
+              <div className="flex items-center justify-between gap-3 px-3.5 py-2.5">
+                <div className="min-w-0">
+                  <div className="text-sm text-zinc-200">Toast</div>
+                  <div className="text-[11px] text-zinc-500">Click it to jump to that pane</div>
+                </div>
+                <Switch on={toastOn} onToggle={() => setAlerts({ toast: !toastOn })} />
+              </div>
+            </div>
+          </section>
+
           <div className="mb-3 flex items-center gap-2 text-xs font-medium uppercase tracking-wide text-zinc-500">
             <TerminalIcon className="h-3.5 w-3.5" /> Per-CLI launch options
           </div>
@@ -89,15 +150,7 @@ export function SettingsPanel({
                     {flag ? (
                       <label className="flex cursor-pointer items-center gap-2 text-xs text-zinc-400">
                         <span>Skip permission prompts</span>
-                        <button
-                          type="button"
-                          role="switch"
-                          aria-checked={skip}
-                          onClick={() => setCfg(c.value, { skipPermissions: !skip })}
-                          className={`relative h-5 w-9 rounded-full transition-colors ${skip ? 'bg-emerald-500/80' : 'bg-zinc-700'}`}
-                        >
-                          <span className={`absolute top-0.5 h-4 w-4 rounded-full bg-white transition-all ${skip ? 'left-4' : 'left-0.5'}`} />
-                        </button>
+                        <Switch on={skip} onToggle={() => setCfg(c.value, { skipPermissions: !skip })} />
                       </label>
                     ) : (
                       <span className="text-[11px] text-zinc-600">no skip flag — use args</span>

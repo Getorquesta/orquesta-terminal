@@ -222,6 +222,10 @@ export default function TerminalWorkspacePage() {
         icon: X, run: () => gridRef.current?.closeActive(),
       },
       {
+        id: 'term-search', group: 'Terminal', label: 'Find in terminal', hint: keys.combo(keys.mod, keys.shift, 'F'),
+        icon: Search, run: () => gridRef.current?.searchActive(),
+      },
+      {
         id: 'term-cycle', group: 'Terminal', label: 'Switch to next terminal', hint: 'Ctrl+Tab',
         icon: ArrowRightLeft, run: () => gridRef.current?.cycleTerminal(1),
       },

@@ -13,6 +13,9 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { X, Server, LogOut, Square, Pencil, Loader2 } from 'lucide-react'
 import type { TauriHandle } from '@/hooks/useTauri'
 import { attachRenderer } from '@/lib/xterm-renderer'
+import { parseProgramStatus, type ProgramStatus, type QueueState } from '@/lib/agentQueue'
+import { StatusMarker } from './AgentQueue'
+import { useTerminalSearch } from './TerminalSearchBar'
 import '@xterm/xterm/css/xterm.css'
 
 /** The cloud agent a remote pane is attached to. */
@@ -61,11 +64,12 @@ export interface RemoteCellApi {
   seed: (text: string) => void
   run: (text: string) => boolean
   tail: () => string
+  search: () => void
 }
 
 export function RemoteCell({
   cellId, socket, target, name, fontSize, opacity, apiUrl, token,
-  attention, onClose, onRename, onFocusCell, onActivity, onFinished, registerApi,
+  queueState, onClose, onRename, onFocusCell, onActivity, onFinished, onUserInput, onSubmit, onProgramStatus, registerApi,
 }: {
   cellId: string
   socket: TauriHandle | null
@@ -76,14 +80,22 @@ export function RemoteCell({
   opacity: number
   apiUrl?: string
   token?: string
-  attention?: boolean
+  queueState?: QueueState
   onClose: () => void
   onRename: (v: string) => void
   onFocusCell: () => void
   onActivity: () => void
   onFinished: () => void
+  onUserInput: () => void
+  onSubmit: () => void
+  onProgramStatus: (status: ProgramStatus) => void
   registerApi: (api: RemoteCellApi | null) => void
 }) {
+  // The parent passes these inline. Resubscribing the stream on every render
+  // cancels the idle timer, so a busy grid would never see this pane finish.
+  const cbRef = useRef({ onActivity, onFinished, onUserInput, onSubmit, onProgramStatus })
+  cbRef.current = { onActivity, onFinished, onUserInput, onSubmit, onProgramStatus }
+  const search = useTerminalSearch()
   const hostRef = useRef<HTMLDivElement>(null)
   const termRef = useRef<import('@xterm/xterm').Terminal | null>(null)
   const fitRef = useRef<import('@xterm/addon-fit').FitAddon | null>(null)
@@ -121,9 +133,12 @@ export function RemoteCell({
         cursorBlink: true,
         cursorStyle: 'bar',
         scrollback: 5000,
+        // Search highlights are drawn with the decoration API.
+        allowProposedApi: true,
       })
       const fit = new FitAddon()
       term.loadAddon(fit)
+      void search.attach(term)
       term.open(hostRef.current)
       // Same GPU/canvas upgrade the local panes get — a mirrored remote agent
       // repaints just as often as a local one.
@@ -131,6 +146,23 @@ export function RemoteCell({
       try { fit.fit() } catch {}
       termRef.current = term
       fitRef.current = fit
+
+      // Program Status Protocol — see lib/agentQueue.ts.
+      term.parser.registerOscHandler(7501, (payload) => {
+        const report = parseProgramStatus(payload)
+        if (report) cbRef.current.onProgramStatus(report)
+        return true
+      })
+
+      // Real keystrokes only: term.onData also carries xterm's own replies.
+      term.attachCustomKeyEventHandler((e) => {
+        if (e.type !== 'keydown') return true
+        const k = e.key.toLowerCase()
+        if ((e.ctrlKey || e.metaKey) && e.shiftKey && k === 'f') { e.preventDefault(); search.open(); return false }
+        if (k !== 'shift' && k !== 'control' && k !== 'alt' && k !== 'meta') cbRef.current.onUserInput()
+        if (k === 'enter') cbRef.current.onSubmit()
+        return true
+      })
 
       term.onData((d) => {
         const sid = sessionIdRef.current
@@ -152,6 +184,7 @@ export function RemoteCell({
 
     return () => {
       disposed = true
+      search.detach()
       try { ro?.disconnect() } catch {}
       try { termRef.current?.dispose() } catch {}
       termRef.current = null
@@ -209,9 +242,9 @@ export function RemoteCell({
   useEffect(() => {
     if (!socket) return
     const markBusy = () => {
-      onActivity()
+      cbRef.current.onActivity()
       if (idleTimerRef.current) clearTimeout(idleTimerRef.current)
-      idleTimerRef.current = setTimeout(() => { onFinished() }, 2500)
+      idleTimerRef.current = setTimeout(() => { cbRef.current.onFinished() }, 2500)
     }
     const onOutput = (p: { sessionId: string; data: string }) => {
       if (p.sessionId !== sessionIdRef.current) return
@@ -231,6 +264,7 @@ export function RemoteCell({
       setStatus('ended')
       setDetail('')
       sessionIdRef.current = null
+      cbRef.current.onProgramStatus({ state: 'clear' })
     }
     const onError = (p: { sessionId: string; error: string }) => {
       if (p.sessionId !== sessionIdRef.current) return
@@ -249,7 +283,7 @@ export function RemoteCell({
       socket.off('remote:error', onError)
       if (idleTimerRef.current) clearTimeout(idleTimerRef.current)
     }
-  }, [socket, onActivity, onFinished])
+  }, [socket])
 
   // Closing the pane detaches (the PTY keeps running on the agent) — same
   // contract the old modal had, so nothing is killed by accident.
@@ -292,9 +326,10 @@ export function RemoteCell({
         }
         return lines.join('\n').replace(/\n{3,}/g, '\n\n').trim()
       },
+      search: search.open,
     })
     return () => registerApi(null)
-  }, [registerApi, seed, socket])
+  }, [registerApi, seed, socket, search.open])
 
   const detach = () => {
     const sid = sessionIdRef.current
@@ -319,7 +354,9 @@ export function RemoteCell({
   return (
     <div
       className={`flex h-full flex-col overflow-hidden rounded-md border backdrop-blur-sm ${
-        attention ? 'border-white ring-1 ring-white/50' : 'border-white/45'
+        queueState === 'blocked' ? 'border-red-400 ring-1 ring-red-400/50'
+          : queueState === 'done' ? 'border-white ring-1 ring-white/50'
+          : 'border-white/45'
       }`}
       style={{ backgroundColor: `rgba(10, 12, 16, ${opacity})` }}
       onMouseDown={onFocusCell}
@@ -327,6 +364,7 @@ export function RemoteCell({
       <div className="drag-handle flex cursor-grab items-center justify-between gap-2 border-b border-white/25 bg-white/[0.06] px-2.5 py-1.5 active:cursor-grabbing">
         <div className="flex min-w-0 items-center gap-2">
           <Server className="h-3.5 w-3.5 shrink-0 text-white" />
+          {queueState && queueState !== 'idle' && <StatusMarker state={queueState} />}
           {editing ? (
             <input
               autoFocus

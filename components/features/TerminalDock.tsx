@@ -9,8 +9,10 @@
 // (Overlay mode is handled by the grid engine itself — no floating wrapper here.)
 
 import { useRef, useState, useEffect } from 'react'
-import { Plus, X, GripVertical, PanelLeftClose, Terminal as TerminalIcon, Circle, Server, Cpu, ExternalLink } from 'lucide-react'
+import { Plus, X, GripVertical, PanelLeftClose, Terminal as TerminalIcon, Server, Cpu, ExternalLink, Pin, ListOrdered } from 'lucide-react'
 import { openAuthPage } from '@/hooks/useHostedAuth'
+import { StatusMarker } from './AgentQueue'
+import { groupQueue, timeAgo, type QueueEntry } from '@/lib/agentQueue'
 
 /** Local agent manager UI — orquesta-agent serves it while a daemon runs here. */
 export const LOCAL_AGENT_UI_URL = 'http://localhost:8080'
@@ -205,7 +207,12 @@ export interface DockItem {
   kind?: 'local' | 'remote'
   /** Secondary line for remote rows (host / cli of the agent). */
   detail?: string
+  /** Held above the priority groups in the rail. */
+  pinned?: boolean
 }
+
+/** Rail order: grouped by what each pane needs, or your own drag order. */
+export type QueueSort = 'priority' | 'manual'
 
 // ── PluginDock ───────────────────────────────────────────────────────────────
 // A macOS-style dock pinned to the bottom of the workspace, listing the
@@ -277,16 +284,15 @@ export function PluginDock({
 // ── TerminalSwitcherDock ──────────────────────────────────────────────────────
 // A macOS-style dock, twin of PluginDock, but listing the OPEN TERMINALS instead
 // of plugins. Each tile is the CLI's 2-letter code on its accent colour; click to
-// switch to that terminal (focus + spotlight it). The active terminal is filled,
-// a just-finished one pulses amber, a running one shows a live dot. This is the
-// deterministic way to move between panes — no reliance on auto-spotlight.
+// switch to that terminal (focus + spotlight it). The active terminal is filled
+// and each tile carries its queue marker. This is the deterministic way to move
+// between panes — no reliance on auto-spotlight.
 export function TerminalSwitcherDock({
-  items, activeId, statuses, finishedIds, onSwitch, onAdd,
+  items, activeId, queue, onSwitch, onAdd,
 }: {
   items: DockItem[]
   activeId: string | null
-  statuses: Record<string, CellStatus>
-  finishedIds: Set<string>
+  queue: Record<string, QueueEntry>
   onSwitch: (id: string) => void
   onAdd: () => void
 }) {
@@ -301,8 +307,7 @@ export function TerminalSwitcherDock({
         const active = activeId === it.id
         const hover = hovered === it.id
         const big = active || hover
-        const attention = finishedIds.has(it.id)
-        const status = statuses[it.id] ?? 'idle'
+        const state = queue[it.id]?.state ?? 'idle'
         const accent = itemAccent(it)
         const code = chipCode(it)
         return (
@@ -331,21 +336,21 @@ export function TerminalSwitcherDock({
                 fontSize: big ? 15 : 13,
                 transform: big ? 'translateY(-6px)' : 'translateY(0)',
                 color: accent,
-                borderColor: active ? accent : attention ? 'rgba(251,191,36,0.6)' : `${accent}55`,
+                borderColor: active ? accent
+                  : state === 'blocked' ? 'rgba(248,113,113,0.7)'
+                  : state === 'done' ? 'rgba(52,211,153,0.6)'
+                  : `${accent}55`,
                 background: active ? `${accent}2b` : 'rgba(255,255,255,0.04)',
                 boxShadow: active ? `0 0 0 1px ${accent}` : undefined,
               }}
             >
               {code}
-              {/* Status dot bottom-right */}
-              {attention ? (
-                <span className="absolute -bottom-0.5 -right-0.5 flex h-2.5 w-2.5">
-                  <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-amber-400 opacity-75" />
-                  <span className="relative inline-flex h-2.5 w-2.5 rounded-full border border-zinc-900 bg-amber-400" />
+              {/* Queue marker bottom-right; an idle tile stays clean. */}
+              {state !== 'idle' && (
+                <span className="absolute -bottom-1 -right-1 flex items-center justify-center rounded-full bg-zinc-900 p-px">
+                  <StatusMarker state={state} />
                 </span>
-              ) : status === 'running' ? (
-                <span className="absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 rounded-full border border-zinc-900 bg-emerald-400" />
-              ) : null}
+              )}
             </span>
           </button>
         )
@@ -427,13 +432,19 @@ function cliLabelFor(cli: string): string {
   return CLI_LABEL[cli] ?? cli
 }
 
+// How often the rail refreshes its "4m" labels.
+const TIME_LABEL_TICK_MS = 30000
+
 export function TerminalListSidebar({
-  items, activeId, statuses, finishedIds, onFocus, onClose, onReorder, onAdd, onCollapse, onAddRemote,
+  items, activeId, queue, sort, onSortChange, onTogglePin, onFocus, onClose, onReorder, onAdd, onCollapse, onAddRemote,
 }: {
   items: DockItem[]
   activeId: string | null
-  statuses: Record<string, CellStatus>
-  finishedIds: Set<string>
+  queue: Record<string, QueueEntry>
+  /** Priority groups panes by what they need; Manual keeps your drag order. */
+  sort: QueueSort
+  onSortChange: (sort: QueueSort) => void
+  onTogglePin: (id: string) => void
   onFocus: (id: string) => void
   onClose: (id: string) => void
   onReorder: (fromId: string, toId: string) => void
@@ -445,13 +456,21 @@ export function TerminalListSidebar({
   const dragId = useRef<string | null>(null)
   const local = items.filter((it) => it.kind !== 'remote')
   const remote = items.filter((it) => it.kind === 'remote')
+  const priority = sort === 'priority'
+
+  const [, setTick] = useState(0)
+  useEffect(() => {
+    if (!priority) return
+    const t = setInterval(() => setTick((n) => n + 1), TIME_LABEL_TICK_MS)
+    return () => clearInterval(t)
+  }, [priority])
 
   // One row of the rail. Local and remote sections share it; only the accent,
   // icon and the subtitle line differ.
   const row = (it: DockItem) => {
     const active = it.id === activeId
-    const status = statuses[it.id] ?? 'idle'
-    const attention = finishedIds.has(it.id)
+    const entry = queue[it.id]
+    const state = entry?.state ?? 'idle'
     const isRemote = it.kind === 'remote'
     const accent = itemAccent(it)
     const shown = it.name || it.label
@@ -464,7 +483,8 @@ export function TerminalListSidebar({
     return (
       <div
         key={it.id}
-        draggable
+        // Priority decides the order itself, so a drag there would do nothing.
+        draggable={!priority}
         onDragStart={() => { dragId.current = it.id }}
         onDragOver={(e) => e.preventDefault()}
         onDrop={(e) => {
@@ -478,15 +498,19 @@ export function TerminalListSidebar({
         className={`group mx-1 mb-0.5 flex min-h-[2.6rem] cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-sm transition-colors ${
           active
             ? isRemote ? 'bg-white/15 text-white ring-1 ring-white/30' : 'bg-zinc-800/90 text-zinc-100'
-            : attention
+            : state === 'blocked'
+              ? 'bg-red-500/10 text-red-100 ring-1 ring-red-500/40'
+            : state === 'done'
               ? 'bg-emerald-500/10 text-emerald-100 ring-1 ring-emerald-500/40'
               : isRemote
                 ? 'text-white/80 hover:bg-white/10 hover:text-white'
                 : 'text-zinc-400 hover:bg-zinc-800/50 hover:text-zinc-200'
         }`}
-        title={it.detail || it.label}
+        title={entry?.note || it.detail || it.label}
       >
-        <GripVertical className="h-3.5 w-3.5 shrink-0 cursor-grab text-zinc-700 opacity-0 group-hover:opacity-100 active:cursor-grabbing" />
+        {!priority && (
+          <GripVertical className="h-3.5 w-3.5 shrink-0 cursor-grab text-zinc-700 opacity-0 group-hover:opacity-100 active:cursor-grabbing" />
+        )}
         <span className="shrink-0" style={{ color: accent }}>
           {isRemote ? <Server className="h-3.5 w-3.5" /> : <TerminalIcon className="h-3.5 w-3.5" />}
         </span>
@@ -505,18 +529,22 @@ export function TerminalListSidebar({
             </span>
           )}
         </span>
-        {/* Status: pulsing emerald = just finished a prompt (needs attention),
-            solid amber = actively producing output, hollow = idle. */}
-        {attention ? (
-          <span className="relative flex h-2 w-2 shrink-0">
-            <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75" />
-            <span className="relative inline-flex h-2 w-2 rounded-full bg-emerald-400" />
-          </span>
-        ) : status === 'running' ? (
-          <Circle className="h-2 w-2 shrink-0 fill-amber-400 text-amber-400" />
-        ) : (
-          <Circle className="h-2 w-2 shrink-0 text-zinc-700" />
+        {priority && !isRemote && (
+          <button
+            onClick={(e) => { e.stopPropagation(); onTogglePin(it.id) }}
+            className={`shrink-0 rounded p-0.5 hover:bg-zinc-700 hover:text-zinc-200 ${
+              it.pinned ? 'text-zinc-300' : 'text-zinc-600 opacity-0 group-hover:opacity-100'
+            }`}
+            title={it.pinned ? 'Unpin' : 'Pin to the top'}
+            aria-pressed={!!it.pinned}
+          >
+            <Pin className="h-3 w-3" />
+          </button>
         )}
+        {priority && state !== 'idle' && (
+          <span className="shrink-0 font-mono text-[10px] tabular-nums text-zinc-500">{timeAgo(entry?.since)}</span>
+        )}
+        <span className="flex w-3.5 shrink-0 justify-center"><StatusMarker state={state} /></span>
         <button
           onClick={(e) => { e.stopPropagation(); onClose(it.id) }}
           className="shrink-0 rounded p-0.5 text-zinc-600 opacity-0 hover:bg-zinc-700 hover:text-zinc-200 group-hover:opacity-100"
@@ -533,6 +561,14 @@ export function TerminalListSidebar({
       <div className="flex items-center justify-between border-b border-zinc-800/80 px-2.5 py-2">
         <span className="text-[11px] font-medium uppercase tracking-wide text-zinc-500">Terminals</span>
         <div className="flex items-center gap-1">
+          <button
+            onClick={() => onSortChange(priority ? 'manual' : 'priority')}
+            className={`rounded p-1 hover:bg-zinc-800 hover:text-zinc-200 ${priority ? 'text-zinc-300' : 'text-zinc-500'}`}
+            title={priority ? 'Sorted by what needs you. Click for manual order' : 'Manual order. Click to sort by what needs you'}
+            aria-pressed={priority}
+          >
+            <ListOrdered className="h-3.5 w-3.5" />
+          </button>
           <button
             onClick={onAdd}
             className="rounded p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200"
@@ -554,7 +590,17 @@ export function TerminalListSidebar({
         {local.length === 0 && (
           <p className="px-3 py-4 text-center text-xs text-zinc-500">No terminals yet.</p>
         )}
-        {local.map(row)}
+        {priority
+          ? groupQueue(local, queue).map((group) => (
+              <div key={group.key} className="mb-1">
+                <div className={`flex items-center gap-1.5 px-2.5 pb-0.5 pt-1.5 text-[10px] font-medium uppercase tracking-wide ${group.tone}`}>
+                  {group.label}
+                  <span className="font-mono opacity-70">{group.items.length}</span>
+                </div>
+                {group.items.map(row)}
+              </div>
+            ))
+          : local.map(row)}
 
         {/* ── Remote ── cloud-agent sessions, kept apart from the local PTYs. */}
         {(remote.length > 0 || onAddRemote) && (
