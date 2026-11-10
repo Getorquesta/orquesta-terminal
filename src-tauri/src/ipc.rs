@@ -133,6 +133,28 @@ pub async fn fs_native_pick(
     }
 }
 
+// ── Git (pane header status, worktree per pane, review diff) ─────────────────
+
+#[tauri::command]
+pub async fn git_info(cwd: String) -> Result<Value, String> {
+    crate::git::info(&cwd).await
+}
+
+#[tauri::command]
+pub async fn git_worktree_create(cwd: String, name: Option<String>) -> Result<Value, String> {
+    crate::git::worktree_create(&cwd, name).await
+}
+
+#[tauri::command]
+pub async fn git_worktree_remove(path: String, force: Option<bool>) -> Result<Value, String> {
+    crate::git::worktree_remove(&path, force.unwrap_or(false)).await
+}
+
+#[tauri::command]
+pub async fn git_diff(cwd: String, base: Option<String>) -> Result<Value, String> {
+    crate::git::diff(&cwd, base).await
+}
+
 // ── Hook Enrollment ───────────────────────────────────────────────────────────
 
 #[tauri::command]

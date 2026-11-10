@@ -72,6 +72,9 @@ import { AgentToastStack, StatusMarker, type AgentToast } from './AgentQueue'
 import { useTerminalSearch } from './TerminalSearchBar'
 import { openExternal } from '@/lib/open-external'
 import { useKeyLabels } from '@/lib/platform'
+import { gitWorktreeCreate, gitWorktreeRemove, type PaneWorktree, type ReviewNote } from '@/lib/git'
+import { PaneProjectChip, useGitInfo } from './PaneProject'
+import { DiffReview } from './DiffReview'
 import '@xterm/xterm/css/xterm.css'
 
 export interface HostedProject {
@@ -106,6 +109,10 @@ interface GridCell {
   desktop?: RemoteDesktopTarget
   /** Kept above the priority groups in the terminal rail. */
   pinned?: boolean
+  /** Set when this pane runs in its own git worktree (cwd === worktree.path). */
+  worktree?: PaneWorktree
+  /** Draft review notes on this pane's diff, kept until sent or discarded. */
+  reviewNotes?: ReviewNote[]
 }
 
 /** One external session to import as a live terminal pane. */
@@ -424,6 +431,16 @@ interface TerminalCellProps {
   onProgramStatus: (status: ProgramStatus) => void
   /** Where this pane sits in the agent queue; rings it when it wants you. */
   queueState?: QueueState
+  /** This pane's own worktree, when isolated. */
+  worktree?: PaneWorktree
+  worktreeBusy?: boolean
+  worktreeError?: string | null
+  /** Move this pane into a fresh worktree of its repo (restarts the session). */
+  onIsolate: () => void
+  /** Remove this pane's worktree and return it to the main checkout. */
+  onRemoveWorktree: () => void
+  reviewNotes: ReviewNote[]
+  onReviewNotesChange: (notes: ReviewNote[]) => void
 }
 
 function TerminalCell({
@@ -431,6 +448,7 @@ function TerminalCell({
   hostedProjects, hostedProjectId, cwd, resumeId, daemonRunning,
   onClose, onCliTypeChange, onRename, onHostedProjectChange, onMakeAgent, onPickFolder, onFocusCell, onNew, onArrange, onZoom, registerApi,
   onActivity, onFinished, onUserInput, onSubmit, onPromptTyped, onProgramStatus, queueState,
+  worktree, worktreeBusy, worktreeError, onIsolate, onRemoveWorktree, reviewNotes, onReviewNotesChange,
 }: TerminalCellProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const termRef = useRef<import('@xterm/xterm').Terminal | null>(null)
@@ -444,6 +462,11 @@ function TerminalCell({
   const idleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const busyRef = useRef(false)
   const [branch, setBranch] = useState<string | null>(null)
+  const { info: gitStatus, refresh: refreshGit } = useGitInfo(cwd)
+  const [reviewOpen, setReviewOpen] = useState(false)
+  // An agent that just finished (or now needs you) has usually just edited
+  // files — refresh the header's counts right then instead of on the next poll.
+  useEffect(() => { refreshGit() }, [queueState, refreshGit])
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState(name)
   // Per-terminal task/timeline rail (Phase 1 of the Prompt Loop).
@@ -1162,26 +1185,17 @@ function TerminalCell({
               Panel
             </button>
           )}
-          <button
-            onClick={onPickFolder}
-            onMouseDown={(e) => e.stopPropagation()}
-            className={`flex min-w-0 shrink items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-mono transition-colors ${
-              cwd ? 'bg-zinc-800/70 text-amber-300/90 hover:bg-zinc-700' : 'bg-zinc-800/70 text-zinc-400 hover:bg-zinc-700 hover:text-zinc-200'
-            }`}
-            title={cwd ? `Working dir: ${cwd} — click to change (restarts the session)` : 'Choose a working folder for this terminal'}
-          >
-            <Folder className="h-3 w-3 shrink-0" />
-            <span className="truncate max-w-[7rem]">{cwd ? cwd.replace(/\/+$/, '').split('/').pop() || cwd : 'Folder'}</span>
-          </button>
-          {branch && (
-            <span
-              className="flex min-w-0 items-center gap-1 rounded bg-zinc-800/70 px-1.5 py-0.5 text-xs font-mono text-green-400"
-              title={`git branch: ${branch}`}
-            >
-              <GitBranch className="h-3 w-3 shrink-0" />
-              <span className="truncate">{branch}</span>
-            </span>
-          )}
+          <PaneProjectChip
+            cwd={cwd}
+            info={gitStatus ?? (branch ? { isRepo: true, folder: folderName, branch } : null)}
+            worktree={worktree}
+            busy={worktreeBusy}
+            error={worktreeError}
+            onPickFolder={onPickFolder}
+            onReview={() => setReviewOpen(true)}
+            onIsolate={onIsolate}
+            onRemoveWorktree={onRemoveWorktree}
+          />
           {hostedProjects && hostedProjects.length > 0 && (
             <HostedProjectPicker
               projects={hostedProjects}
@@ -1305,6 +1319,17 @@ function TerminalCell({
           {search.bar}
           {shared && remoteCursors.length > 0 && <CursorOverlay cursors={remoteCursors} />}
         </div>
+        {reviewOpen && cwd && (
+          <DiffReview
+            cwd={cwd}
+            base={worktree?.baseCommit}
+            baseLabel={worktree ? worktree.base : 'HEAD'}
+            notes={reviewNotes}
+            onNotesChange={onReviewNotesChange}
+            onSend={(prompt) => { seedInput(prompt); requestAnimationFrame(() => { try { termRef.current?.focus() } catch {} }) }}
+            onClose={() => { setReviewOpen(false); refreshGit(); requestAnimationFrame(() => { try { termRef.current?.focus() } catch {} }) }}
+          />
+        )}
       </div>
     </div>
   )
@@ -1915,6 +1940,11 @@ function AgentGridInner({
   const [layouts, setLayouts] = useState<ResponsiveLayouts>({ lg: [] })
   const [fontSize, setFontSize] = useState(DEFAULT_FONT)
   const loadedRef = useRef(false)
+  // Set by the load effect; the persist effect in the SAME commit still sees the
+  // pre-load (empty) state and must not write it — under StrictMode the load
+  // effect re-runs right after and would read back that empty write, so every
+  // dev reload lost its panes.
+  const justLoadedRef = useRef(false)
 
   // ── Layout modes ───────────────────────────────────────────────────────────
   const [viewMode, setViewMode] = useState<ViewMode>('grid')
@@ -2283,6 +2313,7 @@ function AgentGridInner({
       if (f >= MIN_FONT && f <= MAX_FONT) setFontSize(f)
     } catch {}
     loadedRef.current = true
+    justLoadedRef.current = true
   }, [key])
 
   // Persist cells + layouts whenever they change (after initial load). Skips the
@@ -2290,6 +2321,7 @@ function AgentGridInner({
   // previous project's cells (stale closure) before the load effect reconciles.
   useEffect(() => {
     if (!loadedRef.current) return
+    if (justLoadedRef.current) { justLoadedRef.current = false; persistKeyRef.current = key; return }
     if (persistKeyRef.current !== key) { persistKeyRef.current = key; return }
     try {
       // Remote panes are session-scoped: their PTY lives on a cloud agent and a
@@ -2482,7 +2514,65 @@ function AgentGridInner({
   }, [])
 
   const setCellCwd = useCallback((id: string, cwd: string) => {
-    setCells((prev) => prev.map((c) => (c.id === id ? { ...c, cwd } : c)))
+    setCells((prev) => prev.map((c) => (c.id === id
+      ? { ...c, cwd, worktree: c.worktree && c.worktree.path === cwd ? c.worktree : undefined }
+      : c)))
+  }, [])
+
+  const setCellNotes = useCallback((id: string, reviewNotes: ReviewNote[]) => {
+    setCells((prev) => prev.map((c) => (c.id === id ? { ...c, reviewNotes: reviewNotes.length ? reviewNotes : undefined } : c)))
+  }, [])
+
+  // ── Worktree per pane ──────────────────────────────────────────────────────
+  // Parallel agents in one checkout trample each other's edits. "Isolate" cuts
+  // a worktree on its own `orq/…` branch and moves the pane there; the PTY
+  // restarts in the new folder (cwd is in the session effect's deps).
+  const [wtBusy, setWtBusy] = useState<Record<string, boolean>>({})
+  const [wtError, setWtError] = useState<Record<string, string | null>>({})
+
+  const isolateCell = useCallback(async (id: string) => {
+    const cell = cellsRef.current.find((c) => c.id === id)
+    if (!cell?.cwd || cell.worktree) return
+    setWtBusy((p) => ({ ...p, [id]: true }))
+    setWtError((p) => ({ ...p, [id]: null }))
+    try {
+      const wt = await gitWorktreeCreate(cell.cwd, cell.name || autoNamesRef.current.get(id))
+      const worktree: PaneWorktree = { path: wt.path, branch: wt.branch, base: wt.base, baseCommit: wt.baseCommit, root: wt.root }
+      setCells((prev) => prev.map((c) => (c.id === id ? { ...c, cwd: wt.path, worktree, reviewNotes: undefined } : c)))
+      // Hook config (.orquesta.json) lives per folder — enrol the new one too.
+      if (cell.hostedProjectId && hostedToken && socket) {
+        const project = hostedProjects?.find((p) => p.id === cell.hostedProjectId)
+        socket.emit('hook:init-project', {
+          token: hostedToken, apiUrl: hostedApiUrl, projectId: cell.hostedProjectId, projectName: project?.name, cwd: wt.path,
+        })
+      }
+    } catch (e) {
+      setWtError((p) => ({ ...p, [id]: e instanceof Error ? e.message : String(e) }))
+    } finally {
+      setWtBusy((p) => ({ ...p, [id]: false }))
+    }
+  }, [socket, hostedToken, hostedApiUrl, hostedProjects])
+
+  const removeCellWorktree = useCallback(async (id: string) => {
+    const cell = cellsRef.current.find((c) => c.id === id)
+    const wt = cell?.worktree
+    if (!wt) return
+    setWtBusy((p) => ({ ...p, [id]: true }))
+    setWtError((p) => ({ ...p, [id]: null }))
+    try {
+      const res = await gitWorktreeRemove(wt.path, false)
+      if (!res.ok) {
+        setWtError((p) => ({ ...p, [id]: res.dirty
+          ? `Uncommitted changes in ${wt.branch} — commit or discard them first; the worktree was kept.`
+          : (res.error || 'Could not remove the worktree') }))
+        return
+      }
+      setCells((prev) => prev.map((c) => (c.id === id ? { ...c, cwd: wt.root, worktree: undefined, reviewNotes: undefined } : c)))
+    } catch (e) {
+      setWtError((p) => ({ ...p, [id]: e instanceof Error ? e.message : String(e) }))
+    } finally {
+      setWtBusy((p) => ({ ...p, [id]: false }))
+    }
   }, [])
 
   const setCellHostedProject = useCallback((id: string, hostedProjectId: string | undefined) => {
@@ -3053,6 +3143,13 @@ function AgentGridInner({
       resumeId={cell.resumeId}
       daemonRunning={!!(cell.hostedProjectId && daemonStatus[cell.hostedProjectId]?.running)}
       queueState={queue[cell.id]?.state}
+      worktree={cell.worktree}
+      worktreeBusy={!!wtBusy[cell.id]}
+      worktreeError={wtError[cell.id]}
+      onIsolate={() => isolateCell(cell.id)}
+      onRemoveWorktree={() => removeCellWorktree(cell.id)}
+      reviewNotes={cell.reviewNotes ?? []}
+      onReviewNotesChange={(n) => setCellNotes(cell.id, n)}
       onClose={() => removeCell(cell.id)}
       onCliTypeChange={(v) => setCellCli(cell.id, v)}
       onRename={(v) => setCellName(cell.id, v)}

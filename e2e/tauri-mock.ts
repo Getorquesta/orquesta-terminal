@@ -13,6 +13,9 @@ export const TAURI_MOCK_SCRIPT = `
     'session_resize':             null,
     'fs_list_dir':                { entries: [], current: '/home', home: '/home' },
     'fs_native_pick':             { ok: false, path: null, available: true },
+    // A browser has no repo behind it; specs that need one stand in their own.
+    'git_info':                   { isRepo: false, folder: '' },
+    'git_diff':                   { ok: true, diff: '', base: 'HEAD', truncated: false },
     'hook_status':                { configured: false, cwd: '/home' },
     'hook_init_project':          { ok: true, claudeHooked: false },
     'daemon_preflight':           { agentAvailable: false },

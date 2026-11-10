@@ -3,6 +3,7 @@ mod cloud;
 mod daemon;
 mod error;
 mod fs;
+mod git;
 mod ipc;
 mod pty;
 mod render_guard;
@@ -74,6 +75,11 @@ pub fn run() {
             // Filesystem
             ipc::fs_list_dir,
             ipc::fs_native_pick,
+            // Git
+            ipc::git_info,
+            ipc::git_worktree_create,
+            ipc::git_worktree_remove,
+            ipc::git_diff,
             // Hook enrollment
             ipc::hook_status,
             ipc::hook_init_project,
