@@ -61,7 +61,7 @@ import { RemoteCell } from './RemoteCell'
 import type { RemoteTarget } from './RemoteCell'
 import { RemoteDesktopCell } from './RemoteDesktopCell'
 import type { RemoteDesktopTarget } from './RemoteDesktopCell'
-import { PanelLeftOpen, Layers, Zap, Mail, MonitorSmartphone, Video, Radar, Mic, Dices, Shuffle, Skull, Settings } from 'lucide-react'
+import { PanelLeftOpen, Layers, Zap, Mail, MonitorSmartphone, Video, Radar, Mic, Dices, Shuffle, Skull, Settings, Bot } from 'lucide-react'
 import { SettingsPanel } from './SettingsPanel'
 import { launchConfigFor, loadSettings } from '@/lib/cliSettings'
 import { feedTypedBuffer, emptyTypedBuffer, MIN_TYPED_PROMPT, type TypedBuffer } from '@/lib/typedBuffer'
@@ -69,6 +69,8 @@ import { attachRenderer } from '@/lib/xterm-renderer'
 import { looksBlocked, parseProgramStatus, type ProgramStatus, type QueueEntry, type QueueState } from '@/lib/agentQueue'
 import { playAlert } from '@/lib/alertSound'
 import { AgentToastStack, StatusMarker, type AgentToast } from './AgentQueue'
+import { AgentFloor, type FloorAgent } from './AgentFloor'
+import { notifyDesktop } from '@/lib/desktopNotify'
 import { useTerminalSearch } from './TerminalSearchBar'
 import { openExternal } from '@/lib/open-external'
 import { useKeyLabels } from '@/lib/platform'
@@ -1355,6 +1357,8 @@ export interface AgentGridHandle {
   toggleOverlay: () => void
   /** Toggle "lighting": auto-surface whichever terminal last finished a prompt. */
   toggleLighting: () => void
+  /** Floor view: every agent as a robot at a workbench. */
+  toggleFloor: () => void
   /** Show/hide the left terminal-list sidebar. */
   toggleSidebar: () => void
   /** Cycle keyboard focus to the next (+1) / previous (-1) terminal. */
@@ -1950,6 +1954,7 @@ function AgentGridInner({
   const [viewMode, setViewMode] = useState<ViewMode>('grid')
   const [sidebarOpen, setSidebarOpen] = useState(true)
   const [lighting, setLighting] = useState(false)
+  const [floorOpen, setFloorOpen] = useState(false)
   // Overlay mode's own free-floating pixel geometry (kept apart from the tiled
   // `layouts` so switching modes doesn't destroy either arrangement).
   const [floatGeom, setFloatGeom] = useState<Record<string, FloatGeom>>({})
@@ -2668,6 +2673,8 @@ function AgentGridInner({
       cellApiRef.current.get(id)?.focus()
     }, 0)
   }, [bringToFront, setActive])
+  const focusCellRef = useRef(focusCellFromList)
+  focusCellRef.current = focusCellFromList
 
   // Cycle keyboard focus through the open terminals (Ctrl+Tab / Ctrl+Shift+Tab),
   // in sidebar order, wrapping around. In overlay the target is also raised.
@@ -2705,10 +2712,15 @@ function AgentGridInner({
   const raiseAlert = useCallback((id: string, kind: 'done' | 'blocked', note?: string) => {
     const alerts = loadSettings().alerts
     if (alerts?.sound ?? true) playAlert(kind)
-    if (!(alerts?.toast ?? true)) return
     const cell = cellsRef.current.find((c) => c.id === id)
     if (!cell) return
-    const toast = { key: ++toastKeyRef.current, cellId: id, kind, title: paneLabel(cell, autoNamesRef.current), note }
+    const title = paneLabel(cell, autoNamesRef.current)
+    // App in the background: the in-app toast is invisible, so ask the OS.
+    if ((alerts?.desktop ?? true) && !document.hasFocus()) {
+      notifyDesktop(kind === 'blocked' ? `${title} needs you` : `${title} finished`, note, () => focusCellRef.current(id))
+    }
+    if (!(alerts?.toast ?? true)) return
+    const toast = { key: ++toastKeyRef.current, cellId: id, kind, title, note }
     setToasts((prev) => [...prev.filter((t) => t.cellId !== id), toast])
   }, [])
 
@@ -2877,6 +2889,7 @@ function AgentGridInner({
     return !v
   }), [resetSpotlight])
   const toggleSidebar = useCallback(() => setSidebarOpen((v) => !v), [])
+  const toggleFloor = useCallback(() => setFloorOpen((v) => !v), [])
 
   // While in overlay mode, any pane added later still needs a floating geometry.
   useEffect(() => {
@@ -2903,6 +2916,7 @@ function AgentGridInner({
       if (mod && e.shiftKey && k === 'o') { e.preventDefault(); toggleOverlay() }
       else if (mod && e.shiftKey && k === 'y') { e.preventDefault(); toggleLighting() }
       else if (mod && e.shiftKey && k === 'b') { e.preventDefault(); toggleSidebar() }
+      else if (mod && e.shiftKey && k === 'g') { e.preventDefault(); toggleFloor() }
       // Ctrl+← / Ctrl+→ cycle terminals
       if ((e.ctrlKey) && !e.shiftKey && !e.altKey && !e.metaKey) {
         if (e.key === 'ArrowLeft') { e.preventDefault(); e.stopImmediatePropagation(); cycleActive(-1); return }
@@ -2911,13 +2925,13 @@ function AgentGridInner({
     }
     window.addEventListener('keydown', onKey, true)
     return () => window.removeEventListener('keydown', onKey, true)
-  }, [toggleOverlay, toggleLighting, toggleSidebar, cycleActive])
+  }, [toggleOverlay, toggleLighting, toggleSidebar, toggleFloor, cycleActive])
 
   // Expose imperative controls to the host page (palette / buttons).
   useEffect(() => {
     apiRef.current = {
       addTerminal: () => addCell(), arrange, closeActive, importSessions, openRemote, openRemoteDesktop,
-      toggleOverlay, toggleLighting, toggleSidebar, cycleTerminal: cycleActive,
+      toggleOverlay, toggleLighting, toggleSidebar, toggleFloor, cycleTerminal: cycleActive,
       searchActive: () => {
         const id = activeCellIdRef.current
         if (id) cellApiRef.current.get(id)?.search?.()
@@ -2941,7 +2955,7 @@ function AgentGridInner({
         return typeof api?.tail === 'function' ? api.tail() : ''
       },
     }
-  }, [apiRef, addCell, arrange, closeActive, importSessions, openRemote, openRemoteDesktop, toggleOverlay, toggleLighting, toggleSidebar, cycleActive, setActive, armTurn])
+  }, [apiRef, addCell, arrange, closeActive, importSessions, openRemote, openRemoteDesktop, toggleOverlay, toggleLighting, toggleSidebar, toggleFloor, cycleActive, setActive, armTurn])
 
   // Grid-level keyboard shortcuts for when NO terminal is focused (the focused
   // case is handled inside the pane so the keys don't reach the shell).
@@ -3073,6 +3087,16 @@ function AgentGridInner({
   // everywhere.
   const autoNames = useMemo(() => autoPaneNames(cells), [cells])
   autoNamesRef.current = autoNames
+
+  const floorAgents = useMemo<FloorAgent[]>(() => cells.filter((c) => !c.desktop).map((c) => ({
+    id: c.id,
+    name: paneLabel(c, autoNames),
+    cli: c.remote ? 'remote' : (CLI_OPTIONS.find((o) => o.value === c.cliType)?.label ?? c.cliType),
+    state: queue[c.id]?.state ?? (statuses[c.id] === 'running' ? 'working' : 'idle'),
+    since: queue[c.id]?.since,
+    note: queue[c.id]?.note,
+    branch: c.worktree?.branch,
+  })), [cells, queue, statuses, autoNames])
 
   // Publish the pane roster + busy/idle to the host page (Kanban mode).
   useEffect(() => {
@@ -3325,6 +3349,14 @@ function AgentGridInner({
                   <span className="font-mono text-[10px] text-zinc-400">{keys.combo(keys.mod, keys.shift, 'Y')}</span>
                 </button>
                 <button
+                  onClick={() => { toggleFloor(); setViewMenuOpen(false) }}
+                  className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs hover:bg-white/5 ${floorOpen ? 'text-emerald-300' : 'text-zinc-200'}`}
+                >
+                  <Bot className="h-4 w-4" /> <span className="flex-1">Floor (watch agents)</span>
+                  {floorOpen && <Check className="h-3.5 w-3.5" />}
+                  <span className="font-mono text-[10px] text-zinc-400">{keys.combo(keys.mod, keys.shift, 'G')}</span>
+                </button>
+                <button
                   onClick={() => { arrange(); setViewMenuOpen(false) }}
                   disabled={viewMode !== 'grid'}
                   className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs text-zinc-200 hover:bg-white/5 disabled:opacity-40"
@@ -3509,6 +3541,19 @@ function AgentGridInner({
           )
         })}
 
+        {/* Floor view covers the panes without unmounting them (PTYs keep running). */}
+        {floorOpen && (
+          <AgentFloor
+            agents={floorAgents}
+            onOpen={(id) => {
+              setFloorOpen(false)
+              setToasts((prev) => prev.filter((t) => t.cellId !== id))
+              focusCellFromList(id)
+            }}
+            onClose={() => setFloorOpen(false)}
+          />
+        )}
+
         {/* (Roulette controls live in the toolbar now — see the View-menu row.) */}
 
         {/* Death countdown — pointer-events-none so keystrokes still reach the
@@ -3552,7 +3597,7 @@ export const AgentGrid = forwardRef<AgentGridHandle, AgentGridProps>(function Ag
     addTerminal() {}, arrange() {}, closeActive() {}, importSessions() {}, searchActive() {},
     openRemote: () => '',
     openRemoteDesktop: () => '',
-    toggleOverlay() {}, toggleLighting() {}, toggleSidebar() {}, cycleTerminal() {},
+    toggleOverlay() {}, toggleLighting() {}, toggleSidebar() {}, toggleFloor() {}, cycleTerminal() {},
     dispatchPrompt: () => false,
     paneTail: () => '',
   })
@@ -3567,6 +3612,7 @@ export const AgentGrid = forwardRef<AgentGridHandle, AgentGridProps>(function Ag
     toggleOverlay: () => apiRef.current.toggleOverlay(),
     toggleLighting: () => apiRef.current.toggleLighting(),
     toggleSidebar: () => apiRef.current.toggleSidebar(),
+    toggleFloor: () => apiRef.current.toggleFloor(),
     cycleTerminal: (dir) => apiRef.current.cycleTerminal(dir),
     dispatchPrompt: (cellId, text) => apiRef.current.dispatchPrompt(cellId, text),
     paneTail: (cellId) => apiRef.current.paneTail(cellId),

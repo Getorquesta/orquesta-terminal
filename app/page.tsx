@@ -238,6 +238,10 @@ export default function TerminalWorkspacePage() {
         icon: Zap, keepOpen: true, run: () => gridRef.current?.toggleLighting(),
       },
       {
+        id: 'term-floor', group: 'Terminal', label: 'Floor — watch agents work', hint: keys.combo(keys.mod, keys.shift, 'G'),
+        icon: Bot, keepOpen: false, run: () => gridRef.current?.toggleFloor(),
+      },
+      {
         id: 'term-sidebar', group: 'Terminal', label: 'Toggle terminal list sidebar', hint: keys.combo(keys.mod, keys.shift, 'B'),
         icon: PanelLeft, keepOpen: true, run: () => gridRef.current?.toggleSidebar(),
       },

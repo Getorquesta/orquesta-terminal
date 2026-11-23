@@ -56,6 +56,7 @@ export function SettingsPanel({
 
   const soundOn = draft.alerts?.sound ?? true
   const toastOn = draft.alerts?.toast ?? true
+  const desktopOn = draft.alerts?.desktop ?? true
   const setAlerts = (patch: AlertSettings) =>
     setDraft((d) => ({ ...d, alerts: { ...d.alerts, ...patch } }))
 
@@ -130,6 +131,13 @@ export function SettingsPanel({
                   <div className="text-[11px] text-zinc-500">Click it to jump to that pane</div>
                 </div>
                 <Switch on={toastOn} onToggle={() => setAlerts({ toast: !toastOn })} />
+              </div>
+              <div className="flex items-center justify-between gap-3 px-3.5 py-2.5">
+                <div className="min-w-0">
+                  <div className="text-sm text-zinc-200">Desktop notification</div>
+                  <div className="text-[11px] text-zinc-500">When the app is in the background: OS notification + taskbar flash</div>
+                </div>
+                <Switch on={desktopOn} onToggle={() => setAlerts({ desktop: !desktopOn })} />
               </div>
             </div>
           </section>
