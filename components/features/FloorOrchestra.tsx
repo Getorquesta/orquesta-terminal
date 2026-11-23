@@ -1,84 +1,89 @@
 'use client'
 
 // ── Floor: orchestra theme ───────────────────────────────────────────────────
-// Every pane is a musician (an "ot", the 7ots character) seated at a music
-// stand on a curved stage; the people who own those terminals are the
-// conductors on podiums in front of their section. The stand light carries the
-// state: blue while playing, amber under a spotlight when the musician stands
-// and needs its conductor, green when the part is done, off when resting.
+// The panes drawn as a stage plot: each agent is a seat card on a curved riser,
+// grouped into one section per owner, the way an orchestra seats its sections
+// around the podium. The owners are the conductors, listed at the podium.
+// State lives on the card: level bars while playing (working), an amber pulse
+// when the agent needs its owner, green when its part is done, dimmed at rest.
 // Styled after getorquesta's Studio: zinc rail with people, agents, activity.
-//
-// Layers, back to front: hall SVG → for each riser (back first) the ots
-// (HTML, live 7ots renderer) then their stands and instruments (SVG) →
-// conductors and spotlights → hit targets. Seats never move: a stable map is
-// easier to read than walking characters.
 
-import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { QUEUE_SECTIONS, timeAgo, type QueueState } from '@/lib/agentQueue'
 import type { FloorAgent } from './AgentFloor'
-import { OT_FOOT_X, OT_FOOT_Y, OT_H, OT_W, OtPlayer, OtThumb, otLook, type OtAct, type OtLook } from './orchestra/ots'
-import { Conductor, Hall, Instrument, Notes, SeatRing, Spot, SpotDefs, STAGE_CSS, STATE_HEX, Stand, onArc, type Arc, type InstrumentKind } from './orchestra/props'
+import { OtThumb, otLook, type OtLook } from './orchestra/ots'
+import { Equalizer, StagePlot, STAGE_CSS, STATE_HEX, onArc, type Arc, type Section } from './orchestra/props'
 
 // ── stage layout (scene px before fit scaling) ──
-const W = 1000
-const R0 = 250 // front riser radius
-const RSTEP = 100
-const KY = 0.72 // vertical squash of the arcs: the hall's viewpoint
-const SPAN = (62 * Math.PI) / 180 // half the angle the seats cover
-const TOP_ROOM = 130 // above the back riser: heads, notes, shell
+const R0 = 360 // front riser radius
+const BAND = 140 // riser depth
+const KY = 0.9 // slight squash: the plot seen from the hall
+const CARD_W = 172
+const CARD_H = 54
+const HALF = (60 * Math.PI) / 180 // widest seat angle either side of centre
+const MAX_ROWS = 4
+const RIM = BAND / 2 + 24 // back riser centre to the rim colour bar
+const TOP = RIM * KY + 14 // room above the back riser for the rim
 const ME = 'You'
 
 const ownerOf = (a: FloorAgent) => a.owner?.trim() || ME
 
-interface Seat { x: number; y: number; s: number; row: number; t: number; kind: InstrumentKind }
+interface Seat { x: number; y: number; row: number; t: number }
 
-const KINDS: InstrumentKind[][] = [['violin', 'violin'], ['cello', 'violin'], ['horn', 'timpani'], ['horn', 'cello']]
+/** Angle between neighbours on a riser of radius r so their cards just clear. */
+const pitchAt = (r: number) => 2 * Math.asin(Math.min(1, (CARD_W + 20) / 2 / r))
 
-/** Seats on concentric risers; each person's agents form one wedge, like an orchestra section. */
+/**
+ * Seats on concentric risers. Outer risers are longer and hold more seats, like
+ * a real orchestra; each person's agents form one contiguous section.
+ */
 function stage(agents: FloorAgent[]) {
   const n = Math.max(1, agents.length)
-  const rows = n <= 5 ? 1 : n <= 12 ? 2 : n <= 21 ? 3 : 4
-  const radii = Array.from({ length: rows }, (_, k) => R0 + k * RSTEP)
-  const sum = radii.reduce((a, b) => a + b, 0)
-  const counts = radii.map((r) => Math.max(1, Math.floor((n * r) / sum)))
+  const capOf = (r: number) => Math.max(1, Math.floor((2 * HALF) / pitchAt(r)) + 1)
+  let rows = 1
+  while (rows < MAX_ROWS && Array.from({ length: rows }, (_, k) => capOf(R0 + k * BAND)).reduce((a, b) => a + b, 0) < n) rows++
+  const radii = Array.from({ length: rows }, (_, k) => R0 + k * BAND)
+  const caps = radii.map(capOf)
+  const capSum = caps.reduce((a, b) => a + b, 0)
+  const counts = caps.map((c) => Math.max(1, Math.floor((n * c) / capSum)))
   for (let k = rows - 1, left = n - counts.reduce((a, b) => a + b, 0); left > 0; k = (k - 1 + rows) % rows, left--) counts[k]++
-  const arc: Arc = { cx: W / 2, cy: TOP_ROOM + radii[rows - 1] * KY, ky: KY }
+  while (counts.reduce((a, b) => a + b, 0) > n) counts[counts.indexOf(Math.max(...counts))]--
+  const rMax = radii[rows - 1]
+  const pitches = radii.map((r, k) => (counts[k] > 1 ? Math.min(pitchAt(r) * 1.12, (2 * HALF) / (counts[k] - 1)) : 0))
+  const span = Math.max(...radii.map((r, k) => ((counts[k] - 1) / 2) * pitches[k] + pitchAt(r) / 2))
+  const xs = radii.map((r, k) => r * Math.sin(((counts[k] - 1) / 2) * pitches[k]))
+  const W = Math.ceil(2 * Math.max(Math.max(...xs) + CARD_W / 2 + 28, (rMax + RIM) * Math.sin(Math.min(span + 0.06, Math.PI / 2)) + 16))
+  const arc: Arc = { cx: W / 2, cy: TOP + rMax * KY, ky: KY }
   const seats: Seat[] = []
   radii.forEach((r, k) => {
     for (let i = 0; i < counts[k]; i++) {
-      const t = -SPAN + (2 * SPAN * (i + 0.5)) / counts[k]
-      const p = onArc(arc, r, t)
-      seats.push({ ...p, s: 0.98 - 0.09 * k, row: k, t, kind: KINDS[k][i % 2] })
+      const t = pitches[k] * (i - (counts[k] - 1) / 2)
+      seats.push({ ...onArc(arc, r, t), row: k, t })
     }
   })
   seats.sort((a, b) => a.t - b.t || a.row - b.row)
+  // cards shrink only as much as needed for no two to touch
+  let cardScale = 1
+  for (let i = 0; i < seats.length; i++) for (let j = i + 1; j < seats.length; j++) {
+    const dx = Math.abs(seats[i].x - seats[j].x) - 10, dy = Math.abs(seats[i].y - seats[j].y) - 8
+    cardScale = Math.min(cardScale, Math.max(dx / CARD_W, dy / CARD_H))
+  }
+  cardScale = Math.max(0.55, cardScale)
   const names: string[] = []
   for (const a of agents) { const o = ownerOf(a); if (!names.includes(o)) names.push(o) }
   const ordered = [...agents].sort((a, b) => names.indexOf(ownerOf(a)) - names.indexOf(ownerOf(b)))
   const seatOf = new Map<string, Seat>()
   ordered.forEach((a, i) => seatOf.set(a.id, seats[i]))
-  // conductors: in front of the middle of their section, kept apart
-  const podY = arc.cy + 8
-  const owners = names.map((name) => {
-    const mine = ordered.filter((a) => ownerOf(a) === name).map((a) => seatOf.get(a.id)!.t)
-    const t = mine.reduce((a, b) => a + b, 0) / mine.length
-    return { name, x: names.length === 1 ? W / 2 : W / 2 + Math.sin(t) * 340 }
+  const ts = names.map((name) => ordered.filter((a) => ownerOf(a) === name).map((a) => seatOf.get(a.id)!.t))
+  const edge = span + 0.06
+  const sections: Section[] = names.map((name, i) => {
+    const t0 = i === 0 ? -edge : (Math.max(...ts[i - 1]) + Math.min(...ts[i])) / 2
+    const t1 = i === names.length - 1 ? edge : (Math.max(...ts[i]) + Math.min(...ts[i + 1])) / 2
+    return { name, t0, t1, mid: (t0 + t1) / 2, hue: hueOf(name) }
   })
-  const GAP = 150
-  for (let i = 1; i < owners.length; i++) owners[i].x = Math.max(owners[i].x, owners[i - 1].x + GAP)
-  const over = owners.length ? owners[owners.length - 1].x - (W - 90) : 0
-  if (over > 0) owners.forEach((o) => { o.x -= over })
-  for (let i = owners.length - 2; i >= 0; i--) owners[i].x = Math.min(owners[i].x, owners[i + 1].x - GAP)
-  return { arc, radii, rows, seatOf, owners, podY, height: podY + 56 }
-}
-
-const URGENT_MS = 2 * 60000
-
-function actOf(a: FloorAgent, now: number): OtAct {
-  if (a.state === 'blocked') return a.since && now - a.since > URGENT_MS ? 'urgent' : 'call'
-  if (a.state === 'done') return 'serve'
-  if (a.state === 'working') return 'work'
-  return 'sleep'
+  // the podium sits in the open pit in front of the first riser
+  const pitW = 2 * (R0 - BAND / 2 - 14) * 0.9
+  return { arc, radii, span, seatOf, sections, cardScale, W, pitW, height: arc.cy + 14 }
 }
 
 // ── shared bits ──
@@ -236,10 +241,59 @@ function Rail({ agents, looks, owners, feed, selected, onSelect, onOpen }: {
 }
 
 
+// ── seat card ──
+const firstName = (o: string) => (o === ME ? 'you' : o.split(/\s+/)[0])
+
+function SeatCard({ a, look, x, y, k, selected, onSelect, onOpen }: {
+  a: FloorAgent; look: OtLook; x: number; y: number; k: number; selected: boolean
+  onSelect: () => void; onOpen: () => void
+}) {
+  const owner = ownerOf(a)
+  const c = STATE_HEX[a.state]
+  const status = a.state === 'blocked' ? `Needs ${firstName(owner)}` : a.state === 'working' ? 'Playing' : a.state === 'done' ? 'Done' : 'Idle'
+  const tone = a.state === 'blocked'
+    ? 'border-amber-400/60 bg-[#1c1708]'
+    : a.state === 'done' ? 'border-green-400/35 bg-[#0f1311]'
+    : a.state === 'working' ? 'border-sky-400/25 bg-[#0f1217]'
+    : 'border-zinc-800 bg-[#0e0f12] opacity-60'
+  return (
+    <div
+      role="button"
+      tabIndex={0}
+      aria-pressed={selected}
+      aria-label={`${a.name}, ${a.cli}, owned by ${owner}: ${LABEL[a.state]}${a.note ? `. ${a.note}` : ''}. Enter opens the terminal`}
+      title={a.note || undefined}
+      onClick={onSelect}
+      onDoubleClick={onOpen}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter') { e.preventDefault(); onOpen() }
+        else if (e.key === ' ') { e.preventDefault(); onSelect() }
+      }}
+      className="absolute left-0 top-0 cursor-pointer outline-none [&:focus-visible>div]:ring-2 [&:focus-visible>div]:ring-green-400"
+      style={{ width: CARD_W, height: CARD_H, transform: `translate(${x - CARD_W / 2}px, ${y - CARD_H / 2}px) scale(${k})` }}
+    >
+      {a.state === 'blocked' && <span className="orc-ring pointer-events-none absolute inset-0 rounded-xl border border-amber-400" aria-hidden />}
+      <div className={`relative flex h-full items-center gap-2.5 rounded-xl border pl-2 pr-2.5 shadow-[0_8px_20px_-12px_#000] transition-[background-color,border-color,box-shadow] duration-[160ms] hover:border-zinc-500 ${tone} ${selected ? 'ring-2 ring-zinc-200/80' : ''}`}>
+        <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-zinc-800/70">
+          <OtThumb look={look} size={30} />
+        </span>
+        <span className="min-w-0 flex-1">
+          <span className="block truncate text-[13px] font-medium leading-tight text-zinc-100">{a.name}</span>
+          <span className="mt-0.5 flex items-center gap-1.5 text-[11px] leading-tight">
+            <span className="h-1.5 w-1.5 shrink-0 rounded-full" style={{ background: c }} aria-hidden />
+            <span className="min-w-0 flex-1 truncate" style={{ color: a.state === 'idle' ? '#71717a' : c }}>{status}</span>
+            {a.state !== 'idle' && a.since && <span className="shrink-0 tabular-nums text-zinc-500">{timeAgo(a.since)}</span>}
+          </span>
+        </span>
+        {a.state === 'working' && <Equalizer color={c} />}
+      </div>
+    </div>
+  )
+}
+
 // ── scene ──
 export function OrchestraScene({ agents, onOpen }: { agents: FloorAgent[]; onOpen: (id: string) => void }) {
-  const uid = 'o' + useId().replace(/[^a-zA-Z0-9]/g, '')
-  const { arc, radii, rows, seatOf, owners, podY, height } = useMemo(() => stage(agents), [agents])
+    const { arc, radii, span, seatOf, sections, cardScale, W, pitW, height } = useMemo(() => stage(agents), [agents])
   const looks = useMemo(() => new Map(agents.map((a) => [a.id, otLook(a.id, a.cli)])), [agents])
 
   const [selectedId, setSelectedId] = useState<string | null>(null)
@@ -265,12 +319,12 @@ export function OrchestraScene({ agents, onOpen }: { agents: FloorAgent[]; onOpe
   useLayoutEffect(() => {
     const el = box.current
     if (!el) return
-    const fit = () => setScale(Math.max(0.3, Math.min(1.25, (el.clientWidth - 32) / W, (el.clientHeight - 32) / height)))
+    const fit = () => setScale(Math.max(0.3, Math.min(1.3, (el.clientWidth - 48) / W, (el.clientHeight - 48) / height)))
     fit()
     const ro = new ResizeObserver(fit)
     ro.observe(el)
     return () => ro.disconnect()
-  }, [height])
+  }, [W, height])
 
   const [paused, setPaused] = useState(false)
   useEffect(() => {
@@ -282,14 +336,11 @@ export function OrchestraScene({ agents, onOpen }: { agents: FloorAgent[]; onOpe
   const [mounted, setMounted] = useState(false)
   useEffect(() => setMounted(true), [])
 
-  const now = Date.now()
   const count = (s: QueueState) => agents.filter((a) => a.state === s).length
   const oldest = agents.filter((a) => a.state === 'blocked' && a.since).sort((a, b) => a.since! - b.since!)[0]
-  const byRow = (k: number) => agents.filter((a) => seatOf.get(a.id)?.row === k)
-  const STAND_UP = 12 // a waiting musician stands up
 
   return (
-    <div className="flex min-h-0 flex-1 bg-[#08090b] text-zinc-300">
+    <div className="flex min-h-0 min-w-0 flex-1 bg-[#08090b] text-zinc-300">
       <style>{STAGE_CSS}</style>
       <div className="flex min-w-0 flex-1 flex-col">
         {/* KPI bar */}
@@ -311,106 +362,47 @@ export function OrchestraScene({ agents, onOpen }: { agents: FloorAgent[]; onOpe
           )}
         </div>
 
-        <div ref={box} className="relative flex min-h-0 flex-1 items-center justify-center overflow-hidden">
+        <div ref={box} className="relative flex min-h-0 min-w-0 flex-1 items-center justify-center overflow-hidden"
+          style={{ background: 'radial-gradient(circle, #ffffff0d 0.8px, transparent 1.2px) 0 0 / 18px 18px, radial-gradient(ellipse 70% 60% at 50% 55%, #15171c, #08090b)' }}>
           {mounted && <div
-            className={`orc-root relative overflow-hidden rounded-xl border border-zinc-800 shadow-[0_24px_48px_-24px_#000] ${paused ? 'orc-paused' : ''}`}
+            className={`orc-root relative ${paused ? 'orc-paused' : ''}`}
             style={{ width: W, height, transform: `scale(${scale})`, transformOrigin: 'center', flex: 'none' }}
             role="group"
-            aria-label="Orchestra: every musician is a terminal, the conductors in front own them"
+            aria-label="Orchestra: every seat is a terminal, grouped into one section per owner"
           >
-            {/* hall */}
             <svg className="absolute inset-0" width={W} height={height} viewBox={`0 0 ${W} ${height}`} aria-hidden>
-              <Hall uid={uid} w={W} h={height} arc={arc} radii={radii} span={SPAN} />
-              {agents.map((a) => {
-                const p = seatOf.get(a.id)!
-                return selectedId === a.id ? <SeatRing key={a.id} x={p.x} y={p.y} s={p.s} /> : null
-              })}
+              <StagePlot arc={arc} radii={radii} band={BAND} span={span} sections={sections} />
             </svg>
 
-            {/* risers, back to front: musicians, then their stands */}
-            {Array.from({ length: rows }, (_, i) => rows - 1 - i).map((k) => (
-              <div key={k} className="pointer-events-none absolute inset-0">
-                {byRow(k).map((a) => {
-                  const p = seatOf.get(a.id)!
-                  const up = a.state === 'blocked' ? STAND_UP * p.s : 0
-                  return (
-                    <div key={a.id} className="absolute left-0 top-0"
-                      style={{ width: OT_W, height: OT_H, transform: `translate3d(${p.x - OT_FOOT_X}px, ${p.y - OT_FOOT_Y}px, 0)` }}>
-                      <div style={{ transformOrigin: `${OT_FOOT_X}px ${OT_FOOT_Y}px`, transform: `translateY(${-up}px) scale(${p.s})`, transition: 'transform .5s cubic-bezier(.3,.8,.3,1)', opacity: a.state === 'idle' ? 0.7 : 1 }}>
-                        <OtPlayer look={looks.get(a.id)!} act={actOf(a, now)} />
-                      </div>
-                    </div>
-                  )
-                })}
-                <svg className="absolute inset-0" width={W} height={height} viewBox={`0 0 ${W} ${height}`} aria-hidden>
-                  {byRow(k).map((a, i) => {
-                    const p = seatOf.get(a.id)!
-                    const busy = a.state === 'working'
-                    return (
-                      <g key={a.id}>
-                        <Instrument kind={p.kind} x={p.x} y={p.y} s={p.s} busy={busy} />
-                        <Stand x={p.x} y={p.y} s={p.s} color={STATE_HEX[a.state]} lit={a.state !== 'idle'} name={a.name}
-                          selected={selectedId === a.id} />
-                        {busy && <Notes x={p.x} y={p.y} s={p.s} seed={i + k * 7} />}
-                      </g>
-                    )
-                  })}
-                </svg>
+            {/* seats */}
+            {agents.map((a) => {
+              const p = seatOf.get(a.id)!
+              return (
+                <SeatCard key={a.id} a={a} look={looks.get(a.id)!} x={p.x} y={p.y} k={cardScale}
+                  selected={selectedId === a.id} onSelect={() => setSelectedId(a.id)} onOpen={() => onOpen(a.id)} />
+              )
+            })}
+
+            {/* podium: the conductors */}
+            <div className="absolute flex flex-col items-center gap-2.5" style={{ left: arc.cx - pitW / 2, width: pitW, bottom: height - arc.cy + 34 }}>
+              <span className="font-mono text-[10px] uppercase tracking-[0.2em] text-zinc-600">Podium</span>
+              <div className="flex flex-wrap justify-center gap-2">
+              {sections.map((s) => {
+                const mine = agents.filter((a) => ownerOf(a) === s.name)
+                const waiting = mine.filter((a) => a.state === 'blocked').length
+                const playing = mine.filter((a) => a.state === 'working').length
+                return (
+                  <span key={s.name} className="inline-flex items-center gap-2 rounded-full border border-zinc-800 bg-[#0e0f12]/90 py-1 pl-1 pr-2.5 text-[12px] text-zinc-200"
+                    style={{ boxShadow: `inset 0 -2px 0 ${s.hue}b0` }}>
+                    <Avatar name={s.name} size={20} />
+                    {s.name}
+                    {waiting > 0
+                      ? <span className="rounded-full px-1.5 text-[10.5px] font-semibold text-zinc-900" style={{ background: STATE_HEX.blocked }}>{waiting}</span>
+                      : <span className="text-[11px] tabular-nums text-zinc-500">{playing}/{mine.length}</span>}
+                  </span>
+                )
+              })}
               </div>
-            ))}
-
-            {/* conductors and spotlights */}
-            <svg className="pointer-events-none absolute inset-0" width={W} height={height} viewBox={`0 0 ${W} ${height}`} aria-hidden>
-              <SpotDefs uid={uid} />
-              <g style={{ mixBlendMode: 'screen' }}>
-                {agents.map((a) => {
-                  if (a.state !== 'blocked') return null
-                  const p = seatOf.get(a.id)!
-                  return <Spot key={a.id} uid={uid} x={p.x} y={p.y} s={p.s} />
-                })}
-              </g>
-              {owners.map((o) => {
-                const mine = agents.filter((a) => ownerOf(a) === o.name)
-                return (
-                  <Conductor key={o.name} x={o.x} y={podY} name={o.name} hue={hueOf(o.name)}
-                    waiting={mine.filter((a) => a.state === 'blocked').length}
-                    conducting={mine.some((a) => a.state === 'working')} />
-                )
-              })}
-            </svg>
-
-            {/* hit targets with a hover name */}
-            <div className="absolute inset-0">
-              {agents.map((a) => {
-                const p = seatOf.get(a.id)!
-                const owner = ownerOf(a)
-                const label = `${a.name}, ${a.cli}, owned by ${owner}: ${LABEL[a.state]}${a.note ? `. ${a.note}` : ''}. Enter opens the terminal`
-                const sel = selectedId === a.id
-                const w = 92 * p.s, h = 110 * p.s
-                return (
-                  <div
-                    key={a.id}
-                    role="button"
-                    tabIndex={0}
-                    aria-label={label}
-                    aria-pressed={sel}
-                    onClick={() => setSelectedId(a.id)}
-                    onDoubleClick={() => onOpen(a.id)}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter') { e.preventDefault(); onOpen(a.id) }
-                      else if (e.key === ' ') { e.preventDefault(); setSelectedId(a.id) }
-                    }}
-                    className="group absolute cursor-pointer rounded-xl outline-none focus-visible:ring-2 focus-visible:ring-green-400"
-                    style={{ left: p.x - w / 2, top: p.y - h + 8 * p.s, width: w, height: h }}
-                  >
-                    <span className={`pointer-events-none absolute bottom-full left-1/2 mb-1 flex -translate-x-1/2 items-center gap-1.5 whitespace-nowrap rounded-md border border-zinc-700/80 bg-zinc-900/95 py-0.5 pl-1.5 pr-1 text-[12px] font-medium text-zinc-100 shadow-[0_4px_12px_-4px_#000] transition-opacity duration-[120ms] ${sel ? 'opacity-100' : 'opacity-0 group-hover:opacity-100 group-focus-visible:opacity-100'}`}>
-                      <span className="h-2 w-2 rounded-full" style={{ background: STATE_HEX[a.state] }} aria-hidden />
-                      {a.name}
-                      <span className="text-zinc-500">· {owner}</span>
-                    </span>
-                  </div>
-                )
-              })}
             </div>
           </div>}
         </div>
@@ -420,14 +412,14 @@ export function OrchestraScene({ agents, onOpen }: { agents: FloorAgent[]; onOpe
           {ORDER.map((s) => (
             <span key={s} className="inline-flex items-center gap-1.5">
               <span className="h-1.5 w-3 rounded-full" style={{ background: STATE_HEX[s] }} aria-hidden />
-              {s === 'blocked' ? 'Needs you: stands up in the spotlight' : s === 'done' ? 'Done: part finished' : s === 'working' ? 'Working: playing' : 'Idle: resting'}
+              {s === 'blocked' ? 'Needs its owner' : s === 'done' ? 'Part finished' : s === 'working' ? 'Playing' : 'Resting'}
             </span>
           ))}
-          <span className="ml-auto">Conductors own their section · click selects · double-click or Enter opens</span>
+          <span className="ml-auto">One section per owner · click selects · double-click or Enter opens</span>
         </div>
       </div>
 
-      {mounted && <Rail agents={agents} looks={looks} owners={owners} feed={feed} selected={selected} onSelect={setSelectedId} onOpen={onOpen} />}
+      {mounted && <Rail agents={agents} looks={looks} owners={sections} feed={feed} selected={selected} onSelect={setSelectedId} onOpen={onOpen} />}
     </div>
   )
 }
