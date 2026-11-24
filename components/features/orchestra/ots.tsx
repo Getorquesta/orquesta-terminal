@@ -42,30 +42,51 @@ function hash(s: string): number {
 }
 
 // 7ots violet first, then companions picked to stay distinct from each other.
-const BODIES = ['#6d5dfc', '#f97316', '#14b8a6', '#ec4899', '#eab308', '#3b82f6', '#84cc16', '#a855f7', '#ef6f5e', '#06b6d4']
-const SHAPES = ['squircle', 'round']
-const IRIS = ['#22d3ee', '#22d3ee', '#7c3aed', '#16a34a', '#0ea5e9']
+const BODIES = ['#6d5dfc', '#f97316', '#14b8a6', '#ec4899', '#eab308', '#3b82f6', '#84cc16', '#a855f7', '#ef6f5e', '#06b6d4', '#f43f5e', '#10b981']
+// Curated from the 7ots part catalogue: friendly enough for a work tool, and
+// different enough that no two musicians on stage read as the same ot.
+const SHAPES = ['squircle', 'round', 'egg', 'bean', 'ghost', 'cat', 'blob', 'robot', 'bear', 'gem', 'owl', 'slime', 'alien', 'bun', 'onigiri', 'capsule', 'pear', 'drop', 'potato']
+const PATTERNS = ['belly', 'none', 'spots', 'twotone', 'stripes', 'polka', 'stars', 'socks', 'galaxy']
+const EYES = ['round', 'kawaii', 'anime', 'happy', 'sparkle', 'puppy', 'almond', 'button', 'glow', 'dot', 'focused', 'star']
+const MOUTHS = ['smile', 'grin', 'cat', 'tiny', 'uwu', 'dgrin', 'smallgrin', 'vee', 'dimples', 'smirk', 'whistle']
+const CHEEKS = ['blush', 'freckles', 'none', 'whiskers', 'stars', 'heartblush', 'shy']
+const BROWS = ['soft', 'none', 'thin', 'arched', 'fluffy', 'raised']
+const HATS = ['headphones', 'beret', 'tophat', 'beanie', null, 'catears', 'flowercrown', 'minitophat', 'sprout', 'hairbow', 'antenna', 'bearears', 'curls', 'chullo', 'laurel']
+const FACE = [null, 'glasses', null, 'monocle', null, 'nerd', null, 'heartglasses', null, 'mustache']
+const NECK = ['bowtie', 'scarf', 'bowtie', 'tie', 'pearls', 'bowtie', 'medal']
+const IRIS = ['#22d3ee', '#7c3aed', '#16a34a', '#0ea5e9', '#f59e0b', '#db2777', '#2563eb']
 
 export interface OtLook { color: string; spec: OtsSpec }
 
-/** Stable look per pane: same id, same ot, everywhere (floor, tickets, grid). */
-export function otLook(id: string, cli: string): OtLook {
+const shadeHex = (hex: string, f: number) => '#' + [1, 3, 5].map((i) => Math.round(Math.min(255, Math.max(0, parseInt(hex.slice(i, i + 2), 16) * (1 + f))))).map((v) => v.toString(16).padStart(2, '0')).join('')
+
+/**
+ * The look for one musician. Pass `slot` (its position on stage) so every seat
+ * steps through each part list with a different stride and neighbours differ in
+ * shape, colour, face and outfit at once; without it the id's hash picks.
+ */
+export function otLook(id: string, cli: string, slot?: number): OtLook {
   const h = hash(id)
-  const color = BODIES[h % BODIES.length]
+  const k = slot ?? h
+  const at = <T,>(xs: readonly T[], stride: number, salt: number) => xs[(k * stride + (slot === undefined ? h >>> salt : h % 3)) % xs.length]
   void cli
-  const accessories = [{ id: 'bowtie', color: '#18181b' }]
+  const color = at(BODIES, 5, 3)
+  const pattern = at(PATTERNS, 4, 7)
+  const accessories = [at(HATS, 7, 11), at(FACE, 3, 13), at(NECK, 2, 17)]
+    .filter((x): x is string => !!x)
+    .map((a) => ({ id: a, color: a === 'bowtie' || a === 'tie' ? '#18181b' : undefined }))
   return {
     color,
     spec: {
-      body: { shape: SHAPES[(h >>> 5) % SHAPES.length], color, pattern: 'belly', patternColor: '#fff7ed' },
+      body: { shape: at(SHAPES, 11, 5), color, pattern, patternColor: pattern === 'belly' || pattern === 'socks' ? '#fff7ed' : shadeHex(color, 0.35) },
       finish: 'soft3d',
       outline: 'auto',
-      eyes: { type: 'round', size: 1.05, iris: IRIS[(h >>> 9) % IRIS.length] },
-      brows: { type: 'soft', color: '#332a88' },
-      mouth: { type: 'smile' },
-      cheeks: { type: 'blush', color: '#ff7eb6' },
+      eyes: { type: at(EYES, 5, 9), size: 1 + ((k * 7) % 5) * 0.05, iris: at(IRIS, 3, 15) },
+      brows: { type: at(BROWS, 5, 19), color: '#332a88' },
+      mouth: { type: at(MOUTHS, 7, 21) },
+      cheeks: { type: at(CHEEKS, 3, 23), color: '#ff7eb6' },
       accessories,
-    },
+    } as OtsSpec,
   }
 }
 

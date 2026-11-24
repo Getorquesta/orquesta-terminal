@@ -12,7 +12,7 @@
 import { useEffect, useId, useState } from 'react'
 import { X } from 'lucide-react'
 import { QUEUE_SECTIONS, timeAgo, type QueueState } from '@/lib/agentQueue'
-import { OrchestraScene } from './FloorOrchestra'
+import { OrchestraScene, type OrchestraActions } from './FloorOrchestra'
 
 type FloorTheme = 'orchestra' | 'robots'
 const THEME_KEY = 'orq-floor-theme'
@@ -31,6 +31,10 @@ export interface FloorAgent {
   since?: number
   note?: string
   branch?: string
+  /** What this terminal was asked to do (its first prompt, or the workstream goal). */
+  goal?: string
+  /** The plan it is following, when the program reports one. */
+  steps?: { label: string; state: 'done' | 'active' | 'todo' }[]
 }
 
 const TONE: Record<QueueState, { body: string; glow: string; screen: string; ring: string }> = {
@@ -175,11 +179,11 @@ function Bubble({ state }: { state: QueueState }) {
   return null
 }
 
-export function AgentFloor({ agents, onOpen, onClose }: {
+export function AgentFloor({ agents, onOpen, onClose, ...talk }: {
   agents: FloorAgent[]
   onOpen: (id: string) => void
   onClose: () => void
-}) {
+} & OrchestraActions & { people?: string[] }) {
   // Re-render each 30s so "waiting 4m" labels stay honest.
   const [, setTick] = useState(0)
   const [theme, setTheme] = useState<FloorTheme>('orchestra')
@@ -243,7 +247,7 @@ export function AgentFloor({ agents, onOpen, onClose }: {
       {agents.length === 0 ? (
         <div className="flex flex-1 items-center justify-center text-sm text-zinc-500">No terminals open yet.</div>
       ) : theme === 'orchestra' ? (
-        <OrchestraScene agents={agents} onOpen={onOpen} />
+        <OrchestraScene agents={agents} onOpen={onOpen} {...talk} />
       ) : (
         <div
           className="grid flex-1 auto-rows-min gap-4 overflow-auto p-5"

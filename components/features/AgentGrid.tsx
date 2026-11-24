@@ -70,6 +70,7 @@ import { looksBlocked, parseProgramStatus, type ProgramStatus, type QueueEntry, 
 import { playAlert } from '@/lib/alertSound'
 import { AgentToastStack, StatusMarker, type AgentToast } from './AgentQueue'
 import { AgentFloor, type FloorAgent } from './AgentFloor'
+import { hostedFetch } from '@/lib/tauri-proxy'
 import { notifyDesktop } from '@/lib/desktopNotify'
 import { useTerminalSearch } from './TerminalSearchBar'
 import { openExternal } from '@/lib/open-external'
@@ -1955,6 +1956,12 @@ function AgentGridInner({
   const [sidebarOpen, setSidebarOpen] = useState(true)
   const [lighting, setLighting] = useState(false)
   const [floorOpen, setFloorOpen] = useState(false)
+  // First prompt per pane: the Floor shows it as that agent's goal.
+  const [goals, setGoals] = useState<Record<string, string>>({})
+  const noteGoal = useCallback((id: string, text: string) => {
+    const t = text.trim()
+    if (t) setGoals((g) => (g[id] ? g : { ...g, [id]: t.slice(0, 240) }))
+  }, [])
   // Overlay mode's own free-floating pixel geometry (kept apart from the tiled
   // `layouts` so switching modes doesn't destroy either arrangement).
   const [floatGeom, setFloatGeom] = useState<Record<string, FloatGeom>>({})
@@ -3096,7 +3103,43 @@ function AgentGridInner({
     since: queue[c.id]?.since,
     note: queue[c.id]?.note,
     branch: c.worktree?.branch,
-  })), [cells, queue, statuses, autoNames])
+    goal: goals[c.id],
+  })), [cells, queue, statuses, autoNames, goals])
+
+  // Project members, so the Floor's podium shows people without agents too.
+  const floorProjectId = cells.find((c) => c.hostedProjectId)?.hostedProjectId ?? (hostedProjects?.length === 1 ? hostedProjects[0].id : undefined)
+  const [floorPeople, setFloorPeople] = useState<string[]>([])
+  useEffect(() => {
+    if (!floorOpen || !hostedApiUrl || !hostedToken || !floorProjectId) return
+    let cancelled = false
+    hostedFetch<{ user_id: string; profile?: { full_name: string | null; email: string | null } }[]>({
+      url: `${hostedApiUrl}/api/orquesta-cli/projects/${floorProjectId}/members`, token: hostedToken,
+    }).then((rows) => {
+      if (cancelled || !Array.isArray(rows)) return
+      setFloorPeople(rows.filter((m) => m.user_id !== hostedUserId).map((m) => m.profile?.full_name || m.profile?.email?.split('@')[0] || '').filter(Boolean))
+    }).catch(() => { /* non-fatal: the podium just shows owners */ })
+    return () => { cancelled = true }
+  }, [floorOpen, hostedApiUrl, hostedToken, hostedUserId, floorProjectId])
+
+  // Talk from the Floor: a prompt goes into that agent's PTY and is submitted.
+  const floorSend = useCallback((id: string, text: string) => {
+    const ok = cellApiRef.current.get(id)?.run(text) ?? false
+    if (ok) noteGoal(id, text)
+    return ok
+  }, [noteGoal])
+  // People live in team chat (app/page.tsx listens for this and opens it pre-filled).
+  const floorMessage = useCallback((people: string[], text: string) => {
+    window.dispatchEvent(new CustomEvent('orquesta:team-chat', { detail: { text: `${people.map((n) => `@${n}`).join(' ')} ${text}` } }))
+  }, [])
+  // A meet runs through Apuchat from one of the room's agents (or the active pane).
+  const floorMeet = useCallback((room: { agents: string[]; people: string[] }) => {
+    const names = room.agents.map((id) => paneLabel(cellsRef.current.find((c) => c.id === id)!, autoNamesRef.current))
+    const who = [...room.people.map((n) => `${n} (person)`), ...names.map((n) => `${n} (agent terminal)`)].join(', ')
+    const prompt = `Use the Apuchat daemon (MCP server named "apuchat" or legacy "rogerthat", https://meet.apuchat.com): call open_video_call to start an agent meet (voice/video)${who ? ` with ${who}` : ''}, invite them, and give me the join link.`
+    const target = room.agents[0] ?? activeCellIdRef.current ?? cellsRef.current[0]?.id
+    if (!target) return
+    if (!(cellApiRef.current.get(target)?.run(prompt))) seedWhenReady(target, prompt)
+  }, [seedWhenReady])
 
   // Publish the pane roster + busy/idle to the host page (Kanban mode).
   useEffect(() => {
@@ -3206,7 +3249,7 @@ function AgentGridInner({
       onFinished={() => markFinished(cell.id)}
       onUserInput={() => markUserInput(cell.id)}
       onSubmit={() => markUserSubmit(cell.id)}
-      onPromptTyped={(text) => onPromptTypedRef.current?.(cell.id, text)}
+      onPromptTyped={(text) => { noteGoal(cell.id, text); onPromptTypedRef.current?.(cell.id, text) }}
       onProgramStatus={(report) => applyProgramStatus(cell.id, report)}
       registerApi={(api) => {
         if (api) cellApiRef.current.set(cell.id, api)
@@ -3545,6 +3588,10 @@ function AgentGridInner({
         {floorOpen && (
           <AgentFloor
             agents={floorAgents}
+            people={floorPeople}
+            onSend={floorSend}
+            onMessage={floorMessage}
+            onMeet={floorMeet}
             onOpen={(id) => {
               setFloorOpen(false)
               setToasts((prev) => prev.filter((t) => t.cellId !== id))
