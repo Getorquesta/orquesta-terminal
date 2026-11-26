@@ -238,6 +238,10 @@ export default function TerminalWorkspacePage() {
         icon: Zap, keepOpen: true, run: () => gridRef.current?.toggleLighting(),
       },
       {
+        id: 'term-floor', group: 'Terminal', label: 'Floor — watch agents work', hint: keys.combo(keys.mod, keys.shift, 'G'),
+        icon: Bot, keepOpen: false, run: () => gridRef.current?.toggleFloor(),
+      },
+      {
         id: 'term-sidebar', group: 'Terminal', label: 'Toggle terminal list sidebar', hint: keys.combo(keys.mod, keys.shift, 'B'),
         icon: PanelLeft, keepOpen: true, run: () => gridRef.current?.toggleSidebar(),
       },
@@ -968,6 +972,18 @@ function PromptCard({
 
 function HostedTimeline({ auth }: { auth: HostedAuth }) {
   const [tab, setTab] = useState<'timeline' | 'coordination' | 'team'>('timeline')
+  // The Floor hands messages for people to team chat, pre-filled with @mentions.
+  const [chatDraft, setChatDraft] = useState<{ text: string; n: number } | null>(null)
+  useEffect(() => {
+    const onDraft = (e: Event) => {
+      const text = (e as CustomEvent<{ text?: string }>).detail?.text
+      if (!text) return
+      setTab('team')
+      setChatDraft((d) => ({ text, n: (d?.n ?? 0) + 1 }))
+    }
+    window.addEventListener('orquesta:team-chat', onDraft)
+    return () => window.removeEventListener('orquesta:team-chat', onDraft)
+  }, [])
   const [selectedProjectId, setSelectedProjectId] = useState<string>(
     auth.projects.length === 1 ? auth.projects[0].id : ''
   )
@@ -1017,7 +1033,7 @@ function HostedTimeline({ auth }: { auth: HostedAuth }) {
       ) : tab === 'coordination' ? (
         <CoordinationTab auth={auth} selectedProjectId={selectedProjectId} />
       ) : (
-        <TeamChatTab auth={auth} selectedProjectId={selectedProjectId} />
+        <TeamChatTab auth={auth} selectedProjectId={selectedProjectId} draft={chatDraft} />
       )}
     </aside>
   )
@@ -1058,7 +1074,7 @@ function teamChatHue(id: string): number {
   return h
 }
 
-function TeamChatTab({ auth, selectedProjectId }: { auth: HostedAuth; selectedProjectId: string }) {
+function TeamChatTab({ auth, selectedProjectId, draft }: { auth: HostedAuth; selectedProjectId: string; draft?: { text: string; n: number } | null }) {
   const [messages, setMessages] = useState<TeamChatMessage[]>([])
   const [members, setMembers] = useState<TeamChatMember[]>([])
   const [currentUserId, setCurrentUserId] = useState<string | null>(null)
@@ -1075,6 +1091,12 @@ function TeamChatTab({ auth, selectedProjectId }: { auth: HostedAuth; selectedPr
   // Optimistic messages not yet echoed back by the poll — kept visible so a
   // poll that races ahead of the write can't wipe a just-sent message.
   const pendingRef = useRef<TeamChatMessage[]>([])
+  // A draft handed over from the Floor: fill the box and focus it; the user sends.
+  useEffect(() => {
+    if (!draft) return
+    setInput(draft.text)
+    requestAnimationFrame(() => taRef.current?.focus())
+  }, [draft])
 
   const projectId = selectedProjectId || auth.projects[0]?.id
 

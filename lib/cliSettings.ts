@@ -16,6 +16,8 @@ export interface AlertSettings {
   sound?: boolean
   /** Show a clickable toast for the same events. */
   toast?: boolean
+  /** OS notification + taskbar attention while the app is in the background. */
+  desktop?: boolean
 }
 
 export interface OrqSettings {

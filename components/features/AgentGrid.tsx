@@ -61,7 +61,7 @@ import { RemoteCell } from './RemoteCell'
 import type { RemoteTarget } from './RemoteCell'
 import { RemoteDesktopCell } from './RemoteDesktopCell'
 import type { RemoteDesktopTarget } from './RemoteDesktopCell'
-import { PanelLeftOpen, Layers, Zap, Mail, MonitorSmartphone, Video, Radar, Mic, Dices, Shuffle, Skull, Settings } from 'lucide-react'
+import { PanelLeftOpen, Layers, Zap, Mail, MonitorSmartphone, Video, Radar, Mic, Dices, Shuffle, Skull, Settings, Bot } from 'lucide-react'
 import { SettingsPanel } from './SettingsPanel'
 import { launchConfigFor, loadSettings } from '@/lib/cliSettings'
 import { feedTypedBuffer, emptyTypedBuffer, MIN_TYPED_PROMPT, type TypedBuffer } from '@/lib/typedBuffer'
@@ -69,6 +69,9 @@ import { attachRenderer } from '@/lib/xterm-renderer'
 import { looksBlocked, parseProgramStatus, type ProgramStatus, type QueueEntry, type QueueState } from '@/lib/agentQueue'
 import { playAlert } from '@/lib/alertSound'
 import { AgentToastStack, StatusMarker, type AgentToast } from './AgentQueue'
+import { AgentFloor, type FloorAgent } from './AgentFloor'
+import { hostedFetch } from '@/lib/tauri-proxy'
+import { notifyDesktop } from '@/lib/desktopNotify'
 import { useTerminalSearch } from './TerminalSearchBar'
 import { openExternal } from '@/lib/open-external'
 import { useKeyLabels } from '@/lib/platform'
@@ -1355,6 +1358,8 @@ export interface AgentGridHandle {
   toggleOverlay: () => void
   /** Toggle "lighting": auto-surface whichever terminal last finished a prompt. */
   toggleLighting: () => void
+  /** Floor view: every agent as a robot at a workbench. */
+  toggleFloor: () => void
   /** Show/hide the left terminal-list sidebar. */
   toggleSidebar: () => void
   /** Cycle keyboard focus to the next (+1) / previous (-1) terminal. */
@@ -1950,6 +1955,13 @@ function AgentGridInner({
   const [viewMode, setViewMode] = useState<ViewMode>('grid')
   const [sidebarOpen, setSidebarOpen] = useState(true)
   const [lighting, setLighting] = useState(false)
+  const [floorOpen, setFloorOpen] = useState(false)
+  // First prompt per pane: the Floor shows it as that agent's goal.
+  const [goals, setGoals] = useState<Record<string, string>>({})
+  const noteGoal = useCallback((id: string, text: string) => {
+    const t = text.trim()
+    if (t) setGoals((g) => (g[id] ? g : { ...g, [id]: t.slice(0, 240) }))
+  }, [])
   // Overlay mode's own free-floating pixel geometry (kept apart from the tiled
   // `layouts` so switching modes doesn't destroy either arrangement).
   const [floatGeom, setFloatGeom] = useState<Record<string, FloatGeom>>({})
@@ -2668,6 +2680,8 @@ function AgentGridInner({
       cellApiRef.current.get(id)?.focus()
     }, 0)
   }, [bringToFront, setActive])
+  const focusCellRef = useRef(focusCellFromList)
+  focusCellRef.current = focusCellFromList
 
   // Cycle keyboard focus through the open terminals (Ctrl+Tab / Ctrl+Shift+Tab),
   // in sidebar order, wrapping around. In overlay the target is also raised.
@@ -2705,10 +2719,15 @@ function AgentGridInner({
   const raiseAlert = useCallback((id: string, kind: 'done' | 'blocked', note?: string) => {
     const alerts = loadSettings().alerts
     if (alerts?.sound ?? true) playAlert(kind)
-    if (!(alerts?.toast ?? true)) return
     const cell = cellsRef.current.find((c) => c.id === id)
     if (!cell) return
-    const toast = { key: ++toastKeyRef.current, cellId: id, kind, title: paneLabel(cell, autoNamesRef.current), note }
+    const title = paneLabel(cell, autoNamesRef.current)
+    // App in the background: the in-app toast is invisible, so ask the OS.
+    if ((alerts?.desktop ?? true) && !document.hasFocus()) {
+      notifyDesktop(kind === 'blocked' ? `${title} needs you` : `${title} finished`, note, () => focusCellRef.current(id))
+    }
+    if (!(alerts?.toast ?? true)) return
+    const toast = { key: ++toastKeyRef.current, cellId: id, kind, title, note }
     setToasts((prev) => [...prev.filter((t) => t.cellId !== id), toast])
   }, [])
 
@@ -2877,6 +2896,7 @@ function AgentGridInner({
     return !v
   }), [resetSpotlight])
   const toggleSidebar = useCallback(() => setSidebarOpen((v) => !v), [])
+  const toggleFloor = useCallback(() => setFloorOpen((v) => !v), [])
 
   // While in overlay mode, any pane added later still needs a floating geometry.
   useEffect(() => {
@@ -2903,6 +2923,7 @@ function AgentGridInner({
       if (mod && e.shiftKey && k === 'o') { e.preventDefault(); toggleOverlay() }
       else if (mod && e.shiftKey && k === 'y') { e.preventDefault(); toggleLighting() }
       else if (mod && e.shiftKey && k === 'b') { e.preventDefault(); toggleSidebar() }
+      else if (mod && e.shiftKey && k === 'g') { e.preventDefault(); toggleFloor() }
       // Ctrl+← / Ctrl+→ cycle terminals
       if ((e.ctrlKey) && !e.shiftKey && !e.altKey && !e.metaKey) {
         if (e.key === 'ArrowLeft') { e.preventDefault(); e.stopImmediatePropagation(); cycleActive(-1); return }
@@ -2911,13 +2932,13 @@ function AgentGridInner({
     }
     window.addEventListener('keydown', onKey, true)
     return () => window.removeEventListener('keydown', onKey, true)
-  }, [toggleOverlay, toggleLighting, toggleSidebar, cycleActive])
+  }, [toggleOverlay, toggleLighting, toggleSidebar, toggleFloor, cycleActive])
 
   // Expose imperative controls to the host page (palette / buttons).
   useEffect(() => {
     apiRef.current = {
       addTerminal: () => addCell(), arrange, closeActive, importSessions, openRemote, openRemoteDesktop,
-      toggleOverlay, toggleLighting, toggleSidebar, cycleTerminal: cycleActive,
+      toggleOverlay, toggleLighting, toggleSidebar, toggleFloor, cycleTerminal: cycleActive,
       searchActive: () => {
         const id = activeCellIdRef.current
         if (id) cellApiRef.current.get(id)?.search?.()
@@ -2941,7 +2962,7 @@ function AgentGridInner({
         return typeof api?.tail === 'function' ? api.tail() : ''
       },
     }
-  }, [apiRef, addCell, arrange, closeActive, importSessions, openRemote, openRemoteDesktop, toggleOverlay, toggleLighting, toggleSidebar, cycleActive, setActive, armTurn])
+  }, [apiRef, addCell, arrange, closeActive, importSessions, openRemote, openRemoteDesktop, toggleOverlay, toggleLighting, toggleSidebar, toggleFloor, cycleActive, setActive, armTurn])
 
   // Grid-level keyboard shortcuts for when NO terminal is focused (the focused
   // case is handled inside the pane so the keys don't reach the shell).
@@ -3074,6 +3095,52 @@ function AgentGridInner({
   const autoNames = useMemo(() => autoPaneNames(cells), [cells])
   autoNamesRef.current = autoNames
 
+  const floorAgents = useMemo<FloorAgent[]>(() => cells.filter((c) => !c.desktop).map((c) => ({
+    id: c.id,
+    name: paneLabel(c, autoNames),
+    cli: c.remote ? 'remote' : (CLI_OPTIONS.find((o) => o.value === c.cliType)?.label ?? c.cliType),
+    state: queue[c.id]?.state ?? (statuses[c.id] === 'running' ? 'working' : 'idle'),
+    since: queue[c.id]?.since,
+    note: queue[c.id]?.note,
+    branch: c.worktree?.branch,
+    goal: goals[c.id],
+  })), [cells, queue, statuses, autoNames, goals])
+
+  // Project members, so the Floor's podium shows people without agents too.
+  const floorProjectId = cells.find((c) => c.hostedProjectId)?.hostedProjectId ?? (hostedProjects?.length === 1 ? hostedProjects[0].id : undefined)
+  const [floorPeople, setFloorPeople] = useState<string[]>([])
+  useEffect(() => {
+    if (!floorOpen || !hostedApiUrl || !hostedToken || !floorProjectId) return
+    let cancelled = false
+    hostedFetch<{ user_id: string; profile?: { full_name: string | null; email: string | null } }[]>({
+      url: `${hostedApiUrl}/api/orquesta-cli/projects/${floorProjectId}/members`, token: hostedToken,
+    }).then((rows) => {
+      if (cancelled || !Array.isArray(rows)) return
+      setFloorPeople(rows.filter((m) => m.user_id !== hostedUserId).map((m) => m.profile?.full_name || m.profile?.email?.split('@')[0] || '').filter(Boolean))
+    }).catch(() => { /* non-fatal: the podium just shows owners */ })
+    return () => { cancelled = true }
+  }, [floorOpen, hostedApiUrl, hostedToken, hostedUserId, floorProjectId])
+
+  // Talk from the Floor: a prompt goes into that agent's PTY and is submitted.
+  const floorSend = useCallback((id: string, text: string) => {
+    const ok = cellApiRef.current.get(id)?.run(text) ?? false
+    if (ok) noteGoal(id, text)
+    return ok
+  }, [noteGoal])
+  // People live in team chat (app/page.tsx listens for this and opens it pre-filled).
+  const floorMessage = useCallback((people: string[], text: string) => {
+    window.dispatchEvent(new CustomEvent('orquesta:team-chat', { detail: { text: `${people.map((n) => `@${n}`).join(' ')} ${text}` } }))
+  }, [])
+  // A meet runs through Apuchat from one of the room's agents (or the active pane).
+  const floorMeet = useCallback((room: { agents: string[]; people: string[] }) => {
+    const names = room.agents.map((id) => paneLabel(cellsRef.current.find((c) => c.id === id)!, autoNamesRef.current))
+    const who = [...room.people.map((n) => `${n} (person)`), ...names.map((n) => `${n} (agent terminal)`)].join(', ')
+    const prompt = `Use the Apuchat daemon (MCP server named "apuchat" or legacy "rogerthat", https://meet.apuchat.com): call open_video_call to start an agent meet (voice/video)${who ? ` with ${who}` : ''}, invite them, and give me the join link.`
+    const target = room.agents[0] ?? activeCellIdRef.current ?? cellsRef.current[0]?.id
+    if (!target) return
+    if (!(cellApiRef.current.get(target)?.run(prompt))) seedWhenReady(target, prompt)
+  }, [seedWhenReady])
+
   // Publish the pane roster + busy/idle to the host page (Kanban mode).
   useEffect(() => {
     if (!onPanesChange) return
@@ -3182,7 +3249,7 @@ function AgentGridInner({
       onFinished={() => markFinished(cell.id)}
       onUserInput={() => markUserInput(cell.id)}
       onSubmit={() => markUserSubmit(cell.id)}
-      onPromptTyped={(text) => onPromptTypedRef.current?.(cell.id, text)}
+      onPromptTyped={(text) => { noteGoal(cell.id, text); onPromptTypedRef.current?.(cell.id, text) }}
       onProgramStatus={(report) => applyProgramStatus(cell.id, report)}
       registerApi={(api) => {
         if (api) cellApiRef.current.set(cell.id, api)
@@ -3323,6 +3390,14 @@ function AgentGridInner({
                   <Zap className="h-4 w-4" /> <span className="flex-1">Lighting</span>
                   {lighting && <Check className="h-3.5 w-3.5" />}
                   <span className="font-mono text-[10px] text-zinc-400">{keys.combo(keys.mod, keys.shift, 'Y')}</span>
+                </button>
+                <button
+                  onClick={() => { toggleFloor(); setViewMenuOpen(false) }}
+                  className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs hover:bg-white/5 ${floorOpen ? 'text-emerald-300' : 'text-zinc-200'}`}
+                >
+                  <Bot className="h-4 w-4" /> <span className="flex-1">Floor (watch agents)</span>
+                  {floorOpen && <Check className="h-3.5 w-3.5" />}
+                  <span className="font-mono text-[10px] text-zinc-400">{keys.combo(keys.mod, keys.shift, 'G')}</span>
                 </button>
                 <button
                   onClick={() => { arrange(); setViewMenuOpen(false) }}
@@ -3509,6 +3584,23 @@ function AgentGridInner({
           )
         })}
 
+        {/* Floor view covers the panes without unmounting them (PTYs keep running). */}
+        {floorOpen && (
+          <AgentFloor
+            agents={floorAgents}
+            people={floorPeople}
+            onSend={floorSend}
+            onMessage={floorMessage}
+            onMeet={floorMeet}
+            onOpen={(id) => {
+              setFloorOpen(false)
+              setToasts((prev) => prev.filter((t) => t.cellId !== id))
+              focusCellFromList(id)
+            }}
+            onClose={() => setFloorOpen(false)}
+          />
+        )}
+
         {/* (Roulette controls live in the toolbar now — see the View-menu row.) */}
 
         {/* Death countdown — pointer-events-none so keystrokes still reach the
@@ -3552,7 +3644,7 @@ export const AgentGrid = forwardRef<AgentGridHandle, AgentGridProps>(function Ag
     addTerminal() {}, arrange() {}, closeActive() {}, importSessions() {}, searchActive() {},
     openRemote: () => '',
     openRemoteDesktop: () => '',
-    toggleOverlay() {}, toggleLighting() {}, toggleSidebar() {}, cycleTerminal() {},
+    toggleOverlay() {}, toggleLighting() {}, toggleSidebar() {}, toggleFloor() {}, cycleTerminal() {},
     dispatchPrompt: () => false,
     paneTail: () => '',
   })
@@ -3567,6 +3659,7 @@ export const AgentGrid = forwardRef<AgentGridHandle, AgentGridProps>(function Ag
     toggleOverlay: () => apiRef.current.toggleOverlay(),
     toggleLighting: () => apiRef.current.toggleLighting(),
     toggleSidebar: () => apiRef.current.toggleSidebar(),
+    toggleFloor: () => apiRef.current.toggleFloor(),
     cycleTerminal: (dir) => apiRef.current.cycleTerminal(dir),
     dispatchPrompt: (cellId, text) => apiRef.current.dispatchPrompt(cellId, text),
     paneTail: (cellId) => apiRef.current.paneTail(cellId),
